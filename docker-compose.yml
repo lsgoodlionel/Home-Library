@@ -1,0 +1,89 @@
+services:
+
+  # ── Backend (FastAPI + SQLite) ───────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    restart: unless-stopped
+    environment:
+      BACKEND_HOST: "0.0.0.0"
+      BACKEND_PORT: "8000"
+      DATABASE_URL: "sqlite:////data/home_library.sqlite3"
+      APP_SECRET_KEY: "${APP_SECRET_KEY:-change-this-secret-in-production}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost}"
+      INITIAL_ADMIN_USERNAME: "${INITIAL_ADMIN_USERNAME:-admin}"
+      INITIAL_ADMIN_PASSWORD: "${INITIAL_ADMIN_PASSWORD:-change-me}"
+      UPLOAD_DIR: "/app/uploads"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434}"
+      OLLAMA_DEFAULT_MODEL: "${OLLAMA_DEFAULT_MODEL:-qwen2.5}"
+      OLLAMA_OPTIONAL: "${OLLAMA_OPTIONAL:-true}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    volumes:
+      - db_data:/data
+      - uploads:/app/uploads
+      - backups:/app/backups
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── Frontend + Nginx ─────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: "/api"
+        VITE_APP_TITLE: "${VITE_APP_TITLE:-家藏书库}"
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - uploads:/app/uploads:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # ── Ollama (optional, enable with --profile ollama) ───────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    # GPU support: uncomment if the host has NVIDIA drivers + nvidia-container-toolkit
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ── PostgreSQL (optional, enable with --profile postgres) ────────────────────
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-home_library}"
+      POSTGRES_USER: "${POSTGRES_USER:-library}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-change-me}"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-library}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+volumes:
+  db_data:
+  uploads:
+  backups:
+  ollama_models:
+  pg_data:
