@@ -1,0 +1,239 @@
+"""Orchestration service for external book search.
+
+Responsibilities:
+- Fan out search/ISBN queries to all configured providers concurrently.
+- Deduplicate candidates by ISBN (keep the most complete result per ISBN).
+- Cache results in the external_book_results table (24-hour TTL for ISBN,
+  1-hour TTL for keyword queries).
+- Convert an ExternalBookCandidate to a BookCreate for import.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from app.models.external_book_result import ExternalBookResult
+from app.schemas.external_book import ExternalBookCandidate
+from app.services.external_books import BookProvider, get_all_providers
+
+logger = logging.getLogger(__name__)
+
+_ISBN_CACHE_TTL = timedelta(hours=24)
+_SEARCH_CACHE_TTL = timedelta(hours=1)
+
+
+# ---------------------------------------------------------------------------
+# ISBN normalisation
+# ---------------------------------------------------------------------------
+
+def clean_isbn(value: str) -> str:
+    return "".join(c for c in value if c.isdigit() or c.upper() == "X")
+
+
+# ---------------------------------------------------------------------------
+# Cache helpers
+# ---------------------------------------------------------------------------
+
+def _now() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def _load_cache(db: Session, cache_key: str, ttl: timedelta) -> list[ExternalBookCandidate] | None:
+    cutoff = _now() - ttl
+    rows = (
+        db.query(ExternalBookResult)
+        .filter(
+            ExternalBookResult.query == cache_key,
+            ExternalBookResult.created_at >= cutoff,
+        )
+        .all()
+    )
+    if not rows:
+        return None
+    candidates: list[ExternalBookCandidate] = []
+    for row in rows:
+        try:
+            candidates.append(ExternalBookCandidate.model_validate_json(row.normalized_data))
+        except Exception as exc:
+            logger.debug("Cache deserialization error for row %s: %s", row.id, exc)
+    return candidates if candidates else None
+
+
+def _save_cache(
+    db: Session,
+    cache_key: str,
+    candidates: list[ExternalBookCandidate],
+) -> None:
+    for candidate in candidates:
+        raw_json = json.dumps(candidate.raw)
+        norm_json = candidate.model_dump_json(exclude={"raw"})
+        row = ExternalBookResult(
+            query=cache_key,
+            source=candidate.source,
+            source_id=candidate.source_id,
+            raw_data=raw_json,
+            normalized_data=norm_json,
+            created_at=_now(),
+        )
+        db.add(row)
+    try:
+        db.commit()
+    except Exception as exc:
+        logger.warning("Failed to cache search results: %s", exc)
+        db.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Deduplication
+# ---------------------------------------------------------------------------
+
+def _deduplicate(candidates: list[ExternalBookCandidate]) -> list[ExternalBookCandidate]:
+    """Keep one candidate per ISBN (the one with more non-None fields)."""
+    seen_isbn: dict[str, ExternalBookCandidate] = {}
+    no_isbn: list[ExternalBookCandidate] = []
+
+    for c in candidates:
+        if not c.isbn:
+            no_isbn.append(c)
+            continue
+        existing = seen_isbn.get(c.isbn)
+        if existing is None:
+            seen_isbn[c.isbn] = c
+        else:
+            def _score(item: ExternalBookCandidate) -> int:
+                return sum(
+                    1
+                    for v in (
+                        item.title, item.author, item.publisher,
+                        item.publish_year, item.cover_url, item.summary,
+                        item.pages,
+                    )
+                    if v is not None
+                )
+
+            if _score(c) > _score(existing):
+                seen_isbn[c.isbn] = c
+
+    return list(seen_isbn.values()) + no_isbn
+
+
+# ---------------------------------------------------------------------------
+# Provider fan-out
+# ---------------------------------------------------------------------------
+
+async def _run_provider_search(
+    provider: BookProvider, query: str, limit: int
+) -> list[ExternalBookCandidate]:
+    try:
+        return await provider.search(query, limit)
+    except Exception as exc:
+        logger.warning("Provider %s search error: %s", provider.name, exc)
+        return []
+
+
+async def _run_provider_isbn(
+    provider: BookProvider, isbn: str
+) -> list[ExternalBookCandidate]:
+    try:
+        return await provider.lookup_isbn(isbn)
+    except Exception as exc:
+        logger.warning("Provider %s isbn error: %s", provider.name, exc)
+        return []
+
+
+async def _fetch_search(
+    query: str,
+    limit: int,
+    providers: list[BookProvider],
+) -> list[ExternalBookCandidate]:
+    tasks = [_run_provider_search(p, query, limit) for p in providers]
+    results_per_provider: list[list[ExternalBookCandidate]] = await asyncio.gather(*tasks)
+    combined = [c for batch in results_per_provider for c in batch]
+    return _deduplicate(combined)[:limit]
+
+
+async def _fetch_isbn(
+    isbn: str,
+    providers: list[BookProvider],
+) -> list[ExternalBookCandidate]:
+    tasks = [_run_provider_isbn(p, isbn) for p in providers]
+    results_per_provider: list[list[ExternalBookCandidate]] = await asyncio.gather(*tasks)
+    combined = [c for batch in results_per_provider for c in batch]
+    return _deduplicate(combined)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+async def search_books(
+    db: Session,
+    query: str,
+    limit: int = 10,
+    providers: list[BookProvider] | None = None,
+) -> list[ExternalBookCandidate]:
+    cache_key = f"query:{query}"
+    cached = _load_cache(db, cache_key, _SEARCH_CACHE_TTL)
+    if cached is not None:
+        return cached[:limit]
+
+    active_providers = providers if providers is not None else get_all_providers()
+    candidates = await _fetch_search(query, limit, active_providers)
+    if candidates:
+        _save_cache(db, cache_key, candidates)
+    return candidates
+
+
+async def lookup_isbn(
+    db: Session,
+    isbn: str,
+    providers: list[BookProvider] | None = None,
+) -> list[ExternalBookCandidate]:
+    clean = clean_isbn(isbn)
+    cache_key = f"isbn:{clean}"
+    cached = _load_cache(db, cache_key, _ISBN_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    active_providers = providers if providers is not None else get_all_providers()
+    candidates = await _fetch_isbn(clean, active_providers)
+    if candidates:
+        _save_cache(db, cache_key, candidates)
+    return candidates
+
+
+def candidate_to_book_create_dict(
+    candidate: ExternalBookCandidate,
+    category_id: int | None = None,
+    location_id: int | None = None,
+) -> dict[str, Any]:
+    """Map an ExternalBookCandidate to a dict suitable for BookCreate."""
+    source_map = {
+        "open_library": "isbn_lookup" if candidate.isbn else "title_search",
+        "google_books": "isbn_lookup" if candidate.isbn else "title_search",
+    }
+    source = source_map.get(candidate.source, "title_search")
+
+    return {
+        "title": candidate.title,
+        "subtitle": candidate.subtitle,
+        "author": candidate.author,
+        "translator": None,
+        "publisher": candidate.publisher,
+        "publish_year": candidate.publish_year,
+        "isbn": candidate.isbn,
+        "language": candidate.language,
+        "pages": candidate.pages,
+        "cover_url": candidate.cover_url,
+        "summary": candidate.summary,
+        "category_id": category_id,
+        "location_id": location_id,
+        "source": source,
+        "tag_names": [],
+    }
