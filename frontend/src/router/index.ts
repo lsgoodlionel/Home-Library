@@ -6,7 +6,9 @@ import BookCreatePage from '@/pages/books/BookCreatePage.vue';
 import BookDetailPage from '@/pages/books/BookDetailPage.vue';
 import BookEditPage from '@/pages/books/BookEditPage.vue';
 import BooksListPage from '@/pages/books/BooksListPage.vue';
+import CategoriesPage from '@/pages/categories/CategoriesPage.vue';
 import DashboardPage from '@/pages/dashboard/DashboardPage.vue';
+import LocationsPage from '@/pages/locations/LocationsPage.vue';
 import LoginPage from '@/pages/login/LoginPage.vue';
 import { useAuthStore } from '@/stores/auth';
 
@@ -67,6 +69,18 @@ const router = createRouter({
           name: 'book-edit',
           component: BookEditPage,
           meta: { title: '编辑图书' },
+        },
+        {
+          path: 'categories',
+          name: 'categories',
+          component: CategoriesPage,
+          meta: { title: '分类管理', requiresAuth: true, adminOnly: true },
+        },
+        {
+          path: 'locations',
+          name: 'locations',
+          component: LocationsPage,
+          meta: { title: '位置管理', requiresAuth: true, adminOnly: true },
         },
       ],
     },
