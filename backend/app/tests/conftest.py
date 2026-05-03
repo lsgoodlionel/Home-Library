@@ -18,6 +18,9 @@ from app.core.security import create_access_token, hash_password
 from app.db.session import get_db
 from app.main import app as fastapi_app
 from app.models.base import Base
+from app.models.book import Book
+from app.models.category import Category
+from app.models.location import Location
 from app.models.user import User
 
 del _models_module
@@ -93,6 +96,76 @@ def make_user(
     db.commit()
     db.refresh(user)
     return user, password
+
+
+def make_category(
+    db: Session,
+    *,
+    code: str = "C91",
+    name: str = "社会学",
+    parent_id: int | None = None,
+    is_system: bool = False,
+) -> Category:
+    category = Category(
+        code=code,
+        name=name,
+        parent_id=parent_id,
+        is_system=is_system,
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    db.add(category)
+    db.commit()
+    db.refresh(category)
+    return category
+
+
+def make_location(
+    db: Session,
+    *,
+    room: str = "书房",
+    shelf: str = "A 架",
+    layer: str | None = "第 1 层",
+    position: str | None = None,
+) -> Location:
+    parts = [room, shelf, layer, position]
+    location = Location(
+        room=room,
+        shelf=shelf,
+        layer=layer,
+        position=position,
+        full_path=" / ".join(part for part in parts if part),
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    db.add(location)
+    db.commit()
+    db.refresh(location)
+    return location
+
+
+def make_book(
+    db: Session,
+    *,
+    title: str = "乡土中国",
+    category_id: int | None = None,
+    location_id: int | None = None,
+    status: str = "available",
+    read_status: str = "unread",
+) -> Book:
+    book = Book(
+        title=title,
+        category_id=category_id,
+        location_id=location_id,
+        status=status,
+        read_status=read_status,
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    db.add(book)
+    db.commit()
+    db.refresh(book)
+    return book
 
 
 @pytest.fixture(scope="function")

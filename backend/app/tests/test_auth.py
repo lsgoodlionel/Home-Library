@@ -19,6 +19,16 @@ class TestLogin:
         assert body["user"]["username"] == user.username
         assert body["user"]["role"] == user.role
 
+    def test_login_token_can_fetch_current_user(self, client: TestClient, db: Session) -> None:
+        user, password = make_user(db, role="member")
+
+        login = client.post("/api/auth/login", json={"username": user.username, "password": password})
+        me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {login.json()['access_token']}"})
+
+        assert me.status_code == 200
+        assert me.json()["id"] == user.id
+        assert me.json()["username"] == user.username
+
     def test_wrong_password(self, client: TestClient, db: Session) -> None:
         user, _ = make_user(db)
         resp = client.post("/api/auth/login", json={"username": user.username, "password": "wrongpass"})

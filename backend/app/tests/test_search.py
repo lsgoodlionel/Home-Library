@@ -240,6 +240,23 @@ class TestSearchBooksRoute:
         assert resp.status_code == 200
         assert resp.json()["items"] == []
 
+    def test_provider_failure_degrades_to_empty_results(self, db_session: Session) -> None:
+        mock_provider = MagicMock()
+        mock_provider.name = "broken"
+        mock_provider.search = AsyncMock(side_effect=RuntimeError("network down"))
+
+        results = asyncio.run(
+            external_book_service.search_books(
+                db_session,
+                query="乡土中国",
+                limit=5,
+                providers=[mock_provider],
+            )
+        )
+
+        assert results == []
+        mock_provider.search.assert_awaited_once()
+
 
 class TestIsbnRoute:
     def test_isbn_lookup(self, client: TestClient) -> None:
@@ -271,6 +288,22 @@ class TestIsbnRoute:
             resp = client.get("/api/search/isbn/0000000000000")
         assert resp.status_code == 200
         assert resp.json()["items"] == []
+
+    def test_isbn_provider_failure_degrades_to_empty_results(self, db_session: Session) -> None:
+        mock_provider = MagicMock()
+        mock_provider.name = "broken"
+        mock_provider.lookup_isbn = AsyncMock(side_effect=RuntimeError("timeout"))
+
+        results = asyncio.run(
+            external_book_service.lookup_isbn(
+                db_session,
+                isbn="9787108045269",
+                providers=[mock_provider],
+            )
+        )
+
+        assert results == []
+        mock_provider.lookup_isbn.assert_awaited_once()
 
 
 class TestImportResultRoute:

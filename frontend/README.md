@@ -30,6 +30,8 @@ http://127.0.0.1:5173
 
 ```bash
 npm run typecheck
+npm run test
+npm run test:e2e
 npm run build
 npm run preview
 ```

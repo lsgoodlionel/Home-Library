@@ -80,6 +80,19 @@ def test_return_borrow_marks_book_available(client: TestClient, db: Session, mem
     assert book.status == "available"
 
 
+def test_return_borrow_twice_returns_conflict(client: TestClient, db: Session, member_headers: dict[str, str]) -> None:
+    book = _book(db)
+    created = client.post("/api/borrow", json=_payload(book.id), headers=member_headers).json()
+    return_payload = {"returned_at": "2026-05-10", "note": "已归还"}
+
+    first = client.post(f"/api/borrow/{created['id']}/return", json=return_payload, headers=member_headers)
+    second = client.post(f"/api/borrow/{created['id']}/return", json=return_payload, headers=member_headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "CONFLICT"
+
+
 def test_list_borrow_records_filters(client: TestClient, db: Session, member_headers: dict[str, str]) -> None:
     book_a = _book(db, "A")
     book_b = _book(db, "B")

@@ -90,6 +90,36 @@ def test_non_owner_cannot_update_note(client: TestClient, db: Session) -> None:
     assert response.status_code == 403
 
 
+def test_non_owner_cannot_delete_note(client: TestClient, db: Session) -> None:
+    owner, _ = make_user(db)
+    other, _ = make_user(db)
+    book = _book(db)
+    note = ReadingNote(
+        book_id=book.id,
+        user_id=owner.id,
+        title="私有笔记",
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    db.add(note)
+    db.commit()
+
+    response = client.delete(
+        f"/api/notes/{note.id}",
+        headers={"Authorization": f"Bearer {create_access_token(other.id)}"},
+    )
+
+    assert response.status_code == 403
+    assert db.get(ReadingNote, note.id) is not None
+
+
+def test_list_notes_for_missing_book_returns_404(client: TestClient, member_headers: dict[str, str]) -> None:
+    response = client.get("/api/books/99999/notes", headers=member_headers)
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "BOOK_NOT_FOUND"
+
+
 def test_admin_can_delete_any_note(client: TestClient, db: Session, admin_headers: dict[str, str]) -> None:
     owner, _ = make_user(db)
     book = _book(db)

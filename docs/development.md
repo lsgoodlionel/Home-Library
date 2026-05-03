@@ -105,8 +105,15 @@ npm run preview              # 本地预览构建产物
 ### 类型检查与 Lint
 
 ```bash
-npm run type-check
-npm run lint
+npm run typecheck
+```
+
+### 前端测试
+
+```bash
+npm run typecheck
+npm run test                 # Vitest 单元测试
+npm run test:e2e             # Playwright E2E 冒烟测试
 ```
 
 ## Ollama（可选）
