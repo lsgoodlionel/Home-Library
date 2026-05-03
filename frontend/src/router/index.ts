@@ -13,6 +13,7 @@ import LocationsPage from '@/pages/locations/LocationsPage.vue';
 import LoginPage from '@/pages/login/LoginPage.vue';
 import ReadingPage from '@/pages/reading/ReadingPage.vue';
 import SmartImportPage from '@/pages/smart-import/SmartImportPage.vue';
+import StatsPage from '@/pages/stats/StatsPage.vue';
 import { useAuthStore } from '@/stores/auth';
 
 function isAdminRoute(to: RouteLocationNormalized) {
@@ -102,6 +103,12 @@ const router = createRouter({
           name: 'locations',
           component: LocationsPage,
           meta: { title: '位置管理', requiresAuth: true, adminOnly: true },
+        },
+        {
+          path: 'stats',
+          name: 'stats',
+          component: StatsPage,
+          meta: { title: '统计分析', requiresAuth: true },
         },
       ],
     },
