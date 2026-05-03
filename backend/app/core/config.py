@@ -1,20 +1,45 @@
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "Home Library"
-    app_version: str = "0.1.0"
-    environment: str = "development"
-    api_prefix: str = "/api"
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
-    database_url: str = "sqlite:///./home_library.db"
+    app_name: str = Field(
+        default="Home Library",
+        validation_alias=AliasChoices("HOME_LIBRARY_APP_NAME", "APP_NAME"),
+    )
+    app_version: str = Field(
+        default="0.1.0",
+        validation_alias=AliasChoices("HOME_LIBRARY_APP_VERSION", "APP_VERSION"),
+    )
+    environment: str = Field(
+        default="development",
+        validation_alias=AliasChoices("HOME_LIBRARY_ENVIRONMENT", "APP_ENV", "ENVIRONMENT"),
+    )
+    api_prefix: str = Field(
+        default="/api",
+        validation_alias=AliasChoices("HOME_LIBRARY_API_PREFIX", "API_PREFIX"),
+    )
+    cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:5173"],
+        validation_alias=AliasChoices("HOME_LIBRARY_CORS_ORIGINS", "CORS_ORIGINS"),
+    )
+    database_url: str = Field(
+        default="sqlite:///./home_library.db",
+        validation_alias=AliasChoices("HOME_LIBRARY_DATABASE_URL", "DATABASE_URL"),
+    )
+    initial_admin_username: str = Field(
+        default="admin",
+        validation_alias=AliasChoices("HOME_LIBRARY_INITIAL_ADMIN_USERNAME", "INITIAL_ADMIN_USERNAME"),
+    )
+    initial_admin_password: str = Field(
+        default="change-me",
+        validation_alias=AliasChoices("HOME_LIBRARY_INITIAL_ADMIN_PASSWORD", "INITIAL_ADMIN_PASSWORD"),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
-        env_prefix="HOME_LIBRARY_",
         extra="ignore",
     )
 
