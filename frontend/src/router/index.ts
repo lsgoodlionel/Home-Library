@@ -10,6 +10,7 @@ import CategoriesPage from '@/pages/categories/CategoriesPage.vue';
 import DashboardPage from '@/pages/dashboard/DashboardPage.vue';
 import LocationsPage from '@/pages/locations/LocationsPage.vue';
 import LoginPage from '@/pages/login/LoginPage.vue';
+import SmartImportPage from '@/pages/smart-import/SmartImportPage.vue';
 import { useAuthStore } from '@/stores/auth';
 
 function isAdminRoute(to: RouteLocationNormalized) {
@@ -69,6 +70,12 @@ const router = createRouter({
           name: 'book-edit',
           component: BookEditPage,
           meta: { title: '编辑图书' },
+        },
+        {
+          path: 'smart-import',
+          name: 'smart-import',
+          component: SmartImportPage,
+          meta: { title: '智能入库' },
         },
         {
           path: 'categories',
