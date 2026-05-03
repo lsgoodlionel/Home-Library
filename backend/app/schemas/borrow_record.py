@@ -13,7 +13,6 @@ class BookBasicInfo(BaseModel):
     id: int
     title: str
     author: Optional[str] = None
-    isbn: Optional[str] = None
     cover_url: Optional[str] = None
 
     model_config = {"from_attributes": True}
@@ -39,12 +38,12 @@ class BorrowReturn(BaseModel):
 
 class BorrowRecordResponse(BorrowRecordBase):
     id: int
+    book: Optional[BookBasicInfo] = None
     returned_at: Optional[date] = None
     status: BorrowStatus
     created_by: Optional[int] = None
     created_at: datetime
     updated_at: datetime
-    book: Optional[BookBasicInfo] = None
 
     model_config = {"from_attributes": True}
 

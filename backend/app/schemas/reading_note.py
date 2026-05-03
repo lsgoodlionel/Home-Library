@@ -9,6 +9,15 @@ from pydantic import BaseModel, field_validator
 ReadStatus = Literal["unread", "reading", "read", "paused"]
 
 
+class BookBasicInfo(BaseModel):
+    id: int
+    title: str
+    author: Optional[str] = None
+    cover_url: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
 class ReadingNoteBase(BaseModel):
     title: str
     content: Optional[str] = None
@@ -62,6 +71,7 @@ class ReadingNoteUpdate(BaseModel):
 class ReadingNoteResponse(ReadingNoteBase):
     id: int
     book_id: int
+    book: Optional[BookBasicInfo] = None
     user_id: int
     created_at: datetime
     updated_at: datetime
