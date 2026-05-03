@@ -6,16 +6,21 @@ __pycache__/
 .mypy_cache/
 .venv/
 venv/
+*.egg-info/
+dist/
+build/
 
 # Node
 node_modules/
 dist/
 .vite/
 coverage/
+*.local
 
 # Environment
 .env
 .env.local
+.env.*.local
 
 # Databases and generated files
 *.sqlite
@@ -24,8 +29,15 @@ coverage/
 uploads/
 backups/
 
+# Logs
+*.log
+logs/
+
 # OS and editor
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/
+*.swp
+*.swo
 
