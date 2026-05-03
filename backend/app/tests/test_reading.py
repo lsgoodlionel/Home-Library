@@ -23,102 +23,173 @@ def _book(db: Session) -> Book:
     return book
 
 
-def _note_payload(title: str = "第一章") -> dict:
+def _note_payload(title: str = "第一章笔记") -> dict:
     return {
         "title": title,
-        "content": "读书笔记",
-        "progress": 20,
+        "content": "这是 **Markdown** 笔记内容。",
+        "progress": 30,
         "rating": 4,
         "started_at": "2026-05-01",
-        "finished_at": None,
     }
 
 
-def test_notes_require_auth(client: TestClient, db: Session) -> None:
-    book = _book(db)
+class TestGetBookNotes:
+    def test_empty(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        book = _book(db)
+        resp = client.get(f"/api/books/{book.id}/notes", headers=member_headers)
+        assert resp.status_code == 200
+        assert resp.json() == []
 
-    response = client.get(f"/api/books/{book.id}/notes")
+    def test_book_not_found(self, client: TestClient, member_headers: dict) -> None:
+        resp = client.get("/api/books/99999/notes", headers=member_headers)
+        assert resp.status_code == 404
 
-    assert response.status_code == 401
-
-
-def test_create_and_list_book_notes(client: TestClient, db: Session, member_headers: dict[str, str]) -> None:
-    book = _book(db)
-
-    created = client.post(f"/api/books/{book.id}/notes", json=_note_payload(), headers=member_headers)
-    listed = client.get(f"/api/books/{book.id}/notes", headers=member_headers)
-
-    assert created.status_code == 201
-    assert created.json()["book"]["title"] == book.title
-    assert listed.status_code == 200
-    assert listed.json()[0]["title"] == "第一章"
+    def test_no_auth(self, client: TestClient, db: Session) -> None:
+        book = _book(db)
+        resp = client.get(f"/api/books/{book.id}/notes")
+        assert resp.status_code == 401
 
 
-def test_note_owner_can_update(client: TestClient, db: Session) -> None:
-    user, _ = make_user(db)
-    headers = {"Authorization": f"Bearer {create_access_token(user.id)}"}
-    book = _book(db)
-    note_id = client.post(f"/api/books/{book.id}/notes", json=_note_payload(), headers=headers).json()["id"]
+class TestCreateNote:
+    def test_success(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        book = _book(db)
+        resp = client.post(f"/api/books/{book.id}/notes", json=_note_payload(), headers=member_headers)
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["book_id"] == book.id
+        assert body["title"] == "第一章笔记"
+        assert body["progress"] == 30
+        assert body["rating"] == 4
+        assert "user_id" in body
 
-    response = client.patch(f"/api/notes/{note_id}", json={"title": "第二章", "progress": 50}, headers=headers)
+    def test_book_not_found(self, client: TestClient, member_headers: dict) -> None:
+        resp = client.post("/api/books/99999/notes", json=_note_payload(), headers=member_headers)
+        assert resp.status_code == 404
 
-    assert response.status_code == 200
-    assert response.json()["title"] == "第二章"
-    assert response.json()["progress"] == 50
+    def test_no_auth(self, client: TestClient, db: Session) -> None:
+        book = _book(db)
+        resp = client.post(f"/api/books/{book.id}/notes", json=_note_payload())
+        assert resp.status_code == 401
 
+    def test_progress_out_of_range(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        book = _book(db)
+        bad = {**_note_payload(), "progress": 150}
+        resp = client.post(f"/api/books/{book.id}/notes", json=bad, headers=member_headers)
+        assert resp.status_code == 422
 
-def test_non_owner_cannot_update_note(client: TestClient, db: Session) -> None:
-    owner, _ = make_user(db)
-    other, _ = make_user(db)
-    book = _book(db)
-    note = ReadingNote(
-        book_id=book.id,
-        user_id=owner.id,
-        title="私有笔记",
-        created_at=_now(),
-        updated_at=_now(),
-    )
-    db.add(note)
-    db.commit()
+    def test_rating_out_of_range(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        book = _book(db)
+        bad = {**_note_payload(), "rating": 6}
+        resp = client.post(f"/api/books/{book.id}/notes", json=bad, headers=member_headers)
+        assert resp.status_code == 422
 
-    response = client.patch(
-        f"/api/notes/{note.id}",
-        json={"title": "试图修改"},
-        headers={"Authorization": f"Bearer {create_access_token(other.id)}"},
-    )
-
-    assert response.status_code == 403
-
-
-def test_admin_can_delete_any_note(client: TestClient, db: Session, admin_headers: dict[str, str]) -> None:
-    owner, _ = make_user(db)
-    book = _book(db)
-    note = ReadingNote(
-        book_id=book.id,
-        user_id=owner.id,
-        title="可由管理员删除",
-        created_at=_now(),
-        updated_at=_now(),
-    )
-    db.add(note)
-    db.commit()
-
-    response = client.delete(f"/api/notes/{note.id}", headers=admin_headers)
-
-    assert response.status_code == 204
-    assert db.get(ReadingNote, note.id) is None
+    def test_multiple_notes_same_book(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        book = _book(db)
+        client.post(f"/api/books/{book.id}/notes", json=_note_payload("笔记一"), headers=member_headers)
+        client.post(f"/api/books/{book.id}/notes", json=_note_payload("笔记二"), headers=member_headers)
+        resp = client.get(f"/api/books/{book.id}/notes", headers=member_headers)
+        assert len(resp.json()) == 2
 
 
-def test_update_read_status(client: TestClient, db: Session, member_headers: dict[str, str]) -> None:
-    book = _book(db)
+class TestUpdateNote:
+    def test_owner_can_update(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        book = _book(db)
+        note_id = client.post(f"/api/books/{book.id}/notes", json=_note_payload(), headers=member_headers).json()["id"]
 
-    response = client.patch(
-        f"/api/books/{book.id}/read-status",
-        json={"read_status": "read"},
-        headers=member_headers,
-    )
+        resp = client.patch(f"/api/notes/{note_id}", json={"title": "更新后标题", "progress": 60}, headers=member_headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["title"] == "更新后标题"
+        assert body["progress"] == 60
 
-    assert response.status_code == 200
-    assert response.json()["read_status"] == "read"
-    db.refresh(book)
-    assert book.read_status == "read"
+    def test_other_user_cannot_update(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        book = _book(db)
+        note_id = client.post(f"/api/books/{book.id}/notes", json=_note_payload(), headers=member_headers).json()["id"]
+
+        other_user, _ = make_user(db, role="member")
+        other_headers = {"Authorization": f"Bearer {create_access_token(other_user.id)}"}
+
+        resp = client.patch(f"/api/notes/{note_id}", json={"title": "恶意修改"}, headers=other_headers)
+        assert resp.status_code == 403
+
+    def test_admin_can_update_any(self, client: TestClient, db: Session, member_headers: dict, admin_headers: dict) -> None:
+        book = _book(db)
+        note_id = client.post(f"/api/books/{book.id}/notes", json=_note_payload(), headers=member_headers).json()["id"]
+
+        resp = client.patch(f"/api/notes/{note_id}", json={"title": "管理员修改"}, headers=admin_headers)
+        assert resp.status_code == 200
+        assert resp.json()["title"] == "管理员修改"
+
+    def test_not_found(self, client: TestClient, member_headers: dict) -> None:
+        resp = client.patch("/api/notes/99999", json={"title": "x"}, headers=member_headers)
+        assert resp.status_code == 404
+
+    def test_no_auth(self, client: TestClient) -> None:
+        resp = client.patch("/api/notes/1", json={"title": "x"})
+        assert resp.status_code == 401
+
+
+class TestDeleteNote:
+    def test_owner_can_delete(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        book = _book(db)
+        note_id = client.post(f"/api/books/{book.id}/notes", json=_note_payload(), headers=member_headers).json()["id"]
+
+        resp = client.delete(f"/api/notes/{note_id}", headers=member_headers)
+        assert resp.status_code == 204
+        assert client.get(f"/api/books/{book.id}/notes", headers=member_headers).json() == []
+
+    def test_other_user_cannot_delete(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        book = _book(db)
+        note_id = client.post(f"/api/books/{book.id}/notes", json=_note_payload(), headers=member_headers).json()["id"]
+
+        other_user, _ = make_user(db, role="member")
+        other_headers = {"Authorization": f"Bearer {create_access_token(other_user.id)}"}
+
+        resp = client.delete(f"/api/notes/{note_id}", headers=other_headers)
+        assert resp.status_code == 403
+
+    def test_admin_can_delete_any(self, client: TestClient, db: Session, member_headers: dict, admin_headers: dict) -> None:
+        book = _book(db)
+        note_id = client.post(f"/api/books/{book.id}/notes", json=_note_payload(), headers=member_headers).json()["id"]
+
+        resp = client.delete(f"/api/notes/{note_id}", headers=admin_headers)
+        assert resp.status_code == 204
+
+    def test_not_found(self, client: TestClient, member_headers: dict) -> None:
+        resp = client.delete("/api/notes/99999", headers=member_headers)
+        assert resp.status_code == 404
+
+    def test_no_auth(self, client: TestClient) -> None:
+        resp = client.delete("/api/notes/1")
+        assert resp.status_code == 401
+
+
+class TestUpdateReadStatus:
+    def test_success(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        book = _book(db)
+        resp = client.patch(f"/api/books/{book.id}/read-status", json={"read_status": "reading"}, headers=member_headers)
+        assert resp.status_code == 200
+        assert resp.json()["read_status"] == "reading"
+        db.refresh(book)
+        assert book.read_status == "reading"
+
+    def test_all_valid_statuses(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        for status in ("unread", "reading", "read", "paused"):
+            book = _book(db)
+            resp = client.patch(f"/api/books/{book.id}/read-status", json={"read_status": status}, headers=member_headers)
+            assert resp.status_code == 200
+            assert resp.json()["read_status"] == status
+
+    def test_book_not_found(self, client: TestClient, member_headers: dict) -> None:
+        resp = client.patch("/api/books/99999/read-status", json={"read_status": "read"}, headers=member_headers)
+        assert resp.status_code == 404
+
+    def test_invalid_status(self, client: TestClient, db: Session, member_headers: dict) -> None:
+        book = _book(db)
+        resp = client.patch(f"/api/books/{book.id}/read-status", json={"read_status": "invalid"}, headers=member_headers)
+        assert resp.status_code == 422
+
+    def test_no_auth(self, client: TestClient, db: Session) -> None:
+        book = _book(db)
+        resp = client.patch(f"/api/books/{book.id}/read-status", json={"read_status": "read"})
+        assert resp.status_code == 401

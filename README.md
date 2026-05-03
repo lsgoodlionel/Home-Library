@@ -122,12 +122,15 @@ ollama serve
 ollama pull qwen2.5   # 推荐中文模型
 ```
 
-### Docker Compose（任务 S 实现后可用）
+### Docker Compose 一键部署
 
 ```bash
 cp .env.example .env
-docker compose up
+# 编辑 .env，至少修改 APP_SECRET_KEY 和 INITIAL_ADMIN_PASSWORD
+docker compose up -d --build
 ```
+
+完整部署说明（NAS、数据备份、Ollama GPU 加速等）见 [`docs/deployment.md`](docs/deployment.md)。
 
 ## 环境变量
 
