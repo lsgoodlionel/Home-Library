@@ -149,4 +149,12 @@ pytest app/tests/test_users.py   # 仅用户管理测试
 | POST | `/api/ai/detect-duplicate` | MVP 未强制 | 判断两条图书记录是否重复 |
 | POST | `/api/ai/natural-search` | MVP 未强制 | 将自然语言解析为结构化搜索条件 |
 
+### 图书导入导出
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| POST | `/api/books/import/preview` | MVP 未强制 | 上传 CSV、JSON 或 Excel 文件并返回字段映射后的预览、错误和提示 |
+| POST | `/api/books/import` | MVP 未强制 | 确认导入；如存在错误则不写入任何数据 |
+| GET | `/api/books/export?format=csv` | MVP 未强制 | 导出图书，`format` 支持 `csv`、`json`、`xlsx` |
+
 完整接口契约见 [`docs/api-contract.md`](../docs/api-contract.md)。

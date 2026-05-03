@@ -6,11 +6,14 @@ import BookCreatePage from '@/pages/books/BookCreatePage.vue';
 import BookDetailPage from '@/pages/books/BookDetailPage.vue';
 import BookEditPage from '@/pages/books/BookEditPage.vue';
 import BooksListPage from '@/pages/books/BooksListPage.vue';
+import BorrowPage from '@/pages/borrow/BorrowPage.vue';
 import CategoriesPage from '@/pages/categories/CategoriesPage.vue';
 import DashboardPage from '@/pages/dashboard/DashboardPage.vue';
 import LocationsPage from '@/pages/locations/LocationsPage.vue';
 import LoginPage from '@/pages/login/LoginPage.vue';
+import ReadingPage from '@/pages/reading/ReadingPage.vue';
 import SmartImportPage from '@/pages/smart-import/SmartImportPage.vue';
+import StatsPage from '@/pages/stats/StatsPage.vue';
 import { useAuthStore } from '@/stores/auth';
 
 function isAdminRoute(to: RouteLocationNormalized) {
@@ -78,6 +81,18 @@ const router = createRouter({
           meta: { title: '智能入库' },
         },
         {
+          path: 'borrow',
+          name: 'borrow',
+          component: BorrowPage,
+          meta: { title: '借阅管理' },
+        },
+        {
+          path: 'reading',
+          name: 'reading',
+          component: ReadingPage,
+          meta: { title: '阅读笔记' },
+        },
+        {
           path: 'categories',
           name: 'categories',
           component: CategoriesPage,
@@ -88,6 +103,12 @@ const router = createRouter({
           name: 'locations',
           component: LocationsPage,
           meta: { title: '位置管理', requiresAuth: true, adminOnly: true },
+        },
+        {
+          path: 'stats',
+          name: 'stats',
+          component: StatsPage,
+          meta: { title: '统计分析', requiresAuth: true },
         },
       ],
     },
