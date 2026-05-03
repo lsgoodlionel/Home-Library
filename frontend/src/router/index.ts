@@ -2,7 +2,9 @@ import { createRouter, createWebHistory, type RouteLocationNormalized } from 'vu
 
 import AppLayout from '@/layouts/AppLayout.vue';
 import AuthLayout from '@/layouts/AuthLayout.vue';
+import CategoriesPage from '@/pages/categories/CategoriesPage.vue';
 import DashboardPage from '@/pages/dashboard/DashboardPage.vue';
+import LocationsPage from '@/pages/locations/LocationsPage.vue';
 import LoginPage from '@/pages/login/LoginPage.vue';
 import { useAuthStore } from '@/stores/auth';
 
@@ -39,6 +41,18 @@ const router = createRouter({
           name: 'dashboard',
           component: DashboardPage,
           meta: { title: '首页' },
+        },
+        {
+          path: 'categories',
+          name: 'categories',
+          component: CategoriesPage,
+          meta: { title: '分类管理', requiresAuth: true, adminOnly: true },
+        },
+        {
+          path: 'locations',
+          name: 'locations',
+          component: LocationsPage,
+          meta: { title: '位置管理', requiresAuth: true, adminOnly: true },
         },
       ],
     },
