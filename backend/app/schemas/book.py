@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Optional, List
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from .category import CategoryBrief
 from .location import LocationBrief
 from .tag import TagResponse
@@ -47,7 +47,7 @@ class BookBase(BaseModel):
 
 class BookCreate(BookBase):
     source: BookSource = "manual"
-    tag_names: List[str] = []
+    tag_names: List[str] = Field(default_factory=list)
 
 
 class BookUpdate(BaseModel):
@@ -109,7 +109,7 @@ class BookResponse(BookBase):
     source: BookSource
     category: Optional[CategoryBrief] = None
     location: Optional[LocationBrief] = None
-    tags: List[TagResponse] = []
+    tags: List[TagResponse] = Field(default_factory=list)
     created_by: Optional[int] = None
     updated_by: Optional[int] = None
     created_at: datetime
@@ -118,9 +118,23 @@ class BookResponse(BookBase):
     model_config = {"from_attributes": True}
 
 
+class BookBatchUpdates(BaseModel):
+    category_id: Optional[int] = None
+    location_id: Optional[int] = None
+    status: Optional[BookStatus] = None
+    tag_names: Optional[List[str]] = None
+
+
 class BookBatchUpdate(BaseModel):
     book_ids: List[int]
-    updates: dict
+    updates: BookBatchUpdates
+
+    @field_validator("book_ids")
+    @classmethod
+    def book_ids_not_empty(cls, v: List[int]) -> List[int]:
+        if not v:
+            raise ValueError("book_ids 不能为空")
+        return v
 
 
 class PaginatedBooks(BaseModel):
