@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routes import ai, auth, books, categories, locations, search, system, users
+from app.api.routes import ai, auth, books, categories, locations, search, stats, system, users
 
 api_router = APIRouter()
 api_router.include_router(system.router, tags=["system"])
@@ -11,3 +11,4 @@ api_router.include_router(books.router)
 api_router.include_router(categories.router)
 api_router.include_router(locations.router)
 api_router.include_router(search.router)
+api_router.include_router(stats.router)
