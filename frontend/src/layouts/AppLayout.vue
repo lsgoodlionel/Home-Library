@@ -19,7 +19,13 @@ const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
 
-const activeMenu = computed(() => route.path);
+const activeMenu = computed(() => {
+  if (route.path.startsWith('/books')) {
+    return '/books';
+  }
+
+  return route.path;
+});
 
 const navItems = [
   { label: '首页', path: '/', icon: HomeFilled },

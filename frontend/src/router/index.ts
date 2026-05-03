@@ -2,6 +2,10 @@ import { createRouter, createWebHistory, type RouteLocationNormalized } from 'vu
 
 import AppLayout from '@/layouts/AppLayout.vue';
 import AuthLayout from '@/layouts/AuthLayout.vue';
+import BookCreatePage from '@/pages/books/BookCreatePage.vue';
+import BookDetailPage from '@/pages/books/BookDetailPage.vue';
+import BookEditPage from '@/pages/books/BookEditPage.vue';
+import BooksListPage from '@/pages/books/BooksListPage.vue';
 import DashboardPage from '@/pages/dashboard/DashboardPage.vue';
 import LoginPage from '@/pages/login/LoginPage.vue';
 import { useAuthStore } from '@/stores/auth';
@@ -39,6 +43,30 @@ const router = createRouter({
           name: 'dashboard',
           component: DashboardPage,
           meta: { title: '首页' },
+        },
+        {
+          path: 'books',
+          name: 'books',
+          component: BooksListPage,
+          meta: { title: '藏书' },
+        },
+        {
+          path: 'books/new',
+          name: 'book-new',
+          component: BookCreatePage,
+          meta: { title: '新增图书' },
+        },
+        {
+          path: 'books/:id',
+          name: 'book-detail',
+          component: BookDetailPage,
+          meta: { title: '图书详情' },
+        },
+        {
+          path: 'books/:id/edit',
+          name: 'book-edit',
+          component: BookEditPage,
+          meta: { title: '编辑图书' },
         },
       ],
     },
