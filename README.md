@@ -122,12 +122,15 @@ ollama serve
 ollama pull qwen2.5   # 推荐中文模型
 ```
 
-### Docker Compose（任务 S 实现后可用）
+### Docker Compose
 
 ```bash
 cp .env.example .env
-docker compose up
+docker compose up -d --build
+curl http://localhost/api/health
 ```
+
+默认使用宿主机 `80` 端口；如端口被占用，在 `.env` 中设置 `HTTP_PORT=8080`。完整部署、NAS、备份和恢复说明见 [`docs/deployment.md`](docs/deployment.md)。
 
 ## 环境变量
 
