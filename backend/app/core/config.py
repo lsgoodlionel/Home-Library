@@ -45,6 +45,22 @@ class Settings(BaseSettings):
         default=86400,
         validation_alias=AliasChoices("HOME_LIBRARY_ACCESS_TOKEN_EXPIRE_SECONDS", "APP_ACCESS_TOKEN_EXPIRE_SECONDS"),
     )
+    ollama_base_url: str = Field(
+        default="http://127.0.0.1:11434",
+        validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_BASE_URL", "OLLAMA_BASE_URL"),
+    )
+    ollama_default_model: str = Field(
+        default="qwen2.5",
+        validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_DEFAULT_MODEL", "OLLAMA_DEFAULT_MODEL"),
+    )
+    ollama_timeout_seconds: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_TIMEOUT_SECONDS", "OLLAMA_TIMEOUT_SECONDS"),
+    )
+    ollama_optional: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_OPTIONAL", "OLLAMA_OPTIONAL"),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

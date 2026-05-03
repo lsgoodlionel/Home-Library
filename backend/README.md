@@ -57,6 +57,10 @@ cp ../.env.example ../.env
 | `DATABASE_URL` | `sqlite:///./home_library.db` | 数据库连接字符串 |
 | `INITIAL_ADMIN_USERNAME` | `admin` | 初始管理员用户名 |
 | `INITIAL_ADMIN_PASSWORD` | `change-me` | 初始管理员密码 |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | 本地 Ollama 服务地址 |
+| `OLLAMA_DEFAULT_MODEL` | `qwen2.5` | AI 接口默认使用的模型 |
+| `OLLAMA_TIMEOUT_SECONDS` | `30` | Ollama 请求超时时间 |
+| `OLLAMA_OPTIONAL` | `true` | Ollama 不可用时系统仍可启动，AI 接口返回清晰错误 |
 
 ## 安装与启动
 
@@ -133,5 +137,16 @@ pytest app/tests/test_users.py   # 仅用户管理测试
 | POST | `/api/users` | 管理员 | 创建用户 |
 | PATCH | `/api/users/{id}` | 管理员 | 编辑用户角色/状态/显示名/邮箱 |
 | DELETE | `/api/users/{id}` | 管理员 | 禁用用户（MVP 不物理删除） |
+
+### AI / Ollama
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| GET | `/api/ai/models` | MVP 未强制 | 读取本地 Ollama 模型列表 |
+| POST | `/api/ai/classify-book` | MVP 未强制 | 推荐分类、标签和理由 |
+| POST | `/api/ai/generate-tags` | MVP 未强制 | 生成图书标签 |
+| POST | `/api/ai/summarize-book` | MVP 未强制 | 整理内容简介和作者简介 |
+| POST | `/api/ai/detect-duplicate` | MVP 未强制 | 判断两条图书记录是否重复 |
+| POST | `/api/ai/natural-search` | MVP 未强制 | 将自然语言解析为结构化搜索条件 |
 
 完整接口契约见 [`docs/api-contract.md`](../docs/api-contract.md)。
