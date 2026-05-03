@@ -49,7 +49,12 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse
 
 
 async def validation_error_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
-    return error_response("VALIDATION_ERROR", "请求参数错误", 422, exc.errors())
+    # Pydantic v2 ctx may contain non-serializable exception objects; extract safe fields only.
+    safe = [
+        {"loc": list(e.get("loc", [])), "msg": e.get("msg", ""), "type": e.get("type", "")}
+        for e in exc.errors()
+    ]
+    return error_response("VALIDATION_ERROR", "请求参数错误", 422, safe)
 
 
 async def unhandled_exception_handler(_: Request, exc: Exception) -> JSONResponse:

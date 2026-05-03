@@ -1,15 +1,12 @@
-"""FastAPI 共用依赖。
+"""FastAPI shared dependencies."""
 
-auth_required: 管理员鉴权占位——任务 D 合入后替换为真实 JWT 验证。
-目前返回 None，所有调用方均可通过，便于并行开发。
-"""
+from typing import Annotated
 
-from typing import Any
+from fastapi import Depends
+
+from app.core.security import require_admin
+from app.models.user import User
 
 
-async def auth_required() -> None:
-    """占位管理员依赖。任务 D 完成后替换为：
-        token: str = Depends(oauth2_scheme)
-        return verify_token(token)
-    """
-    return None
+def auth_required(current_user: Annotated[User, Depends(require_admin)]) -> User:
+    return current_user

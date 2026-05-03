@@ -37,6 +37,14 @@ class Settings(BaseSettings):
         default="change-me",
         validation_alias=AliasChoices("HOME_LIBRARY_INITIAL_ADMIN_PASSWORD", "INITIAL_ADMIN_PASSWORD"),
     )
+    secret_key: str = Field(
+        default="dev-secret-change-me-in-production",
+        validation_alias=AliasChoices("HOME_LIBRARY_SECRET_KEY", "APP_SECRET_KEY"),
+    )
+    access_token_expire_seconds: int = Field(
+        default=86400,
+        validation_alias=AliasChoices("HOME_LIBRARY_ACCESS_TOKEN_EXPIRE_SECONDS", "APP_ACCESS_TOKEN_EXPIRE_SECONDS"),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 from datetime import datetime
 from typing import Literal, Optional
+
 from pydantic import BaseModel, field_validator
 
 
@@ -50,3 +52,24 @@ class UserPublic(BaseModel):
     role: UserRole
 
     model_config = {"from_attributes": True}
+
+
+class UserPage(BaseModel):
+    items: list[UserResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+# ---------- Auth schemas ----------
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: UserPublic
