@@ -47,7 +47,9 @@ async function handleSubmit() {
   <el-dialog v-model="visible" title="借出图书" width="520px">
     <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
       <el-form-item label="图书" prop="bookId">
-        <el-select v-model="form.bookId" filterable placeholder="选择要借出的图书">
+        <!-- style="width:100%" prevents el-select from sizing itself to its
+             longest option label and stretching the dialog beyond 520 px -->
+        <el-select v-model="form.bookId" filterable placeholder="选择要借出的图书" style="width: 100%">
           <el-option
             v-for="book in books"
             :key="book.id"
@@ -65,18 +67,17 @@ async function handleSubmit() {
         <el-input v-model="form.borrowerContact" />
       </el-form-item>
 
-      <el-row :gutter="12">
-        <el-col :span="12">
-          <el-form-item label="借出日期" prop="borrowedAt">
-            <el-date-picker v-model="form.borrowedAt" type="date" value-format="YYYY-MM-DD" class="full-width" />
-          </el-form-item>
-        </el-col>
-        <el-col :span="12">
-          <el-form-item label="应还日期">
-            <el-date-picker v-model="form.dueAt" type="date" value-format="YYYY-MM-DD" class="full-width" />
-          </el-form-item>
-        </el-col>
-      </el-row>
+      <!-- Use CSS gap instead of el-row :gutter to avoid the -6 px negative
+           margins that el-row injects, which can push content outside the
+           dialog boundary. -->
+      <div class="date-row">
+        <el-form-item label="借出日期" prop="borrowedAt">
+          <el-date-picker v-model="form.borrowedAt" type="date" value-format="YYYY-MM-DD" class="full-width" />
+        </el-form-item>
+        <el-form-item label="应还日期">
+          <el-date-picker v-model="form.dueAt" type="date" value-format="YYYY-MM-DD" class="full-width" />
+        </el-form-item>
+      </div>
 
       <el-form-item label="备注">
         <el-input v-model="form.note" :rows="3" type="textarea" />
@@ -93,5 +94,11 @@ async function handleSubmit() {
 <style scoped>
 .full-width {
   width: 100%;
+}
+
+.date-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
 }
 </style>

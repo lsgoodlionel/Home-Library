@@ -145,6 +145,17 @@ onMounted(() => {
 .borrow-page {
   display: grid;
   gap: 16px;
+  /* Prevent the wide borrow table from stretching the viewport. Grid items
+     default to min-width: auto which lets children dictate their own width;
+     setting overflow here clips content to the available column width and
+     lets el-table scroll internally instead of the whole page. */
+  overflow-x: hidden;
+}
+
+/* Let the tabs area scroll horizontally on small viewports instead of
+   forcing the page to widen. */
+.borrow-page :deep(.el-tabs__content) {
+  overflow-x: auto;
 }
 
 .page-toolbar {
