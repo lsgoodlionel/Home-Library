@@ -7,11 +7,19 @@ Adding a new provider:
 """
 
 from .base import BookProvider
+from .douban_books import DoubanBooksProvider
 from .google_books import GoogleBooksProvider
 from .open_library import OpenLibraryProvider
 
-__all__ = ["BookProvider", "GoogleBooksProvider", "OpenLibraryProvider", "get_all_providers"]
+__all__ = [
+    "BookProvider",
+    "DoubanBooksProvider",
+    "GoogleBooksProvider",
+    "OpenLibraryProvider",
+    "get_all_providers",
+]
 
 
 def get_all_providers() -> list[BookProvider]:
-    return [OpenLibraryProvider(), GoogleBooksProvider()]
+    # Douban first: best coverage for Chinese titles; Google/OpenLibrary for others
+    return [DoubanBooksProvider(), GoogleBooksProvider(), OpenLibraryProvider()]

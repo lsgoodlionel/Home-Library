@@ -16,6 +16,7 @@ from app.schemas.external_book import (
     ImportResultResponse,
 )
 from app.services import external_book_service
+from app.services.external_books.douban_books import _parse_entry as _douban_parse_entry
 from app.services.external_books.open_library import (
     _parse_books_entry,
     _parse_search_doc,
@@ -478,3 +479,182 @@ class TestCacheIntegration:
         asyncio.run(_run())
         asyncio.run(_run())
         assert mock_provider.lookup_isbn.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Douban Books provider parser tests
+# ---------------------------------------------------------------------------
+
+class TestDoubanBooksParser:
+    """Unit tests for the Douban suggest-entry parser."""
+
+    def _entry(self, **overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "id": "1770782",
+            "url": "https://book.douban.com/subject/1770782/",
+            "pic": {"small": "https://img1.doubanio.com/s.jpg", "normal": "https://img1.doubanio.com/n.jpg"},
+            "title": "三体",
+            "author": "刘慈欣",
+            "year": "2008",
+            "publisher": "重庆出版社",
+            "type": "book",
+        }
+        base.update(overrides)
+        return base
+
+    def test_parses_full_entry(self) -> None:
+        c = _douban_parse_entry(self._entry())
+        assert c is not None
+        assert c.title == "三体"
+        assert c.author == "刘慈欣"
+        assert c.publish_year == 2008
+        assert c.publisher == "重庆出版社"
+        assert c.source == "douban"
+        assert c.source_id == "1770782"
+        assert c.language == "zh"
+
+    def test_prefers_normal_cover(self) -> None:
+        c = _douban_parse_entry(self._entry())
+        assert c is not None
+        assert c.cover_url == "https://img1.doubanio.com/n.jpg"
+
+    def test_upgrades_http_cover_to_https(self) -> None:
+        entry = self._entry(pic={"normal": "http://img1.doubanio.com/n.jpg"})
+        c = _douban_parse_entry(entry)
+        assert c is not None
+        assert c.cover_url and c.cover_url.startswith("https://")
+
+    def test_strips_leading_slash_from_author(self) -> None:
+        c = _douban_parse_entry(self._entry(author="/ 刘慈欣"))
+        assert c is not None
+        assert c.author == "刘慈欣"
+
+    def test_skips_non_book_entries(self) -> None:
+        entry = self._entry(type="movie")
+        assert _douban_parse_entry(entry) is None
+
+    def test_skips_empty_title(self) -> None:
+        entry = self._entry(title="")
+        assert _douban_parse_entry(entry) is None
+
+    def test_invalid_year_gives_none(self) -> None:
+        c = _douban_parse_entry(self._entry(year="未知"))
+        assert c is not None
+        assert c.publish_year is None
+
+    def test_missing_pic_gives_no_cover(self) -> None:
+        entry = self._entry()
+        entry.pop("pic")
+        c = _douban_parse_entry(entry)
+        assert c is not None
+        assert c.cover_url is None
+
+
+class TestDoubanBooksProvider:
+    """Unit tests for the DoubanBooksProvider (network mocked)."""
+
+    def test_search_returns_candidates(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.services.external_books.douban_books import DoubanBooksProvider
+
+        raw_entries = [
+            {
+                "id": "1770782",
+                "url": "https://book.douban.com/subject/1770782/",
+                "pic": {"normal": "https://img.doubanio.com/n.jpg"},
+                "title": "三体",
+                "author": "刘慈欣",
+                "year": "2008",
+                "publisher": "重庆出版社",
+                "type": "book",
+            }
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = raw_entries
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        provider = DoubanBooksProvider()
+        with patch("app.services.external_books.douban_books.httpx.AsyncClient", return_value=mock_client):
+            results = asyncio.run(provider.search("三体", limit=5))
+
+        assert len(results) == 1
+        assert results[0].title == "三体"
+        assert results[0].source == "douban"
+
+    def test_search_network_error_returns_empty(self) -> None:
+        from unittest.mock import AsyncMock, patch
+        from app.services.external_books.douban_books import DoubanBooksProvider
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(side_effect=Exception("connection refused"))
+
+        provider = DoubanBooksProvider()
+        with patch("app.services.external_books.douban_books.httpx.AsyncClient", return_value=mock_client):
+            results = asyncio.run(provider.search("三体"))
+
+        assert results == []
+
+    def test_isbn_lookup_injects_isbn_when_missing(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.services.external_books.douban_books import DoubanBooksProvider
+
+        raw_entries = [
+            {
+                "id": "1770782",
+                "url": "https://book.douban.com/subject/1770782/",
+                "title": "三体",
+                "author": "刘慈欣",
+                "type": "book",
+            }
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = raw_entries
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        provider = DoubanBooksProvider()
+        isbn = "9787536692930"
+        with patch("app.services.external_books.douban_books.httpx.AsyncClient", return_value=mock_client):
+            results = asyncio.run(provider.lookup_isbn(isbn))
+
+        assert len(results) == 1
+        assert results[0].isbn == isbn
+
+    def test_search_respects_limit(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.services.external_books.douban_books import DoubanBooksProvider
+
+        raw_entries = [
+            {
+                "id": str(i),
+                "title": f"书 {i}",
+                "author": "作者",
+                "type": "book",
+            }
+            for i in range(10)
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = raw_entries
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        provider = DoubanBooksProvider()
+        with patch("app.services.external_books.douban_books.httpx.AsyncClient", return_value=mock_client):
+            results = asyncio.run(provider.search("书", limit=3))
+
+        assert len(results) == 3
