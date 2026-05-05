@@ -52,7 +52,7 @@ function formatDate(value: string | null) {
       </template>
     </el-table-column>
     <el-table-column label="备注" prop="note" min-width="160" show-overflow-tooltip />
-    <el-table-column fixed="right" label="操作" width="120">
+    <el-table-column label="操作" width="120">
       <template #default="{ row }">
         <el-button :icon="View" text type="primary" @click="emit('viewBook', row.bookId)" />
         <el-button
@@ -69,6 +69,7 @@ function formatDate(value: string | null) {
 
 <style scoped>
 .borrow-table {
+  width: 100%;
   border: 1px solid var(--app-border);
   border-radius: 8px;
 }

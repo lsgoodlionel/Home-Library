@@ -144,7 +144,9 @@ onMounted(() => {
 <style scoped>
 .borrow-page {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+  min-width: 0;
   /* Prevent the wide borrow table from stretching the viewport. Grid items
      default to min-width: auto which lets children dictate their own width;
      setting overflow here clips content to the available column width and
@@ -152,9 +154,15 @@ onMounted(() => {
   overflow-x: hidden;
 }
 
+.borrow-page > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
 /* Let the tabs area scroll horizontally on small viewports instead of
    forcing the page to widen. */
 .borrow-page :deep(.el-tabs__content) {
+  min-width: 0;
   overflow-x: auto;
 }
 
@@ -163,6 +171,10 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .page-toolbar h1 {
