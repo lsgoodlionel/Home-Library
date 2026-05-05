@@ -3,7 +3,13 @@ FROM node:20-alpine AS build
 WORKDIR /app/frontend
 
 COPY frontend/package*.json ./
-RUN npm ci
+ARG TARGETARCH
+RUN npm ci \
+    && if [ "$TARGETARCH" = "arm64" ]; then \
+        npm install @rollup/rollup-linux-arm64-musl@4.60.2 --no-save --no-audit --no-fund; \
+    elif [ "$TARGETARCH" = "amd64" ]; then \
+        npm install @rollup/rollup-linux-x64-musl@4.60.2 --no-save --no-audit --no-fund; \
+    fi
 
 COPY frontend/ ./
 ARG VITE_API_BASE_URL=/api
