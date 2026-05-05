@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { Back, Search } from '@element-plus/icons-vue';
+import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser';
+import { Back, Camera, Search } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
-import { onMounted, ref } from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 
 import { classifyBook, generateTags, getAIModels } from '@/api/ai';
@@ -31,6 +32,14 @@ const searchError = ref('');
 const searchResults = ref<SearchResultItem[]>([]);
 const selectedResult = ref<SearchResultItem | null>(null);
 
+// ── ISBN camera scanner ──────────────────────────────────────────────────────
+const scannerDialogVisible = ref(false);
+const scannerStarting = ref(false);
+const scannerActive = ref(false);
+const scannerError = ref('');
+const scannerVideoRef = ref<HTMLVideoElement | null>(null);
+let scannerControls: IScannerControls | null = null;
+
 // ── Draft / form state ────────────────────────────────────────────────────────
 const form = ref<BookFormModel>(createEmptyBookForm());
 const categories = ref<CategoryOption[]>([]);
@@ -57,6 +66,10 @@ const tagsDismissed = ref(false);
 onMounted(() => {
   void loadFormOptions();
   void loadAIModels();
+});
+
+onBeforeUnmount(() => {
+  stopBarcodeScanner();
 });
 
 async function loadFormOptions() {
@@ -112,6 +125,54 @@ async function handleSearch() {
   } finally {
     searching.value = false;
   }
+}
+
+async function openBarcodeScanner() {
+  searchType.value = 'isbn';
+  scannerDialogVisible.value = true;
+  scannerError.value = '';
+  await nextTick();
+  await startBarcodeScanner();
+}
+
+async function startBarcodeScanner() {
+  if (!scannerVideoRef.value || scannerActive.value || scannerStarting.value) return;
+
+  scannerStarting.value = true;
+  scannerError.value = '';
+
+  try {
+    const reader = new BrowserMultiFormatReader();
+    scannerControls = await reader.decodeFromVideoDevice(
+      undefined,
+      scannerVideoRef.value,
+      (result) => {
+        const isbn = normalizeScannedIsbn(result?.getText());
+        if (!isbn) return;
+
+        searchQuery.value = isbn;
+        ElMessage.success(`已识别 ISBN：${isbn}`);
+        closeBarcodeScanner();
+      },
+    );
+    scannerActive.value = true;
+  } catch (err: unknown) {
+    scannerError.value = getScannerErrorMessage(err);
+    scannerActive.value = false;
+  } finally {
+    scannerStarting.value = false;
+  }
+}
+
+function closeBarcodeScanner() {
+  stopBarcodeScanner();
+  scannerDialogVisible.value = false;
+}
+
+function stopBarcodeScanner() {
+  scannerControls?.stop();
+  scannerControls = null;
+  scannerActive.value = false;
 }
 
 function handleSelectResult(result: SearchResultItem) {
@@ -258,6 +319,22 @@ function getErrorMessage(err: unknown): string {
   return '未知错误';
 }
 
+function getScannerErrorMessage(err: unknown): string {
+  if (err instanceof DOMException) {
+    if (err.name === 'NotAllowedError') return '未获得摄像头权限，请允许浏览器访问摄像头后重试';
+    if (err.name === 'NotFoundError') return '未检测到可用摄像头';
+  }
+  if (err instanceof Error) return err.message;
+  return '摄像头启动失败，请检查浏览器权限或设备连接';
+}
+
+function normalizeScannedIsbn(value: string | undefined): string {
+  const cleaned = (value || '').replace(/[^0-9Xx]/g, '').toUpperCase();
+  if (cleaned.length === 13 && /^(978|979)\d{10}$/.test(cleaned)) return cleaned;
+  if (cleaned.length === 10 && /^\d{9}[\dX]$/.test(cleaned)) return cleaned;
+  return '';
+}
+
 function getAIButtonStatus(status: AIStatus): boolean {
   return status === 'loading';
 }
@@ -302,6 +379,15 @@ function getAIButtonStatus(status: AIStatus): boolean {
               </template>
             </el-input>
             <el-button
+              v-if="searchType === 'isbn'"
+              :disabled="searching"
+              :icon="Camera"
+              size="large"
+              @click="openBarcodeScanner"
+            >
+              扫码录入
+            </el-button>
+            <el-button
               :loading="searching"
               size="large"
               type="primary"
@@ -321,6 +407,45 @@ function getAIButtonStatus(status: AIStatus): boolean {
           </div>
         </div>
       </el-card>
+
+      <el-dialog
+        v-model="scannerDialogVisible"
+        title="扫描 ISBN 条形码"
+        width="560px"
+        append-to-body
+        @close="stopBarcodeScanner"
+      >
+        <div class="scanner-panel">
+          <video
+            ref="scannerVideoRef"
+            class="scanner-video"
+            muted
+            playsinline
+          />
+          <div class="scanner-frame" aria-hidden="true" />
+          <el-alert
+            v-if="scannerError"
+            :closable="false"
+            :title="scannerError"
+            show-icon
+            type="error"
+          />
+          <p class="scanner-tip">
+            将图书背面的 ISBN 条形码放入取景框。识别成功后会自动填入 ISBN 输入框。
+          </p>
+        </div>
+        <template #footer>
+          <el-button @click="closeBarcodeScanner">取消</el-button>
+          <el-button
+            :loading="scannerStarting"
+            :disabled="scannerActive"
+            type="primary"
+            @click="startBarcodeScanner"
+          >
+            重新启动摄像头
+          </el-button>
+        </template>
+      </el-dialog>
 
       <!-- Search results -->
       <div v-if="searching" class="results-area">
@@ -573,6 +698,39 @@ function getAIButtonStatus(status: AIStatus): boolean {
 .search-hint {
   font-size: 13px;
   color: var(--el-text-color-secondary);
+}
+
+.scanner-panel {
+  position: relative;
+  display: grid;
+  gap: 12px;
+}
+
+.scanner-video {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #111827;
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.scanner-frame {
+  position: absolute;
+  top: 18%;
+  left: 12%;
+  right: 12%;
+  height: 36%;
+  border: 2px solid var(--el-color-primary);
+  border-radius: 8px;
+  box-shadow: 0 0 0 999px rgb(0 0 0 / 18%);
+  pointer-events: none;
+}
+
+.scanner-tip {
+  margin: 0;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 /* Results */
