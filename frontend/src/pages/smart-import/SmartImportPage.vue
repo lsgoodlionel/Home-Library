@@ -16,7 +16,7 @@ import { createEmptyBookForm, type BookFormModel, type CategoryOption, type Loca
 import type { AIModel, AIStatus, ClassifyBookResponse, GenerateTagsResponse } from '@/types/ai';
 import type { SearchResultItem } from '@/types/search';
 
-type SearchType = 'isbn' | 'title';
+type SearchType = 'isbn' | 'title' | 'title_publisher';
 type PageStep = 'search' | 'draft';
 
 const router = useRouter();
@@ -46,6 +46,12 @@ const categories = ref<CategoryOption[]>([]);
 const locations = ref<LocationOption[]>([]);
 const loadingOptions = ref(false);
 const saving = ref(false);
+
+// ── Douban enhance (ISBN→Douban secondary search) ─────────────────────────────
+const doubanDialogVisible = ref(false);
+const doubanSearching = ref(false);
+const doubanResults = ref<SearchResultItem[]>([]);
+const doubanError = ref('');
 
 // ── AI state ─────────────────────────────────────────────────────────────────
 const aiModels = ref<AIModel[]>([]);
@@ -112,6 +118,8 @@ async function handleSearch() {
   try {
     if (searchType.value === 'isbn') {
       searchResults.value = await searchByISBN(query);
+    } else if (searchType.value === 'title_publisher') {
+      searchResults.value = await searchBooks(query, 30, { mode: 'title_publisher' });
     } else {
       searchResults.value = await searchBooks(query, 30);
     }
@@ -218,10 +226,18 @@ async function handleClassify() {
 
 function handleAcceptClassify() {
   if (!classifyResult.value) return;
-  // Find matching category in tree by code
-  const found = findCategoryByCode(categories.value, classifyResult.value.categoryCode);
+  // Exact match first; fall back to progressively shorter prefix (e.g. "I247.5" → "I247" → "I")
+  const code = classifyResult.value.categoryCode;
+  let found = findCategoryByCode(categories.value, code);
+  if (!found) {
+    for (let len = code.length - 1; len >= 1 && !found; len--) {
+      found = findCategoryByCode(categories.value, code.slice(0, len));
+    }
+  }
   if (found) {
     form.value.categoryId = found.id;
+  } else {
+    ElMessage.warning(`未找到匹配分类「${code}」，请在表单中手动选择`);
   }
   // Merge tags without duplicates
   const existing = new Set(form.value.tagNames);
@@ -268,6 +284,42 @@ function handleAcceptTags() {
 
 function handleDismissTags() {
   tagsDismissed.value = true;
+}
+
+// ── Douban enhance ────────────────────────────────────────────────────────────
+async function handleDoubanEnhance() {
+  const title = form.value.title.trim();
+  if (!title) {
+    ElMessage.warning('书名为空，无法进行豆瓣补全');
+    return;
+  }
+  doubanDialogVisible.value = true;
+  doubanSearching.value = true;
+  doubanError.value = '';
+  doubanResults.value = [];
+  try {
+    doubanResults.value = await searchBooks(title, 10, { provider: 'douban' });
+    if (doubanResults.value.length === 0) {
+      doubanError.value = '豆瓣未找到相关书目，请尝试修改书名';
+    }
+  } catch (err: unknown) {
+    doubanError.value = `豆瓣检索失败：${getErrorMessage(err)}`;
+  } finally {
+    doubanSearching.value = false;
+  }
+}
+
+function handleApplyDoubanResult(result: SearchResultItem) {
+  // Merge: only overwrite fields that are currently empty
+  if (!form.value.author && result.author) form.value.author = result.author;
+  if (!form.value.publisher && result.publisher) form.value.publisher = result.publisher;
+  if (!form.value.publishYear && result.publishYear) form.value.publishYear = result.publishYear;
+  if (!form.value.coverUrl && result.coverUrl) form.value.coverUrl = result.coverUrl;
+  if (!form.value.summary && result.summary) form.value.summary = result.summary;
+  // Always prefer Douban cover if available (better quality for Chinese books)
+  if (result.coverUrl) form.value.coverUrl = result.coverUrl;
+  doubanDialogVisible.value = false;
+  ElMessage.success('已从豆瓣补全信息');
 }
 
 // ── Final Submit ──────────────────────────────────────────────────────────────
@@ -363,13 +415,14 @@ function getAIButtonStatus(status: AIStatus): boolean {
         <div class="search-controls">
           <el-radio-group v-model="searchType" class="search-type-group">
             <el-radio-button value="title">书名 / 书名+作者</el-radio-button>
+            <el-radio-button value="title_publisher">书名+出版社</el-radio-button>
             <el-radio-button value="isbn">ISBN</el-radio-button>
           </el-radio-group>
 
           <div class="search-input-row">
             <el-input
               v-model="searchQuery"
-              :placeholder="searchType === 'isbn' ? '输入 ISBN，如 9787108045269' : '输入书名，或「书名 作者」'"
+              :placeholder="searchType === 'isbn' ? '输入 ISBN，如 9787108045269' : searchType === 'title_publisher' ? '输入「书名 出版社」，如「乡土中国 人民出版社」' : '输入书名，或「书名 作者」'"
               clearable
               size="large"
               @keyup.enter="handleSearch"
@@ -400,6 +453,9 @@ function getAIButtonStatus(status: AIStatus): boolean {
           <div class="search-hint">
             <span v-if="searchType === 'title'">
               支持单独书名（如「乡土中国」）或书名加作者（如「乡土中国 费孝通」），中文书名会自动扩展检索词并返回更多候选版本
+            </span>
+            <span v-else-if="searchType === 'title_publisher'">
+              格式：「书名 出版社」，例如「围城 人民文学出版社」，适合同名书区分版本
             </span>
             <span v-else>
               支持 ISBN-10 或 ISBN-13，会自动标准化处理
@@ -505,7 +561,45 @@ function getAIButtonStatus(status: AIStatus): boolean {
                 <el-tag size="small" type="info">{{ selectedResult.source }}</el-tag>
               </div>
             </div>
+            <div class="summary-footer">
+              <el-button
+                size="small"
+                :loading="doubanSearching"
+                @click="handleDoubanEnhance"
+              >
+                从豆瓣补全信息
+              </el-button>
+            </div>
           </el-card>
+
+          <!-- Douban enhance dialog -->
+          <el-dialog
+            v-model="doubanDialogVisible"
+            title="从豆瓣补全书目信息"
+            width="560px"
+            append-to-body
+          >
+            <div v-if="doubanSearching" class="douban-loading">
+              <el-skeleton v-for="i in 3" :key="i" :rows="2" animated />
+            </div>
+            <div v-else-if="doubanError" class="douban-error">
+              <el-alert :title="doubanError" :closable="false" type="warning" show-icon />
+            </div>
+            <div v-else class="douban-results">
+              <p class="douban-hint">选择最匹配的版本，封面、作者、年份等字段将补充到当前表单中</p>
+              <div class="results-list">
+                <SearchResultCard
+                  v-for="(result, index) in doubanResults"
+                  :key="index"
+                  :result="result"
+                  @select="handleApplyDoubanResult"
+                />
+              </div>
+            </div>
+            <template #footer>
+              <el-button @click="doubanDialogVisible = false">取消</el-button>
+            </template>
+          </el-dialog>
 
           <!-- AI model selector -->
           <el-card v-if="aiAvailable && aiModels.length > 0" class="ai-model-card">
@@ -818,6 +912,36 @@ function getAIButtonStatus(status: AIStatus): boolean {
 .summary-isbn {
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+.summary-footer {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.douban-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.douban-hint {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+
+.douban-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.douban-error {
+  padding: 8px 0;
 }
 
 /* AI results */

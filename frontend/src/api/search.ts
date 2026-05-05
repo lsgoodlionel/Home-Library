@@ -35,9 +35,18 @@ function normalizeSearchResultItem(item: ApiSearchResultItem): SearchResultItem 
   };
 }
 
-export async function searchBooks(query: string, limit = 30): Promise<SearchResultItem[]> {
+export async function searchBooks(
+  query: string,
+  limit = 30,
+  options?: { mode?: string; provider?: string },
+): Promise<SearchResultItem[]> {
   const { data } = await apiClient.get<ApiSearchResultsResponse>('/search/books', {
-    params: { query, limit },
+    params: {
+      query,
+      limit,
+      ...(options?.mode && { mode: options.mode }),
+      ...(options?.provider && { provider: options.provider }),
+    },
   });
   return data.items.map(normalizeSearchResultItem);
 }

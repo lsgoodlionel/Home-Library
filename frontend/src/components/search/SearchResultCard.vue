@@ -16,6 +16,7 @@ const SOURCE_LABELS: Record<string, string> = {
   open_library: 'Open Library',
   google_books: 'Google Books',
   isbn_db: 'ISBN DB',
+  douban: '豆瓣读书',
 };
 
 function getSourceLabel(source: string): string {

@@ -29,9 +29,20 @@ async def search_books(
     db: Annotated[Session, Depends(get_db)],
     query: Annotated[str, Query(min_length=1)],
     limit: Annotated[int, Query(ge=1, le=40)] = 10,
+    mode: Annotated[str | None, Query(pattern="^(title|title_author|title_publisher)$")] = None,
+    provider: Annotated[str | None, Query()] = None,
 ) -> ExternalBookSearchResponse:
-    """Search external providers by title, author, or combined keyword."""
-    candidates = await external_book_service.search_books(db, query=query, limit=limit)
+    """Search external providers by title, author, or combined keyword.
+
+    mode: controls query-variant generation
+      - title         (default) plain title search
+      - title_author  "书名 作者" format
+      - title_publisher "书名 出版社" format
+    provider: restrict to a single provider by name (e.g. "douban")
+    """
+    candidates = await external_book_service.search_books(
+        db, query=query, limit=limit, mode=mode, provider_filter=provider
+    )
     return ExternalBookSearchResponse(items=candidates)
 
 

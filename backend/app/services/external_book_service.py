@@ -40,12 +40,13 @@ def _contains_cjk(text: str) -> bool:
     return any("\u4e00" <= char <= "\u9fff" for char in text)
 
 
-def _search_query_variants(query: str) -> list[str]:
+def _search_query_variants(query: str, mode: str | None = None) -> list[str]:
     """Build extra query forms for Chinese title search.
 
-    Public book APIs vary a lot in how they rank Chinese titles. Sending a few
-    focused variants gives the UI enough candidates without adding a new data
-    source or relying on scraping.
+    mode values:
+      None / "title"         plain title search
+      "title_author"         treat second token as author
+      "title_publisher"      treat second token as publisher
     """
     normalized = " ".join(query.split())
     if not normalized:
@@ -65,8 +66,13 @@ def _search_query_variants(query: str) -> list[str]:
         parts = normalized.split()
         if len(parts) >= 2:
             title = parts[0]
-            author = " ".join(parts[1:])
-            variants.append(f"intitle:{title} inauthor:{author}")
+            rest = " ".join(parts[1:])
+            if mode == "title_publisher":
+                variants.append(f"intitle:{title} inpublisher:{rest}")
+                variants.append(f"{title} {rest}")
+            else:
+                # default and "title_author" both generate author-scoped variants
+                variants.append(f"intitle:{title} inauthor:{rest}")
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -252,8 +258,9 @@ async def _fetch_search(
     query: str,
     limit: int,
     providers: list[BookProvider],
+    mode: str | None = None,
 ) -> list[ExternalBookCandidate]:
-    query_variants = _search_query_variants(query)
+    query_variants = _search_query_variants(query, mode)
     per_variant_limit = min(max(limit, 10), 40)
     tasks = [
         _run_provider_search(provider, query_variant, per_variant_limit)
@@ -286,15 +293,22 @@ async def search_books(
     query: str,
     limit: int = 10,
     providers: list[BookProvider] | None = None,
+    mode: str | None = None,
+    provider_filter: str | None = None,
 ) -> list[ExternalBookCandidate]:
-    cache_key = f"query:v3:{query}"
-    cached = _load_cache(db, cache_key, _SEARCH_CACHE_TTL)
-    if cached is not None:
-        return cached[:limit]
+    # Don't use the shared cache when a provider filter is active (partial results)
+    use_cache = provider_filter is None
+    cache_key = f"query:v3:{mode or 'title'}:{query}"
+    if use_cache:
+        cached = _load_cache(db, cache_key, _SEARCH_CACHE_TTL)
+        if cached is not None:
+            return cached[:limit]
 
     active_providers = providers if providers is not None else get_all_providers()
-    candidates = await _fetch_search(query, limit, active_providers)
-    if candidates:
+    if provider_filter:
+        active_providers = [p for p in active_providers if p.name == provider_filter]
+    candidates = await _fetch_search(query, limit, active_providers, mode=mode)
+    if use_cache and candidates:
         _save_cache(db, cache_key, candidates)
     return candidates
 
