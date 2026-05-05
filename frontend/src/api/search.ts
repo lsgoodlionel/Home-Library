@@ -35,7 +35,7 @@ function normalizeSearchResultItem(item: ApiSearchResultItem): SearchResultItem 
   };
 }
 
-export async function searchBooks(query: string, limit = 10): Promise<SearchResultItem[]> {
+export async function searchBooks(query: string, limit = 30): Promise<SearchResultItem[]> {
   const { data } = await apiClient.get<ApiSearchResultsResponse>('/search/books', {
     params: { query, limit },
   });

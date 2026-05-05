@@ -25,6 +25,10 @@ _VOLUMES_URL = "https://www.googleapis.com/books/v1/volumes"
 _TIMEOUT = 10.0
 
 
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
 def _api_key() -> str | None:
     return os.getenv("GOOGLE_BOOKS_API_KEY") or None
 
@@ -72,7 +76,15 @@ class GoogleBooksProvider(BookProvider):
     name = "google_books"
 
     async def search(self, query: str, limit: int = 10) -> list[ExternalBookCandidate]:
-        params: dict[str, Any] = {"q": query, "maxResults": min(limit, 40)}
+        params: dict[str, Any] = {
+            "q": query,
+            "maxResults": min(limit, 40),
+            "printType": "books",
+            "orderBy": "relevance",
+        }
+        if _contains_cjk(query):
+            params["langRestrict"] = "zh"
+            params["country"] = "CN"
         key = _api_key()
         if key:
             params["key"] = key

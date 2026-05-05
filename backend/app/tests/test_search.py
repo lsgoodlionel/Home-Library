@@ -175,6 +175,13 @@ class TestDeduplicate:
         result = external_book_service._deduplicate([a, b])
         assert len(result) == 2
 
+    def test_collapses_exact_no_isbn_duplicates(self) -> None:
+        a = _candidate(isbn=None, title="No ISBN A", author="Author", summary=None)
+        b = _candidate(isbn=None, title="No ISBN A", author="Author", summary="Has summary")
+        result = external_book_service._deduplicate([a, b])
+        assert len(result) == 1
+        assert result[0].summary == "Has summary"
+
     def test_mixed(self) -> None:
         a = _candidate(isbn="111")
         b = _candidate(isbn="111")
@@ -207,6 +214,44 @@ class TestCandidateToBookCreateDict:
         d = external_book_service.candidate_to_book_create_dict(c, category_id=5, location_id=3)
         assert d["category_id"] == 5
         assert d["location_id"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Search query expansion tests
+# ---------------------------------------------------------------------------
+
+class TestSearchQueryVariants:
+    def test_plain_query_uses_single_variant(self) -> None:
+        assert external_book_service._search_query_variants("python cookbook") == ["python cookbook"]
+
+    def test_chinese_title_expands_variants(self) -> None:
+        variants = external_book_service._search_query_variants("乡土中国")
+        assert variants[0] == "乡土中国"
+        assert '"乡土中国"' in variants
+        assert "intitle:乡土中国" in variants
+        assert 'intitle:"乡土中国"' in variants
+        assert "乡土中国 中文" in variants
+        assert "乡土中国 简体中文" in variants
+
+    def test_chinese_title_author_expands_author_variant(self) -> None:
+        variants = external_book_service._search_query_variants("乡土中国 费孝通")
+        assert "intitle:乡土中国 inauthor:费孝通" in variants
+
+
+class TestCandidateRanking:
+    def test_exact_traditional_title_ranks_before_mentioned_title(self) -> None:
+        mentioned = _candidate(
+            title="半熟人社会：转型期乡村社会性质深描",
+            author="陈柏峰",
+            isbn="9787520141727",
+        )
+        exact = _candidate(
+            title="鄉土中國",
+            author="費孝通",
+            isbn="9787805695327",
+        )
+        ranked = external_book_service._rank_candidates([mentioned, exact], "乡土中国")
+        assert ranked[0].title == "鄉土中國"
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +300,7 @@ class TestSearchBooksRoute:
         )
 
         assert results == []
-        mock_provider.search.assert_awaited_once()
+        assert mock_provider.search.await_count >= 1
 
 
 class TestIsbnRoute:
@@ -413,11 +458,12 @@ class TestCacheIntegration:
 
         results_first = asyncio.run(_run())
         assert len(results_first) == 1
-        assert mock_provider.search.await_count == 1
+        first_call_count = mock_provider.search.await_count
+        assert first_call_count >= 1
 
         results_second = asyncio.run(_run())
         assert len(results_second) == 1
-        assert mock_provider.search.await_count == 1  # no second call; cache hit
+        assert mock_provider.search.await_count == first_call_count  # no second call; cache hit
 
     def test_isbn_cache(self, db_session: Session) -> None:
         mock_provider = MagicMock()

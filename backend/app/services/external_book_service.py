@@ -36,6 +36,100 @@ def clean_isbn(value: str) -> str:
     return "".join(c for c in value if c.isdigit() or c.upper() == "X")
 
 
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _search_query_variants(query: str) -> list[str]:
+    """Build extra query forms for Chinese title search.
+
+    Public book APIs vary a lot in how they rank Chinese titles. Sending a few
+    focused variants gives the UI enough candidates without adding a new data
+    source or relying on scraping.
+    """
+    normalized = " ".join(query.split())
+    if not normalized:
+        return []
+
+    variants = [normalized]
+    if _contains_cjk(normalized):
+        variants.extend(
+            [
+                f'"{normalized}"',
+                f"intitle:{normalized}",
+                f'intitle:"{normalized}"',
+                f"{normalized} 中文",
+                f"{normalized} 简体中文",
+            ]
+        )
+        parts = normalized.split()
+        if len(parts) >= 2:
+            title = parts[0]
+            author = " ".join(parts[1:])
+            variants.append(f"intitle:{title} inauthor:{author}")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in variants:
+        if item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped
+
+
+def _fold_for_match(text: str) -> str:
+    traditional_to_simplified = str.maketrans(
+        {
+            "國": "国",
+            "鄉": "乡",
+            "費": "费",
+            "孝": "孝",
+            "學": "学",
+            "書": "书",
+            "臺": "台",
+            "台": "台",
+            "灣": "湾",
+            "傳": "传",
+            "簡": "简",
+            "體": "体",
+            "華": "华",
+            "與": "与",
+            "論": "论",
+            "會": "会",
+            "社": "社",
+        }
+    )
+    return "".join(text.lower().translate(traditional_to_simplified).split())
+
+
+def _title_query(query: str) -> str:
+    normalized = " ".join(query.split())
+    if _contains_cjk(normalized):
+        return normalized.split()[0]
+    return normalized
+
+
+def _rank_candidates(
+    candidates: list[ExternalBookCandidate],
+    query: str,
+) -> list[ExternalBookCandidate]:
+    title_query = _fold_for_match(_title_query(query))
+    if not title_query:
+        return candidates
+
+    def _rank(item: ExternalBookCandidate) -> tuple[int, int, int, int, int]:
+        title = _fold_for_match(item.title)
+        language = (item.language or "").lower()
+        exact = int(title == title_query)
+        starts = int(title.startswith(title_query))
+        contains = int(title_query in title)
+        zh = int(language.startswith("zh") or _contains_cjk(item.title))
+        has_isbn = int(bool(item.isbn))
+        return (-exact, -starts, -contains, -zh, -has_isbn)
+
+    return sorted(candidates, key=_rank)
+
+
 # ---------------------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------------------
@@ -94,33 +188,40 @@ def _save_cache(
 # ---------------------------------------------------------------------------
 
 def _deduplicate(candidates: list[ExternalBookCandidate]) -> list[ExternalBookCandidate]:
-    """Keep one candidate per ISBN (the one with more non-None fields)."""
+    """Keep one candidate per ISBN and collapse exact no-ISBN duplicates."""
     seen_isbn: dict[str, ExternalBookCandidate] = {}
-    no_isbn: list[ExternalBookCandidate] = []
+    seen_no_isbn: dict[tuple[str, str, str], ExternalBookCandidate] = {}
+
+    def _score(item: ExternalBookCandidate) -> int:
+        return sum(
+            1
+            for v in (
+                item.title, item.author, item.publisher,
+                item.publish_year, item.cover_url, item.summary,
+                item.pages,
+            )
+            if v is not None
+        )
 
     for c in candidates:
         if not c.isbn:
-            no_isbn.append(c)
+            key = (
+                c.title.strip().lower(),
+                (c.author or "").strip().lower(),
+                c.source,
+            )
+            existing_no_isbn = seen_no_isbn.get(key)
+            if existing_no_isbn is None or _score(c) > _score(existing_no_isbn):
+                seen_no_isbn[key] = c
             continue
         existing = seen_isbn.get(c.isbn)
         if existing is None:
             seen_isbn[c.isbn] = c
         else:
-            def _score(item: ExternalBookCandidate) -> int:
-                return sum(
-                    1
-                    for v in (
-                        item.title, item.author, item.publisher,
-                        item.publish_year, item.cover_url, item.summary,
-                        item.pages,
-                    )
-                    if v is not None
-                )
-
             if _score(c) > _score(existing):
                 seen_isbn[c.isbn] = c
 
-    return list(seen_isbn.values()) + no_isbn
+    return list(seen_isbn.values()) + list(seen_no_isbn.values())
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +253,18 @@ async def _fetch_search(
     limit: int,
     providers: list[BookProvider],
 ) -> list[ExternalBookCandidate]:
-    tasks = [_run_provider_search(p, query, limit) for p in providers]
+    query_variants = _search_query_variants(query)
+    per_variant_limit = min(max(limit, 10), 40)
+    tasks = [
+        _run_provider_search(provider, query_variant, per_variant_limit)
+        for provider in providers
+        for query_variant in query_variants
+    ]
+    if not tasks:
+        return []
     results_per_provider: list[list[ExternalBookCandidate]] = await asyncio.gather(*tasks)
     combined = [c for batch in results_per_provider for c in batch]
-    return _deduplicate(combined)[:limit]
+    return _rank_candidates(_deduplicate(combined), query)[:limit]
 
 
 async def _fetch_isbn(
@@ -178,7 +287,7 @@ async def search_books(
     limit: int = 10,
     providers: list[BookProvider] | None = None,
 ) -> list[ExternalBookCandidate]:
-    cache_key = f"query:{query}"
+    cache_key = f"query:v2:{query}"
     cached = _load_cache(db, cache_key, _SEARCH_CACHE_TTL)
     if cached is not None:
         return cached[:limit]

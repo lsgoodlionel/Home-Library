@@ -100,7 +100,7 @@ async function handleSearch() {
     if (searchType.value === 'isbn') {
       searchResults.value = await searchByISBN(query);
     } else {
-      searchResults.value = await searchBooks(query);
+      searchResults.value = await searchBooks(query, 30);
     }
 
     if (searchResults.value.length === 0) {
@@ -313,7 +313,7 @@ function getAIButtonStatus(status: AIStatus): boolean {
 
           <div class="search-hint">
             <span v-if="searchType === 'title'">
-              支持单独书名（如「乡土中国」）或书名加作者（如「乡土中国 费孝通」）
+              支持单独书名（如「乡土中国」）或书名加作者（如「乡土中国 费孝通」），中文书名会自动扩展检索词并返回更多候选版本
             </span>
             <span v-else>
               支持 ISBN-10 或 ISBN-13，会自动标准化处理
