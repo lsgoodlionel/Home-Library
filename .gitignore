@@ -17,6 +17,10 @@ dist/
 coverage/
 *.local
 
+# Local AI worktrees and tool caches
+.claude/
+.claire/
+
 # Environment
 .env
 .env.local
@@ -40,4 +44,3 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
-

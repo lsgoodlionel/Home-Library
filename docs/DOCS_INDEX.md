@@ -22,9 +22,8 @@
 | [first-wave-task-briefs.md](first-wave-task-briefs.md) | 第一批任务（A/B/C/L）详细说明与可复制提示词 |
 | [development.md](development.md) | 本地开发流程：环境搭建、启动命令、常见问题 |
 | [contributing.md](contributing.md) | 并行开发协作规则：命名约定、接口契约管理、分支策略、汇报模板 |
+| [deployment.md](deployment.md) | Docker Compose 部署、NAS 部署、备份恢复、Ollama/PostgreSQL 可选配置 |
 
-## 待补充文档
+## 完成状态
 
-| 文档 | 说明 | 负责任务 |
-|---|---|---|
-| `deployment.md` | Docker Compose 部署、NAS 部署、备份恢复 | 任务 S |
+所有 A-T 子任务均已完成并集成到 `main`。详见 [parallel-development-plan.md](parallel-development-plan.md) 的 A-T 完成状态总览。
