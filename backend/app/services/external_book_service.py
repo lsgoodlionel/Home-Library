@@ -287,7 +287,7 @@ async def search_books(
     limit: int = 10,
     providers: list[BookProvider] | None = None,
 ) -> list[ExternalBookCandidate]:
-    cache_key = f"query:v2:{query}"
+    cache_key = f"query:v3:{query}"
     cached = _load_cache(db, cache_key, _SEARCH_CACHE_TTL)
     if cached is not None:
         return cached[:limit]
@@ -326,6 +326,7 @@ def candidate_to_book_create_dict(
     source_map = {
         "open_library": "isbn_lookup" if candidate.isbn else "title_search",
         "google_books": "isbn_lookup" if candidate.isbn else "title_search",
+        "douban": "title_search",  # Douban suggest API does not return ISBNs
     }
     source = source_map.get(candidate.source, "title_search")
 

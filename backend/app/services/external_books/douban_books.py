@@ -4,9 +4,22 @@ Uses the Douban subject-suggest JSON endpoint which returns structured book data
 without requiring authentication.  Primarily useful for Chinese-language books
 that Google Books and Open Library cover poorly.
 
-Douban API:
-  suggest:  https://book.douban.com/j/subject_suggest?q={query}
-  detail:   https://book.douban.com/subject/{id}/ (HTML, used for ISBN enrichment)
+Actual response shape from https://book.douban.com/j/subject_suggest?q={query}:
+    [
+      {
+        "id": "2567698",
+        "type": "b",          # "b" = book (NOT "book")
+        "title": "三体",
+        "author_name": "刘慈欣",
+        "year": "2008",
+        "pic": "https://img1.doubanio.com/view/subject/s/public/s2768378.jpg",
+        "url": "https://book.douban.com/subject/2567698/"
+      },
+      ...
+    ]
+
+ISBN lookup via subject_suggest returns [] — ISBN queries are intentionally
+delegated to Google Books / Open Library which handle them better.
 """
 
 from __future__ import annotations
@@ -26,7 +39,7 @@ logger = logging.getLogger(__name__)
 _SUGGEST_URL = "https://book.douban.com/j/subject_suggest"
 _TIMEOUT = 10.0
 
-# Douban returns HTTP 403 for default httpx User-Agent; mimic a real browser.
+# Douban returns HTTP 403 without a browser-like User-Agent.
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -38,52 +51,52 @@ _HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
 
+# Cover URLs contain "/s/" (small); swap for "/m/" (medium, ~bigger thumbnails)
+_COVER_SIZE_RE = re.compile(r"/view/subject/s/")
+
+
+def _parse_year(raw: str) -> int | None:
+    """Extract a 4-digit year from strings like "2008" or "2008年"."""
+    m = re.search(r"\d{4}", raw)
+    return int(m.group()) if m else None
+
 
 def _parse_entry(entry: dict[str, Any]) -> ExternalBookCandidate | None:
-    """Convert one Douban suggest entry to an ExternalBookCandidate."""
-    # Only process book-type entries
-    if entry.get("type") != "book":
+    """Convert one Douban suggest entry to an ExternalBookCandidate.
+
+    Actual ``type`` value for books is ``"b"``, not ``"book"``.
+    """
+    if entry.get("type") != "b":
         return None
 
-    source_id: str | None = entry.get("id") and str(entry["id"])
     title: str = (entry.get("title") or "").strip()
     if not title:
         return None
 
-    author_raw: str = (entry.get("author") or "").strip()
-    # Douban may return "/ 作者名" or "[美] 作者名 著" — strip leading slash/brackets
+    source_id: str | None = str(entry["id"]) if entry.get("id") else None
+
+    author_raw: str = (entry.get("author_name") or "").strip()
+    # Strip leading "/" or "／" sometimes prepended by Douban
     author_raw = re.sub(r"^[\s/／]+", "", author_raw).strip()
     author = author_raw or None
 
-    year_raw: str = entry.get("year") or ""
-    publish_year: int | None = None
-    if year_raw and year_raw.isdigit():
-        publish_year = int(year_raw)
+    publish_year: int | None = _parse_year(entry.get("year") or "")
 
-    publisher: str | None = (entry.get("publisher") or "").strip() or None
-
-    # Cover image — prefer the "normal" size over "small"
-    pic: dict[str, str] = entry.get("pic") or {}
-    cover_url: str | None = pic.get("normal") or pic.get("large") or pic.get("small") or None
-    if cover_url:
-        cover_url = cover_url.replace("http://", "https://")
-
-    # Douban subject URL carries the book ID but not the ISBN directly
-    url: str | None = entry.get("url")
-    subject_id = source_id or (
-        re.search(r"/subject/(\d+)/", url or "")
-        and re.search(r"/subject/(\d+)/", url or "").group(1)  # type: ignore[union-attr]
-    )
+    # pic is a plain URL string (e.g. ".../s/public/s123.jpg")
+    pic_url: str | None = (entry.get("pic") or "").strip() or None
+    if pic_url:
+        # Upgrade http → https and swap small (/s/) for medium (/m/) size
+        pic_url = pic_url.replace("http://", "https://")
+        pic_url = _COVER_SIZE_RE.sub("/view/subject/m/", pic_url)
 
     return ExternalBookCandidate(
         source="douban",
-        source_id=str(subject_id) if subject_id else None,
+        source_id=source_id,
         title=title,
         author=author,
-        publisher=publisher,
         publish_year=publish_year,
-        cover_url=cover_url,
-        language="zh",  # Douban is predominantly Chinese-language
+        cover_url=pic_url,
+        language="zh",  # Douban is predominantly Chinese-language content
         raw=entry,
     )
 
@@ -91,9 +104,9 @@ def _parse_entry(entry: dict[str, Any]) -> ExternalBookCandidate | None:
 class DoubanBooksProvider(BookProvider):
     """Douban Books (豆瓣读书) provider.
 
-    Best for Chinese-language books; data quality is generally higher than
-    Google Books or Open Library for titles published in mainland China.
-    Falls back silently on network or parsing errors.
+    Best for Chinese-language title/author keyword searches.  ISBN lookups
+    return an empty list intentionally — ``subject_suggest`` does not accept
+    raw ISBNs; Google Books and Open Library handle ISBN queries better.
     """
 
     name = "douban"
@@ -125,10 +138,6 @@ class DoubanBooksProvider(BookProvider):
         return results
 
     async def lookup_isbn(self, isbn: str) -> list[ExternalBookCandidate]:
-        # Douban suggest accepts ISBNs as query terms and returns the matching book
-        results = await self.search(isbn, limit=5)
-        # Tag results that came from an ISBN search so dedup can trust the ISBN field
-        for r in results:
-            if not r.isbn:
-                r.isbn = isbn
-        return results
+        # subject_suggest returns [] for raw ISBN queries; let other providers
+        # (Google Books, Open Library) handle ISBN lookups instead.
+        return []
