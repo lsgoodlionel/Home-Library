@@ -12,6 +12,8 @@ interface ApiSearchResultItem {
   isbn?: string;
   cover_url?: string;
   summary?: string;
+  language?: string;
+  pages?: number | null;
   raw?: Record<string, unknown>;
 }
 
@@ -31,6 +33,8 @@ function normalizeSearchResultItem(item: ApiSearchResultItem): SearchResultItem 
     isbn: item.isbn || '',
     coverUrl: item.cover_url || '',
     summary: item.summary || '',
+    language: item.language || '',
+    pages: item.pages ?? null,
     raw: item.raw,
   };
 }

@@ -9,6 +9,8 @@ export interface SearchResultItem {
   isbn: string;
   coverUrl: string;
   summary: string;
+  language: string;
+  pages: number | null;
   raw?: Record<string, unknown>;
 }
 

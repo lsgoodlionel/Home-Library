@@ -316,6 +316,8 @@ function handleApplyDoubanResult(result: SearchResultItem) {
   if (!form.value.publishYear && result.publishYear) form.value.publishYear = result.publishYear;
   if (!form.value.coverUrl && result.coverUrl) form.value.coverUrl = result.coverUrl;
   if (!form.value.summary && result.summary) form.value.summary = result.summary;
+  if (!form.value.language && result.language) form.value.language = result.language;
+  if (!form.value.pages && result.pages) form.value.pages = result.pages;
   // Always prefer Douban cover if available (better quality for Chinese books)
   if (result.coverUrl) form.value.coverUrl = result.coverUrl;
   doubanDialogVisible.value = false;
@@ -349,6 +351,8 @@ function searchResultToForm(result: SearchResultItem): BookFormModel {
     isbn: result.isbn,
     coverUrl: result.coverUrl,
     summary: result.summary,
+    language: result.language || base.language,
+    pages: result.pages,
   };
 }
 
