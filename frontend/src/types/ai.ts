@@ -38,6 +38,45 @@ export interface GenerateTagsResponse {
   model: string;
 }
 
+export interface BookContentFields {
+  title?: string;
+  subtitle?: string;
+  author?: string;
+  translator?: string;
+  publisher?: string;
+  publishYear?: number | null;
+  isbn?: string;
+  language?: string;
+  pages?: number | null;
+  coverUrl?: string;
+  summary?: string;
+  authorIntro?: string;
+  binding?: string;
+  series?: string;
+  note?: string;
+}
+
+export interface BookContentCandidate extends BookContentFields {
+  source: string;
+  sourceId?: string;
+  raw?: Record<string, unknown>;
+}
+
+export interface RecommendBookContentRequest {
+  current: BookContentFields;
+  candidates: BookContentCandidate[];
+  missingFields: string[];
+  model?: string;
+}
+
+export interface RecommendBookContentResponse {
+  recommended: BookContentFields;
+  sourceSummary: string;
+  confidence: number;
+  reason: string;
+  model: string;
+}
+
 export interface SummarizeBookRequest {
   title: string;
   author?: string;

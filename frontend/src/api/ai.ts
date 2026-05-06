@@ -7,6 +7,8 @@ import type {
   DetectDuplicateResponse,
   GenerateTagsRequest,
   GenerateTagsResponse,
+  RecommendBookContentRequest,
+  RecommendBookContentResponse,
   SummarizeBookRequest,
   SummarizeBookResponse,
 } from '@/types/ai';
@@ -26,6 +28,38 @@ interface ApiClassifyBookResponse {
 
 interface ApiGenerateTagsResponse {
   tags: string[];
+  model: string;
+}
+
+interface ApiBookContentFields {
+  title?: string | null;
+  subtitle?: string | null;
+  author?: string | null;
+  translator?: string | null;
+  publisher?: string | null;
+  publish_year?: number | null;
+  isbn?: string | null;
+  language?: string | null;
+  pages?: number | null;
+  cover_url?: string | null;
+  summary?: string | null;
+  author_intro?: string | null;
+  binding?: string | null;
+  series?: string | null;
+  note?: string | null;
+}
+
+interface ApiBookContentCandidate extends ApiBookContentFields {
+  source: string;
+  source_id?: string | null;
+  raw?: Record<string, unknown>;
+}
+
+interface ApiRecommendBookContentResponse {
+  recommended: ApiBookContentFields;
+  source_summary: string;
+  confidence: number;
+  reason: string;
   model: string;
 }
 
@@ -77,6 +111,70 @@ export async function generateTags(req: GenerateTagsRequest): Promise<GenerateTa
     model: req.model,
   });
   return { tags: data.tags, model: data.model };
+}
+
+function toApiBookContentFields(fields: RecommendBookContentRequest['current']): ApiBookContentFields {
+  return {
+    title: fields.title,
+    subtitle: fields.subtitle,
+    author: fields.author,
+    translator: fields.translator,
+    publisher: fields.publisher,
+    publish_year: fields.publishYear,
+    isbn: fields.isbn,
+    language: fields.language,
+    pages: fields.pages,
+    cover_url: fields.coverUrl,
+    summary: fields.summary,
+    author_intro: fields.authorIntro,
+    binding: fields.binding,
+    series: fields.series,
+    note: fields.note,
+  };
+}
+
+function fromApiBookContentFields(fields: ApiBookContentFields): RecommendBookContentResponse['recommended'] {
+  return {
+    title: fields.title || undefined,
+    subtitle: fields.subtitle || undefined,
+    author: fields.author || undefined,
+    translator: fields.translator || undefined,
+    publisher: fields.publisher || undefined,
+    publishYear: fields.publish_year ?? null,
+    isbn: fields.isbn || undefined,
+    language: fields.language || undefined,
+    pages: fields.pages ?? null,
+    coverUrl: fields.cover_url || undefined,
+    summary: fields.summary || undefined,
+    authorIntro: fields.author_intro || undefined,
+    binding: fields.binding || undefined,
+    series: fields.series || undefined,
+    note: fields.note || undefined,
+  };
+}
+
+export async function recommendBookContent(
+  req: RecommendBookContentRequest,
+): Promise<RecommendBookContentResponse> {
+  const candidates: ApiBookContentCandidate[] = req.candidates.map((candidate) => ({
+    ...toApiBookContentFields(candidate),
+    source: candidate.source,
+    source_id: candidate.sourceId,
+    raw: candidate.raw,
+  }));
+  const { data } = await apiClient.post<ApiRecommendBookContentResponse>('/ai/recommend-book-content', {
+    current: toApiBookContentFields(req.current),
+    candidates,
+    missing_fields: req.missingFields,
+    model: req.model,
+  });
+  return {
+    recommended: fromApiBookContentFields(data.recommended),
+    sourceSummary: data.source_summary,
+    confidence: data.confidence,
+    reason: data.reason,
+    model: data.model,
+  };
 }
 
 export async function summarizeBook(req: SummarizeBookRequest): Promise<SummarizeBookResponse> {

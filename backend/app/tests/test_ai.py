@@ -143,6 +143,57 @@ def test_generate_tags_records_success(client: TestClient, db: Session, monkeypa
     assert db.query(AITask).one().status == "success"
 
 
+def test_recommend_book_content_records_success(
+    client: TestClient,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_generate_response(
+                {
+                    "recommended": {
+                        "publisher": "人民出版社",
+                        "publish_year": 2004,
+                        "summary": "马克思主义政治经济学经典著作。",
+                    },
+                    "source_summary": "根据外部候选整理。",
+                    "confidence": 0.82,
+                    "reason": "出版社与年份来自候选数据。",
+                }
+            ),
+        )
+
+    _mock_ollama(monkeypatch, handler)
+
+    response = client.post(
+        "/api/ai/recommend-book-content",
+        json={
+            "current": {"title": "资本论", "author": "马克思"},
+            "candidates": [
+                {
+                    "source": "openlibrary",
+                    "title": "资本论",
+                    "author": "马克思",
+                    "publisher": "人民出版社",
+                    "publish_year": 2004,
+                }
+            ],
+            "missing_fields": ["publisher", "publish_year", "summary"],
+            "model": "qwen2.5",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["recommended"]["publisher"] == "人民出版社"
+    assert data["model"] == "qwen2.5"
+    task = db.query(AITask).one()
+    assert task.task_type == "recommend_book_content"
+    assert task.status == "success"
+
+
 def test_natural_search_records_failure_on_schema_error(
     client: TestClient,
     db: Session,

@@ -20,6 +20,8 @@ from app.schemas.ai import (
     NaturalSearchRequest,
     NaturalSearchResponse,
     OllamaModelsResponse,
+    RecommendBookContentRequest,
+    RecommendBookContentResponse,
     SummarizeBookRequest,
     SummarizeBookResponse,
 )
@@ -169,6 +171,28 @@ def generate_tags(
         input_data=input_data,
         prompt=prompt,
         response_model=GenerateTagsResponse,
+    )
+
+
+@router.post("/recommend-book-content", response_model=RecommendBookContentResponse)
+def recommend_book_content(
+    payload: RecommendBookContentRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> RecommendBookContentResponse:
+    model = _model_name(payload.model)
+    input_data = payload.model_dump(mode="json")
+    prompt = load_prompt_template("recommend_book_content.txt").format(
+        current=_dump(payload.current),
+        candidates=_dump(payload.candidates),
+        missing_fields=", ".join(payload.missing_fields),
+    )
+    return _run_json_task(
+        db,
+        task_type="recommend_book_content",
+        model=model,
+        input_data=input_data,
+        prompt=prompt,
+        response_model=RecommendBookContentResponse,
     )
 
 

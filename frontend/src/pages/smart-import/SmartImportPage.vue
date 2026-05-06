@@ -6,7 +6,7 @@ import { ElMessage } from 'element-plus';
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 
-import { classifyBook, generateTags, getAIModels } from '@/api/ai';
+import { classifyBook, getAIModels, recommendBookContent } from '@/api/ai';
 import { getCategoryOptions, getLocationOptions } from '@/api/books';
 import { createBook } from '@/api/books';
 import { searchBooks, searchByISBN } from '@/api/search';
@@ -14,7 +14,14 @@ import AIRecommendationCard from '@/components/ai/AIRecommendationCard.vue';
 import BookForm from '@/components/book/BookForm.vue';
 import SearchResultCard from '@/components/search/SearchResultCard.vue';
 import { createEmptyBookForm, type BookFormModel, type CategoryOption, type LocationOption } from '@/types/book';
-import type { AIModel, AIStatus, ClassifyBookResponse, GenerateTagsResponse } from '@/types/ai';
+import type {
+  AIModel,
+  AIStatus,
+  BookContentCandidate,
+  BookContentFields,
+  ClassifyBookResponse,
+  RecommendBookContentResponse,
+} from '@/types/ai';
 import type { SearchResultItem } from '@/types/search';
 
 type SearchType = 'isbn' | 'title' | 'title_publisher';
@@ -48,11 +55,11 @@ const locations = ref<LocationOption[]>([]);
 const loadingOptions = ref(false);
 const saving = ref(false);
 
-// ── Douban enhance (ISBN→Douban secondary search) ─────────────────────────────
-const doubanDialogVisible = ref(false);
-const doubanSearching = ref(false);
-const doubanResults = ref<SearchResultItem[]>([]);
-const doubanError = ref('');
+// ── External source enhancement ──────────────────────────────────────────────
+const enhanceDialogVisible = ref(false);
+const enhanceSearching = ref(false);
+const enhanceResults = ref<SearchResultItem[]>([]);
+const enhanceError = ref('');
 
 // ── AI state ─────────────────────────────────────────────────────────────────
 const aiModels = ref<AIModel[]>([]);
@@ -64,10 +71,10 @@ const classifyResult = ref<ClassifyBookResponse | null>(null);
 const classifyError = ref('');
 const classifyDismissed = ref(false);
 
-const tagsStatus = ref<AIStatus>('idle');
-const tagsResult = ref<GenerateTagsResponse | null>(null);
-const tagsError = ref('');
-const tagsDismissed = ref(false);
+const contentStatus = ref<AIStatus>('idle');
+const contentResult = ref<RecommendBookContentResponse | null>(null);
+const contentError = ref('');
+const contentDismissed = ref(false);
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 onMounted(() => {
@@ -201,10 +208,10 @@ function resetAIState() {
   classifyResult.value = null;
   classifyError.value = '';
   classifyDismissed.value = false;
-  tagsStatus.value = aiAvailable.value ? 'idle' : 'unavailable';
-  tagsResult.value = null;
-  tagsError.value = '';
-  tagsDismissed.value = false;
+  contentStatus.value = aiAvailable.value ? 'idle' : 'unavailable';
+  contentResult.value = null;
+  contentError.value = '';
+  contentDismissed.value = false;
 }
 
 async function handleClassify() {
@@ -252,75 +259,67 @@ function handleDismissClassify() {
   classifyDismissed.value = true;
 }
 
-async function handleGenerateTags() {
-  tagsStatus.value = 'loading';
-  tagsError.value = '';
-  try {
-    tagsResult.value = await generateTags({
-      title: form.value.title,
-      author: form.value.author,
-      publisher: form.value.publisher,
-      summary: form.value.summary,
-      model: selectedModel.value || undefined,
-    });
-    tagsStatus.value = 'success';
-  } catch (err: unknown) {
-    tagsStatus.value = 'error';
-    tagsError.value = getErrorMessage(err);
-  }
-}
-
-function handleAcceptTags() {
-  if (!tagsResult.value) return;
-  const existing = new Set(form.value.tagNames);
-  for (const tag of tagsResult.value.tags) {
-    existing.add(tag);
-  }
-  form.value.tagNames = Array.from(existing);
-  tagsDismissed.value = true;
-  ElMessage.success('已采用 AI 标签推荐');
-}
-
-function handleDismissTags() {
-  tagsDismissed.value = true;
-}
-
-// ── Douban enhance ────────────────────────────────────────────────────────────
-async function handleDoubanEnhance() {
-  const title = form.value.title.trim();
-  if (!title) {
-    ElMessage.warning('书名为空，无法进行豆瓣补全');
+async function handleGenerateContentRecommendation() {
+  const missingFields = getMissingContentFields();
+  if (missingFields.length === 0) {
+    ElMessage.info('当前图书信息已较完整，暂无需要 AI 补全的空字段');
     return;
   }
-  doubanDialogVisible.value = true;
-  doubanSearching.value = true;
-  doubanError.value = '';
-  doubanResults.value = [];
+
+  contentStatus.value = 'loading';
+  contentError.value = '';
   try {
-    doubanResults.value = await searchBooks(title, 10, { provider: 'douban' });
-    if (doubanResults.value.length === 0) {
-      doubanError.value = '豆瓣未找到相关书目，请尝试修改书名';
-    }
+    const candidates = await fetchEnhanceCandidates(12);
+    contentResult.value = await recommendBookContent({
+      current: bookFormToContentFields(),
+      candidates: candidates.map(searchResultToContentCandidate),
+      missingFields,
+      model: selectedModel.value || undefined,
+    });
+    contentStatus.value = 'success';
   } catch (err: unknown) {
-    doubanError.value = `豆瓣检索失败：${getErrorMessage(err)}`;
-  } finally {
-    doubanSearching.value = false;
+    contentStatus.value = 'error';
+    contentError.value = getErrorMessage(err);
   }
 }
 
-function handleApplyDoubanResult(result: SearchResultItem) {
-  // Merge: only overwrite fields that are currently empty
-  if (!form.value.author && result.author) form.value.author = result.author;
-  if (!form.value.publisher && result.publisher) form.value.publisher = result.publisher;
-  if (!form.value.publishYear && result.publishYear) form.value.publishYear = result.publishYear;
-  if (!form.value.coverUrl && result.coverUrl) form.value.coverUrl = result.coverUrl;
-  if (!form.value.summary && result.summary) form.value.summary = result.summary;
-  if (!form.value.language && result.language) form.value.language = result.language;
-  if (!form.value.pages && result.pages) form.value.pages = result.pages;
-  // Always prefer Douban cover if available (better quality for Chinese books)
-  if (result.coverUrl) form.value.coverUrl = result.coverUrl;
-  doubanDialogVisible.value = false;
-  ElMessage.success('已从豆瓣补全信息');
+function handleAcceptContentRecommendation() {
+  if (!contentResult.value) return;
+  const changed = applyContentFieldsToEmptyForm(contentResult.value.recommended);
+  contentDismissed.value = true;
+  ElMessage.success(changed > 0 ? `已采用 ${changed} 项 AI 检索内容推荐` : '暂无可填充的空字段');
+}
+
+function handleDismissContentRecommendation() {
+  contentDismissed.value = true;
+}
+
+// ── External source enhancement ──────────────────────────────────────────────
+async function handleExternalEnhance() {
+  if (!form.value.title.trim() && !form.value.isbn.trim()) {
+    ElMessage.warning('书名和 ISBN 为空，无法进行其他数据源补全');
+    return;
+  }
+  enhanceDialogVisible.value = true;
+  enhanceSearching.value = true;
+  enhanceError.value = '';
+  enhanceResults.value = [];
+  try {
+    enhanceResults.value = await fetchEnhanceCandidates(20);
+    if (enhanceResults.value.length === 0) {
+      enhanceError.value = '其他数据源未找到可补全的书目，请尝试修改书名、作者、出版社或 ISBN';
+    }
+  } catch (err: unknown) {
+    enhanceError.value = `其他数据源补全检索失败：${getErrorMessage(err)}`;
+  } finally {
+    enhanceSearching.value = false;
+  }
+}
+
+function handleApplyEnhanceResult(result: SearchResultItem) {
+  const changed = applySearchResultToEmptyForm(result);
+  enhanceDialogVisible.value = false;
+  ElMessage.success(changed > 0 ? `已从 ${result.source} 补全 ${changed} 项信息` : '当前空字段未在该数据源中找到可补全内容');
 }
 
 // ── Final Submit ──────────────────────────────────────────────────────────────
@@ -353,6 +352,167 @@ function searchResultToForm(result: SearchResultItem): BookFormModel {
     language: result.language || base.language,
     pages: result.pages,
   };
+}
+
+async function fetchEnhanceCandidates(limit = 20): Promise<SearchResultItem[]> {
+  const tasks: Array<Promise<SearchResultItem[]>> = [];
+  const title = form.value.title.trim();
+  const author = form.value.author.trim();
+  const publisher = form.value.publisher.trim();
+  const isbn = form.value.isbn.trim();
+
+  if (isbn) tasks.push(searchByISBN(isbn));
+  if (title && author) tasks.push(searchBooks(`${title} ${author}`, limit));
+  if (title && publisher) tasks.push(searchBooks(`${title} ${publisher}`, limit, { mode: 'title_publisher' }));
+  if (title) tasks.push(searchBooks(title, limit));
+
+  const settled = await Promise.allSettled(tasks);
+  const fulfilled = settled
+    .filter((item): item is PromiseFulfilledResult<SearchResultItem[]> => item.status === 'fulfilled')
+    .flatMap((item) => item.value);
+  return dedupeSearchResults(fulfilled).slice(0, limit);
+}
+
+function dedupeSearchResults(items: SearchResultItem[]): SearchResultItem[] {
+  const seen = new Set<string>();
+  const selectedKey = selectedResult.value ? searchResultKey(selectedResult.value) : '';
+  return items.filter((item) => {
+    const key = searchResultKey(item);
+    if (key === selectedKey || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function searchResultKey(item: SearchResultItem): string {
+  return `${item.source}:${item.sourceId || item.isbn || item.title}`;
+}
+
+function applySearchResultToEmptyForm(result: SearchResultItem): number {
+  return applyContentFieldsToEmptyForm(searchResultToContentCandidate(result));
+}
+
+function applyContentFieldsToEmptyForm(fields: BookContentFields): number {
+  let changed = 0;
+  const fillText = (key: keyof BookFormModel, value: string | undefined | null) => {
+    const current = form.value[key];
+    if (typeof current === 'string' && !current.trim() && value?.trim()) {
+      (form.value[key] as string) = value.trim();
+      changed += 1;
+    }
+  };
+  const fillNumber = (key: keyof BookFormModel, value: number | undefined | null) => {
+    if ((form.value[key] === null || form.value[key] === undefined) && value !== null && value !== undefined) {
+      (form.value[key] as number | null) = value;
+      changed += 1;
+    }
+  };
+
+  fillText('title', fields.title);
+  fillText('subtitle', fields.subtitle);
+  fillText('author', fields.author);
+  fillText('translator', fields.translator);
+  fillText('publisher', fields.publisher);
+  fillNumber('publishYear', fields.publishYear);
+  fillText('isbn', fields.isbn);
+  fillText('language', fields.language);
+  fillNumber('pages', fields.pages);
+  fillText('coverUrl', fields.coverUrl);
+  fillText('summary', fields.summary);
+  fillText('authorIntro', fields.authorIntro);
+  fillText('binding', fields.binding);
+  fillText('series', fields.series);
+  fillText('note', fields.note);
+  return changed;
+}
+
+function bookFormToContentFields(): BookContentFields {
+  return {
+    title: form.value.title,
+    subtitle: form.value.subtitle,
+    author: form.value.author,
+    translator: form.value.translator,
+    publisher: form.value.publisher,
+    publishYear: form.value.publishYear,
+    isbn: form.value.isbn,
+    language: form.value.language,
+    pages: form.value.pages,
+    coverUrl: form.value.coverUrl,
+    summary: form.value.summary,
+    authorIntro: form.value.authorIntro,
+    binding: form.value.binding,
+    series: form.value.series,
+    note: form.value.note,
+  };
+}
+
+function searchResultToContentCandidate(result: SearchResultItem): BookContentCandidate {
+  return {
+    source: result.source,
+    sourceId: result.sourceId,
+    title: result.title,
+    subtitle: result.subtitle,
+    author: result.author,
+    publisher: result.publisher,
+    publishYear: result.publishYear,
+    isbn: result.isbn,
+    language: result.language,
+    pages: result.pages,
+    coverUrl: result.coverUrl,
+    summary: result.summary,
+    raw: result.raw,
+  };
+}
+
+function getMissingContentFields(): string[] {
+  const checks: Array<[keyof BookFormModel, string]> = [
+    ['subtitle', 'subtitle'],
+    ['author', 'author'],
+    ['translator', 'translator'],
+    ['publisher', 'publisher'],
+    ['publishYear', 'publish_year'],
+    ['isbn', 'isbn'],
+    ['language', 'language'],
+    ['pages', 'pages'],
+    ['coverUrl', 'cover_url'],
+    ['summary', 'summary'],
+    ['authorIntro', 'author_intro'],
+    ['binding', 'binding'],
+    ['series', 'series'],
+    ['note', 'note'],
+  ];
+  return checks
+    .filter(([key]) => isFormFieldEmpty(key))
+    .map(([, apiName]) => apiName);
+}
+
+function isFormFieldEmpty(key: keyof BookFormModel): boolean {
+  const value = form.value[key];
+  if (typeof value === 'string') return !value.trim();
+  return value === null || value === undefined;
+}
+
+function getRecommendedContentEntries() {
+  if (!contentResult.value) return [];
+  const labels: Array<[keyof BookContentFields, string]> = [
+    ['subtitle', '副标题'],
+    ['author', '作者'],
+    ['translator', '译者'],
+    ['publisher', '出版社'],
+    ['publishYear', '出版年份'],
+    ['isbn', 'ISBN'],
+    ['language', '语言'],
+    ['pages', '页数'],
+    ['coverUrl', '封面 URL'],
+    ['summary', '内容简介'],
+    ['authorIntro', '作者简介'],
+    ['binding', '装帧'],
+    ['series', '丛书'],
+    ['note', '备注'],
+  ];
+  return labels
+    .map(([key, label]) => ({ label, value: contentResult.value?.recommended[key] }))
+    .filter((item) => item.value !== null && item.value !== undefined && String(item.value).trim());
 }
 
 function findCategoryByCode(
@@ -495,7 +655,7 @@ function getAIButtonStatus(status: AIStatus): boolean {
     <div class="page-toolbar">
       <div>
         <h1>智能检索入库</h1>
-        <p>通过 ISBN 或书名检索图书信息，支持 AI 分类与标签推荐</p>
+        <p>通过 ISBN、书名+作者或书名+出版社检索图书信息，支持多数据源补全与 AI 推荐</p>
       </div>
       <el-button :icon="Back" @click="router.push({ name: 'books' })">返回藏书</el-button>
     </div>
@@ -661,40 +821,40 @@ function getAIButtonStatus(status: AIStatus): boolean {
             <div class="summary-footer">
               <el-button
                 size="small"
-                :loading="doubanSearching"
-                @click="handleDoubanEnhance"
+                :loading="enhanceSearching"
+                @click="handleExternalEnhance"
               >
-                从豆瓣补全信息
+                从其他补全信息
               </el-button>
             </div>
           </el-card>
 
-          <!-- Douban enhance dialog -->
+          <!-- External enhance dialog -->
           <el-dialog
-            v-model="doubanDialogVisible"
-            title="从豆瓣补全书目信息"
+            v-model="enhanceDialogVisible"
+            title="从其他数据源补全书目信息"
             width="560px"
             append-to-body
           >
-            <div v-if="doubanSearching" class="douban-loading">
+            <div v-if="enhanceSearching" class="enhance-loading">
               <el-skeleton v-for="i in 3" :key="i" :rows="2" animated />
             </div>
-            <div v-else-if="doubanError" class="douban-error">
-              <el-alert :title="doubanError" :closable="false" type="warning" show-icon />
+            <div v-else-if="enhanceError" class="enhance-error">
+              <el-alert :title="enhanceError" :closable="false" type="warning" show-icon />
             </div>
-            <div v-else class="douban-results">
-              <p class="douban-hint">选择最匹配的版本，封面、作者、年份等字段将补充到当前表单中</p>
+            <div v-else class="enhance-results">
+              <p class="enhance-hint">选择一个数据源版本，仅补充当前为空的字段。可重复打开并选择其他数据源累计补全。</p>
               <div class="results-list">
                 <SearchResultCard
-                  v-for="(result, index) in doubanResults"
+                  v-for="(result, index) in enhanceResults"
                   :key="index"
                   :result="result"
-                  @select="handleApplyDoubanResult"
+                  @select="handleApplyEnhanceResult"
                 />
               </div>
             </div>
             <template #footer>
-              <el-button @click="doubanDialogVisible = false">取消</el-button>
+              <el-button @click="enhanceDialogVisible = false">取消</el-button>
             </template>
           </el-dialog>
 
@@ -770,43 +930,57 @@ function getAIButtonStatus(status: AIStatus): boolean {
             </div>
           </AIRecommendationCard>
 
-          <!-- Tags recommendation -->
+          <!-- Content recommendation -->
           <AIRecommendationCard
-            title="AI 标签推荐"
-            :status="!aiAvailable ? 'unavailable' : (tagsDismissed ? 'idle' : tagsStatus)"
-            :error-message="tagsError"
-            @accept="handleAcceptTags"
-            @dismiss="handleDismissTags"
-            @retry="handleGenerateTags"
+            title="AI 检索内容推荐"
+            :status="!aiAvailable ? 'unavailable' : (contentDismissed ? 'idle' : contentStatus)"
+            :error-message="contentError"
+            @accept="handleAcceptContentRecommendation"
+            @dismiss="handleDismissContentRecommendation"
+            @retry="handleGenerateContentRecommendation"
           >
             <template #idle>
-              <div v-if="!tagsDismissed" class="ai-idle-content">
-                <p>点击下方按钮，让 AI 生成标签</p>
+              <div v-if="!contentDismissed" class="ai-idle-content">
+                <p>先检索外部数据源，再由 AI 整理当前空字段的推荐内容</p>
                 <el-button
                   :disabled="!aiAvailable"
-                  :loading="getAIButtonStatus(tagsStatus)"
+                  :loading="getAIButtonStatus(contentStatus)"
                   size="small"
                   type="primary"
-                  @click="handleGenerateTags"
+                  @click="handleGenerateContentRecommendation"
                 >
-                  生成标签推荐
+                  生成内容推荐
                 </el-button>
               </div>
               <div v-else class="ai-done-content">
-                <el-text type="success" size="small">已处理标签推荐</el-text>
+                <el-text type="success" size="small">已处理内容推荐</el-text>
               </div>
             </template>
 
-            <div v-if="tagsResult" class="tags-result">
-              <div class="tags-list">
-                <el-tag
-                  v-for="tag in tagsResult.tags"
-                  :key="tag"
-                  size="small"
-                  type="success"
+            <div v-if="contentResult" class="content-result">
+              <div class="result-row">
+                <span class="result-label">置信度</span>
+                <el-progress
+                  :percentage="Math.round(contentResult.confidence * 100)"
+                  :stroke-width="8"
+                  style="width: 120px"
+                />
+              </div>
+              <div class="content-fields">
+                <div
+                  v-for="item in getRecommendedContentEntries()"
+                  :key="item.label"
+                  class="content-field"
                 >
-                  {{ tag }}
-                </el-tag>
+                  <span class="result-label">{{ item.label }}</span>
+                  <span>{{ item.value }}</span>
+                </div>
+              </div>
+              <div v-if="contentResult.sourceSummary" class="result-reason">
+                {{ contentResult.sourceSummary }}
+              </div>
+              <div v-if="contentResult.reason" class="result-reason">
+                {{ contentResult.reason }}
               </div>
             </div>
           </AIRecommendationCard>
@@ -1019,31 +1193,31 @@ function getAIButtonStatus(status: AIStatus): boolean {
   justify-content: flex-end;
 }
 
-.douban-loading {
+.enhance-loading {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-.douban-hint {
+.enhance-hint {
   margin: 0 0 10px;
   font-size: 13px;
   color: var(--el-text-color-secondary);
 }
 
-.douban-results {
+.enhance-results {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.douban-error {
+.enhance-error {
   padding: 8px 0;
 }
 
 /* AI results */
 .classify-result,
-.tags-result {
+.content-result {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1070,6 +1244,23 @@ function getAIButtonStatus(status: AIStatus): boolean {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+
+.content-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.content-field {
+  display: grid;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--el-fill-color-lighter);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
 }
 
 .result-reason {

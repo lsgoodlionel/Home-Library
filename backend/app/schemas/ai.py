@@ -58,6 +58,59 @@ class GenerateTagsResponse(BaseModel):
         return [tag.strip() for tag in value if tag.strip()]
 
 
+class BookContentCandidate(BaseModel):
+    source: str
+    source_id: str | None = None
+    title: str | None = None
+    subtitle: str | None = None
+    author: str | None = None
+    translator: str | None = None
+    publisher: str | None = None
+    publish_year: int | None = None
+    isbn: str | None = None
+    language: str | None = None
+    pages: int | None = None
+    cover_url: str | None = None
+    summary: str | None = None
+    author_intro: str | None = None
+    binding: str | None = None
+    series: str | None = None
+    note: str | None = None
+    raw: dict[str, Any] | None = None
+
+
+class BookContentFields(BaseModel):
+    title: str | None = None
+    subtitle: str | None = None
+    author: str | None = None
+    translator: str | None = None
+    publisher: str | None = None
+    publish_year: int | None = None
+    isbn: str | None = None
+    language: str | None = None
+    pages: int | None = None
+    cover_url: str | None = None
+    summary: str | None = None
+    author_intro: str | None = None
+    binding: str | None = None
+    series: str | None = None
+    note: str | None = None
+
+
+class RecommendBookContentRequest(AIBaseRequest):
+    current: BookContentFields
+    candidates: list[BookContentCandidate] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+
+
+class RecommendBookContentResponse(BaseModel):
+    recommended: BookContentFields = Field(default_factory=BookContentFields)
+    source_summary: str = ""
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    reason: str = ""
+    model: str
+
+
 class SummarizeBookRequest(AIBaseRequest):
     title: str
     author: str | None = None
