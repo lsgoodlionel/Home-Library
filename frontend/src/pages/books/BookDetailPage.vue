@@ -96,7 +96,7 @@ async function handleBorrow(payload: BorrowCreatePayload) {
     await createBorrow(payload);
     ElMessage.success('图书已借出');
     borrowDialogVisible.value = false;
-    await loadBorrowAndNotes();
+    await Promise.all([loadBook(), loadBorrowAndNotes()]);
   } catch {
     ElMessage.error('借出失败，请确认借阅接口可用');
   } finally {
@@ -111,7 +111,7 @@ async function handleReturn(id: number, payload: BorrowReturnPayload) {
     await returnBorrow(id, payload);
     ElMessage.success('图书已归还');
     returnDialogVisible.value = false;
-    await loadBorrowAndNotes();
+    await Promise.all([loadBook(), loadBorrowAndNotes()]);
   } catch {
     ElMessage.error('归还失败，请稍后重试');
   } finally {

@@ -101,6 +101,15 @@ function normalizeLocation(location: ApiLocation): LocationOption {
   };
 }
 
+function emptyToNull(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function positiveNumberOrNull(value: number | null): number | null {
+  return value !== null && value > 0 ? value : null;
+}
+
 function normalizeBookListItem(book: ApiBookListItem): BookListItem {
   return {
     id: book.id,
@@ -151,29 +160,29 @@ function normalizeBookDetail(book: ApiBookDetail): BookDetail {
 
 function toBookPayload(model: BookFormModel) {
   return {
-    title: model.title,
-    subtitle: model.subtitle,
-    author: model.author,
-    translator: model.translator,
-    publisher: model.publisher,
+    title: model.title.trim(),
+    subtitle: emptyToNull(model.subtitle),
+    author: emptyToNull(model.author),
+    translator: emptyToNull(model.translator),
+    publisher: emptyToNull(model.publisher),
     publish_year: model.publishYear,
-    isbn: model.isbn,
-    language: model.language,
-    pages: model.pages,
+    isbn: emptyToNull(model.isbn),
+    language: emptyToNull(model.language),
+    pages: positiveNumberOrNull(model.pages),
     price_cents: model.priceCents,
-    binding: model.binding,
-    series: model.series,
-    cover_url: model.coverUrl,
-    summary: model.summary,
-    author_intro: model.authorIntro,
+    binding: emptyToNull(model.binding),
+    series: emptyToNull(model.series),
+    cover_url: emptyToNull(model.coverUrl),
+    summary: emptyToNull(model.summary),
+    author_intro: emptyToNull(model.authorIntro),
     category_id: model.categoryId,
     location_id: model.locationId,
     tag_names: model.tagNames,
     status: model.status,
     read_status: model.readStatus,
-    rating: model.rating,
+    rating: positiveNumberOrNull(model.rating),
     is_favorite: model.isFavorite,
-    note: model.note,
+    note: emptyToNull(model.note),
   };
 }
 

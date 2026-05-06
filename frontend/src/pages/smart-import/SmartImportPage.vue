@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser';
 import { Back, Camera, Search } from '@element-plus/icons-vue';
+import type { AxiosError } from 'axios';
 import { ElMessage } from 'element-plus';
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
@@ -226,14 +227,12 @@ async function handleClassify() {
 
 function handleAcceptClassify() {
   if (!classifyResult.value) return;
-  // Exact match first; fall back to progressively shorter prefix (e.g. "I247.5" → "I247" → "I")
-  const code = classifyResult.value.categoryCode;
-  let found = findCategoryByCode(categories.value, code);
-  if (!found) {
-    for (let len = code.length - 1; len >= 1 && !found; len--) {
-      found = findCategoryByCode(categories.value, code.slice(0, len));
-    }
-  }
+  const code = normalizeCategoryCode(classifyResult.value.categoryCode);
+  const found = resolveCategoryRecommendation(
+    categories.value,
+    code,
+    classifyResult.value.categoryName,
+  );
   if (found) {
     form.value.categoryId = found.id;
   } else {
@@ -370,7 +369,101 @@ function findCategoryByCode(
   return null;
 }
 
+function findCategoryByName(
+  nodes: CategoryOption[],
+  name: string,
+): CategoryOption | null {
+  const normalizedName = normalizeCategoryName(name);
+  if (!normalizedName) return null;
+
+  let looseMatch: CategoryOption | null = null;
+  for (const node of nodes) {
+    const nodeName = normalizeCategoryName(node.name);
+    if (nodeName === normalizedName) return node;
+    if (!looseMatch && (nodeName.includes(normalizedName) || normalizedName.includes(nodeName))) {
+      looseMatch = node;
+    }
+    if (node.children?.length) {
+      const found = findCategoryByName(node.children, name);
+      if (found) return found;
+    }
+  }
+  return looseMatch;
+}
+
+function resolveCategoryRecommendation(
+  nodes: CategoryOption[],
+  code: string,
+  name: string,
+): CategoryOption | null {
+  const exactCodeMatch = findCategoryByCode(nodes, code);
+  if (exactCodeMatch) return exactCodeMatch;
+
+  const nameMatch = findCategoryByName(nodes, name);
+  if (nameMatch) return nameMatch;
+
+  for (const fallbackCode of getCategoryFallbackCodes(code)) {
+    const found = findCategoryByCode(nodes, fallbackCode);
+    if (found) return found;
+  }
+  return null;
+}
+
+function normalizeCategoryCode(code: string): string {
+  return code.trim().toUpperCase().replace(/\s+/g, '');
+}
+
+function normalizeCategoryName(name: string): string {
+  return name
+    .trim()
+    .replace(/[（）()《》\s]/g, '')
+    .replace(/类$/, '');
+}
+
+function getCategoryFallbackCodes(code: string): string[] {
+  const normalized = normalizeCategoryCode(code);
+  if (!normalized) return [];
+
+  const fallbacks: string[] = [];
+  const add = (candidate: string) => {
+    if (candidate && candidate !== normalized && !fallbacks.includes(candidate)) {
+      fallbacks.push(candidate);
+    }
+  };
+
+  if (normalized.includes('.')) {
+    add(normalized.split('.')[0]);
+  }
+
+  const letter = normalized.match(/^[A-Z]+/)?.[0] || '';
+  const rest = normalized.slice(letter.length).replace(/[^0-9]/g, '');
+  if (!letter || !rest) return fallbacks;
+
+  for (let len = rest.length - 1; len >= 1; len--) {
+    add(`${letter}${rest.slice(0, len)}`);
+  }
+  add(letter);
+  return fallbacks;
+}
+
 function getErrorMessage(err: unknown): string {
+  const axiosError = err as AxiosError<{ detail?: unknown; message?: string }>;
+  if (axiosError.response?.data) {
+    const { detail, message } = axiosError.response.data;
+    if (typeof message === 'string' && message) return message;
+    if (typeof detail === 'string' && detail) return detail;
+    if (Array.isArray(detail)) {
+      return detail
+        .map((item) => {
+          if (!item || typeof item !== 'object') return '';
+          const record = item as { loc?: unknown[]; msg?: string };
+          const field = Array.isArray(record.loc) ? record.loc.filter((part) => part !== 'body').join('.') : '';
+          return field && record.msg ? `${field}: ${record.msg}` : record.msg || '';
+        })
+        .filter(Boolean)
+        .join('；');
+    }
+  }
   if (err instanceof Error) return err.message;
   return '未知错误';
 }

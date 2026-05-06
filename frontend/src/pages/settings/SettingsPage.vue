@@ -1,8 +1,15 @@
 <script setup lang="ts">
+import { ArrowDown, ArrowUp, RefreshLeft } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 
-import { fetchAvailableModels, loadLocalSettings, saveLocalSettings } from '@/api/settings';
+import {
+  DEFAULT_EXTERNAL_PROVIDER_ORDER,
+  EXTERNAL_BOOK_PROVIDERS,
+  fetchAvailableModels,
+  loadLocalSettings,
+  saveLocalSettings,
+} from '@/api/settings';
 import type { AIModel } from '@/types/ai';
 
 const models = ref<AIModel[]>([]);
@@ -10,6 +17,11 @@ const loadingModels = ref(false);
 const savingSettings = ref(false);
 
 const settings = reactive(loadLocalSettings());
+const orderedProviders = computed(() =>
+  settings.externalProviderOrder
+    .map((key) => EXTERNAL_BOOK_PROVIDERS.find((provider) => provider.key === key))
+    .filter((provider): provider is (typeof EXTERNAL_BOOK_PROVIDERS)[number] => Boolean(provider)),
+);
 
 async function loadModels() {
   loadingModels.value = true;
@@ -31,6 +43,7 @@ function handleSave() {
       ollamaBaseUrl: settings.ollamaBaseUrl,
       defaultModel: settings.defaultModel,
       externalSearchEnabled: settings.externalSearchEnabled,
+      externalProviderOrder: [...settings.externalProviderOrder],
     });
     ElMessage.success('设置已保存（本地）');
   } finally {
@@ -40,6 +53,21 @@ function handleSave() {
 
 function handleRefreshModels() {
   loadModels();
+}
+
+function moveProvider(index: number, direction: -1 | 1) {
+  const targetIndex = index + direction;
+  if (targetIndex < 0 || targetIndex >= settings.externalProviderOrder.length) {
+    return;
+  }
+  const nextOrder = [...settings.externalProviderOrder];
+  const [item] = nextOrder.splice(index, 1);
+  nextOrder.splice(targetIndex, 0, item);
+  settings.externalProviderOrder = nextOrder;
+}
+
+function resetProviderOrder() {
+  settings.externalProviderOrder = [...DEFAULT_EXTERNAL_PROVIDER_ORDER];
 }
 </script>
 
@@ -118,7 +146,51 @@ function handleRefreshModels() {
             active-text="开启"
             inactive-text="关闭"
           />
-          <div class="field-hint">开启后可通过 ISBN / 书名从 Open Library 等外部数据源检索图书信息。</div>
+          <div class="field-hint">开启后可通过 ISBN / 书名从下列外部数据源检索图书信息。</div>
+        </el-form-item>
+
+        <el-form-item label="默认检索顺序">
+          <div class="provider-order">
+            <div
+              v-for="(provider, index) in orderedProviders"
+              :key="provider.key"
+              class="provider-row"
+            >
+              <div class="provider-rank">{{ index + 1 }}</div>
+              <div class="provider-info">
+                <div class="provider-name">{{ provider.name }}</div>
+                <div class="provider-desc">{{ provider.description }}</div>
+              </div>
+              <div class="provider-actions">
+                <el-tooltip content="上移" placement="top">
+                  <el-button
+                    :icon="ArrowUp"
+                    circle
+                    size="small"
+                    :disabled="index === 0"
+                    @click="moveProvider(index, -1)"
+                  />
+                </el-tooltip>
+                <el-tooltip content="下移" placement="top">
+                  <el-button
+                    :icon="ArrowDown"
+                    circle
+                    size="small"
+                    :disabled="index === orderedProviders.length - 1"
+                    @click="moveProvider(index, 1)"
+                  />
+                </el-tooltip>
+              </div>
+            </div>
+          </div>
+          <el-button
+            class="reset-order-button"
+            :icon="RefreshLeft"
+            @click="resetProviderOrder"
+          >
+            恢复默认顺序
+          </el-button>
+          <div class="field-hint">智能入库和 ISBN 检索会按此顺序调用并排序；需要 API Key 的数据源在未配置时不会返回结果。</div>
         </el-form-item>
       </el-form>
     </el-card>
@@ -186,6 +258,65 @@ function handleRefreshModels() {
   font-size: 12px;
   color: var(--el-color-info);
   line-height: 1.4;
+}
+
+.provider-order {
+  width: 100%;
+  max-width: 560px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.provider-row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: var(--el-fill-color-blank);
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.provider-row:last-child {
+  border-bottom: 0;
+}
+
+.provider-rank {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  font-weight: 600;
+}
+
+.provider-info {
+  min-width: 0;
+}
+
+.provider-name {
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.provider-desc {
+  margin-top: 2px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.provider-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.reset-order-button {
+  margin-top: 10px;
 }
 
 .save-bar {

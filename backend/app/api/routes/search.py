@@ -24,6 +24,12 @@ from app.services import book_service, external_book_service
 router = APIRouter(prefix="/search", tags=["search"])
 
 
+def _parse_provider_order(provider_order: str | None) -> list[str] | None:
+    if not provider_order:
+        return None
+    return [item.strip() for item in provider_order.split(",") if item.strip()]
+
+
 @router.get("/books", response_model=ExternalBookSearchResponse)
 async def search_books(
     db: Annotated[Session, Depends(get_db)],
@@ -31,6 +37,7 @@ async def search_books(
     limit: Annotated[int, Query(ge=1, le=40)] = 10,
     mode: Annotated[str | None, Query(pattern="^(title|title_author|title_publisher)$")] = None,
     provider: Annotated[str | None, Query()] = None,
+    provider_order: Annotated[str | None, Query()] = None,
 ) -> ExternalBookSearchResponse:
     """Search external providers by title, author, or combined keyword.
 
@@ -41,7 +48,12 @@ async def search_books(
     provider: restrict to a single provider by name (e.g. "douban")
     """
     candidates = await external_book_service.search_books(
-        db, query=query, limit=limit, mode=mode, provider_filter=provider
+        db,
+        query=query,
+        limit=limit,
+        mode=mode,
+        provider_filter=provider,
+        provider_order=_parse_provider_order(provider_order),
     )
     return ExternalBookSearchResponse(items=candidates)
 
@@ -50,10 +62,15 @@ async def search_books(
 async def search_by_isbn(
     isbn: str,
     db: Annotated[Session, Depends(get_db)],
+    provider_order: Annotated[str | None, Query()] = None,
 ) -> ExternalBookSearchResponse:
     """Look up a book by ISBN across all configured providers."""
     clean = external_book_service.clean_isbn(isbn)
-    candidates = await external_book_service.lookup_isbn(db, isbn=clean)
+    candidates = await external_book_service.lookup_isbn(
+        db,
+        isbn=clean,
+        provider_order=_parse_provider_order(provider_order),
+    )
     return ExternalBookSearchResponse(items=candidates)
 
 

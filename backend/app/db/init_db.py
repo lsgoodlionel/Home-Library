@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from ..core.config import get_settings
 from ..models import Base, User, Category
 from .session import engine
-from .seeds import L1_CATEGORIES, L2_CATEGORIES
+from .seeds import L1_CATEGORIES, L2_CATEGORIES, L3_CATEGORIES
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +69,32 @@ def seed_categories(db: Session) -> None:
             db.add(cat)
             existing_codes.add(code)
 
+    db.flush()
+
+    # 刷新后重新取 id 映射（含二级）
+    code_to_id = {
+        row[0]: row[1] for row in db.query(Category.code, Category.id).all()
+    }
+
+    # 三级分类
+    for code, parent_code, name, sort_order in L3_CATEGORIES:
+        if code not in existing_codes:
+            parent_id = code_to_id.get(parent_code)
+            cat = Category(
+                code=code,
+                name=name,
+                parent_id=parent_id,
+                sort_order=sort_order,
+                is_system=True,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(cat)
+            existing_codes.add(code)
+
     db.commit()
-    logger.info("分类种子数据已写入")
+    logger.info("分类种子数据已写入（L1: %d, L2: %d, L3: %d）",
+                len(L1_CATEGORIES), len(L2_CATEGORIES), len(L3_CATEGORIES))
 
 
 def seed_admin(db: Session) -> None:

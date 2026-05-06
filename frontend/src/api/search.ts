@@ -1,4 +1,5 @@
 import { apiClient } from './client';
+import { loadLocalSettings } from './settings';
 import type { ImportResultPayload, SearchResultItem, SearchResultsResponse } from '@/types/search';
 
 interface ApiSearchResultItem {
@@ -44,10 +45,12 @@ export async function searchBooks(
   limit = 30,
   options?: { mode?: string; provider?: string },
 ): Promise<SearchResultItem[]> {
+  const providerOrder = loadLocalSettings().externalProviderOrder.join(',');
   const { data } = await apiClient.get<ApiSearchResultsResponse>('/search/books', {
     params: {
       query,
       limit,
+      provider_order: providerOrder,
       ...(options?.mode && { mode: options.mode }),
       ...(options?.provider && { provider: options.provider }),
     },
@@ -56,7 +59,12 @@ export async function searchBooks(
 }
 
 export async function searchByISBN(isbn: string): Promise<SearchResultItem[]> {
-  const { data } = await apiClient.get<ApiSearchResultsResponse>(`/search/isbn/${encodeURIComponent(isbn)}`);
+  const providerOrder = loadLocalSettings().externalProviderOrder.join(',');
+  const { data } = await apiClient.get<ApiSearchResultsResponse>(`/search/isbn/${encodeURIComponent(isbn)}`, {
+    params: {
+      provider_order: providerOrder,
+    },
+  });
   return data.items.map(normalizeSearchResultItem);
 }
 

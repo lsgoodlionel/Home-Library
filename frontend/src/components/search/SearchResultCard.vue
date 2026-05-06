@@ -13,8 +13,10 @@ const emit = defineEmits<{
 }>();
 
 const SOURCE_LABELS: Record<string, string> = {
+  nlc: 'NLC（国家图书馆）',
   open_library: 'Open Library',
   google_books: 'Google Books',
+  isbn_work: 'ISBN Work',
   isbn_db: 'ISBN DB',
   douban: '豆瓣读书',
 };

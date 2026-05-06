@@ -118,12 +118,18 @@ def _title_query(query: str) -> str:
 def _rank_candidates(
     candidates: list[ExternalBookCandidate],
     query: str,
+    provider_order: list[str] | None = None,
 ) -> list[ExternalBookCandidate]:
     title_query = _fold_for_match(_title_query(query))
     if not title_query:
         return candidates
 
-    def _rank(item: ExternalBookCandidate) -> tuple[int, int, int, int, int]:
+    provider_priority = {
+        provider_name: index for index, provider_name in enumerate(provider_order or [])
+    }
+    default_priority = len(provider_priority)
+
+    def _rank(item: ExternalBookCandidate) -> tuple[int, int, int, int, int, int]:
         title = _fold_for_match(item.title)
         language = (item.language or "").lower()
         exact = int(title == title_query)
@@ -131,7 +137,8 @@ def _rank_candidates(
         contains = int(title_query in title)
         zh = int(language.startswith("zh") or _contains_cjk(item.title))
         has_isbn = int(bool(item.isbn))
-        return (-exact, -starts, -contains, -zh, -has_isbn)
+        source_priority = provider_priority.get(item.source, default_priority)
+        return (-exact, -starts, -contains, -zh, -has_isbn, source_priority)
 
     return sorted(candidates, key=_rank)
 
@@ -254,6 +261,18 @@ async def _run_provider_isbn(
         return []
 
 
+def _apply_provider_order(
+    providers: list[BookProvider],
+    provider_order: list[str] | None,
+) -> list[BookProvider]:
+    """Sort providers by user preference while keeping unknown providers active."""
+    if not provider_order:
+        return providers
+
+    priority = {name: index for index, name in enumerate(provider_order)}
+    return sorted(providers, key=lambda provider: priority.get(provider.name, len(priority)))
+
+
 async def _fetch_search(
     query: str,
     limit: int,
@@ -271,7 +290,11 @@ async def _fetch_search(
         return []
     results_per_provider: list[list[ExternalBookCandidate]] = await asyncio.gather(*tasks)
     combined = [c for batch in results_per_provider for c in batch]
-    return _rank_candidates(_deduplicate(combined), query)[:limit]
+    return _rank_candidates(
+        _deduplicate(combined),
+        query,
+        provider_order=[provider.name for provider in providers],
+    )[:limit]
 
 
 async def _fetch_isbn(
@@ -295,16 +318,19 @@ async def search_books(
     providers: list[BookProvider] | None = None,
     mode: str | None = None,
     provider_filter: str | None = None,
+    provider_order: list[str] | None = None,
 ) -> list[ExternalBookCandidate]:
     # Don't use the shared cache when a provider filter is active (partial results)
     use_cache = provider_filter is None
-    cache_key = f"query:v3:{mode or 'title'}:{query}"
+    order_key = ",".join(provider_order or [])
+    cache_key = f"query:v4:{mode or 'title'}:{order_key}:{query}"
     if use_cache:
         cached = _load_cache(db, cache_key, _SEARCH_CACHE_TTL)
         if cached is not None:
             return cached[:limit]
 
     active_providers = providers if providers is not None else get_all_providers()
+    active_providers = _apply_provider_order(active_providers, provider_order)
     if provider_filter:
         active_providers = [p for p in active_providers if p.name == provider_filter]
     candidates = await _fetch_search(query, limit, active_providers, mode=mode)
@@ -317,14 +343,17 @@ async def lookup_isbn(
     db: Session,
     isbn: str,
     providers: list[BookProvider] | None = None,
+    provider_order: list[str] | None = None,
 ) -> list[ExternalBookCandidate]:
     clean = clean_isbn(isbn)
-    cache_key = f"isbn:{clean}"
+    order_key = ",".join(provider_order or [])
+    cache_key = f"isbn:v2:{order_key}:{clean}"
     cached = _load_cache(db, cache_key, _ISBN_CACHE_TTL)
     if cached is not None:
         return cached
 
     active_providers = providers if providers is not None else get_all_providers()
+    active_providers = _apply_provider_order(active_providers, provider_order)
     candidates = await _fetch_isbn(clean, active_providers)
     if candidates:
         _save_cache(db, cache_key, candidates)

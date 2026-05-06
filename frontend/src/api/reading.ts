@@ -45,12 +45,21 @@ function normalizeReadingNote(note: ApiReadingNote): ReadingNote {
   };
 }
 
+function emptyToNull(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function positiveNumberOrNull(value: number | null): number | null {
+  return value !== null && value > 0 ? value : null;
+}
+
 function toNotePayload(payload: ReadingNotePayload) {
   return {
-    title: payload.title,
-    content: payload.content,
+    title: payload.title.trim(),
+    content: emptyToNull(payload.content),
     progress: payload.progress,
-    rating: payload.rating,
+    rating: positiveNumberOrNull(payload.rating),
     started_at: payload.startedAt,
     finished_at: payload.finishedAt,
   };
