@@ -32,7 +32,6 @@ const formRules = {
   room: [{ required: true, message: '请输入房间名称', trigger: 'blur' }],
   shelf: [{ required: true, message: '请输入书架名称', trigger: 'blur' }],
   layer: [{ required: true, message: '请输入层数', trigger: 'blur' }],
-  position: [{ required: true, message: '请输入具体位置', trigger: 'blur' }],
 };
 
 const groupedByRoom = computed(() => {
@@ -201,7 +200,7 @@ async function handleDelete(loc: Location) {
           <el-input v-model="form.layer" placeholder="如 第 2 层" />
         </el-form-item>
         <el-form-item label="具体位置" prop="position">
-          <el-input v-model="form.position" placeholder="如 右侧" />
+          <el-input v-model="form.position" placeholder="可选，如 右侧" />
         </el-form-item>
         <el-form-item label="完整路径">
           <el-input

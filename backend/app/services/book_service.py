@@ -7,7 +7,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.errors import ApiError
-from app.models import Book, BookTag, BorrowRecord, Category, Location, Tag
+from app.models import Book, BookTag, BorrowRecord, Category, Location, ReadingNote, Tag
 from app.schemas.book import BookBatchUpdate, BookCreate, BookUpdate
 
 
@@ -200,6 +200,8 @@ def delete_book(db: Session, book_id: int) -> None:
     if active_borrow is not None:
         raise ApiError("CONFLICT", "图书存在未归还借阅记录，不能删除", status_code=409)
 
+    db.query(ReadingNote).filter(ReadingNote.book_id == book_id).delete(synchronize_session=False)
+    db.query(BorrowRecord).filter(BorrowRecord.book_id == book_id).delete(synchronize_session=False)
     db.delete(book)
     db.commit()
 

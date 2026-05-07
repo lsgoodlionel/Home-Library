@@ -3,7 +3,7 @@ export interface ApiLocation {
   room: string;
   shelf: string;
   layer: string;
-  position: string;
+  position?: string | null;
   full_path: string;
   description: string;
   sort_order: number;
@@ -28,7 +28,7 @@ export interface CreateLocationPayload {
   room: string;
   shelf: string;
   layer: string;
-  position: string;
+  position?: string;
   description?: string;
   sort_order?: number;
 }
@@ -53,7 +53,7 @@ export function normalizeLocation(api: ApiLocation): Location {
     room: api.room,
     shelf: api.shelf,
     layer: api.layer,
-    position: api.position,
+    position: api.position || '',
     fullPath: api.full_path,
     description: api.description,
     sortOrder: api.sort_order,

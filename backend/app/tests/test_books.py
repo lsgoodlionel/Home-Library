@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.session import get_db
 from app.main import app
-from app.models import Base, BorrowRecord, Category, Location
+from app.models import Base, BorrowRecord, Category, Location, ReadingNote, User
 
 
 @pytest.fixture()
@@ -206,3 +206,38 @@ def test_delete_book_without_active_borrow(client: TestClient) -> None:
 
     assert response.status_code == 204
     assert client.get(f"/api/books/{created['id']}").status_code == 404
+
+
+def test_delete_book_removes_history_records(client: TestClient, db_session: Session) -> None:
+    created = _create_book(client).json()
+    user = User(username="note-user", password_hash="x", display_name="笔记用户", role="member", status="active")
+    db_session.add(user)
+    db_session.flush()
+    db_session.add_all(
+        [
+            BorrowRecord(
+                book_id=created["id"],
+                borrower_name="家庭成员",
+                borrowed_at=date.today(),
+                returned_at=date.today(),
+                status="returned",
+                created_at=datetime.now(tz=timezone.utc),
+                updated_at=datetime.now(tz=timezone.utc),
+            ),
+            ReadingNote(
+                book_id=created["id"],
+                user_id=user.id,
+                title="读书笔记",
+                content="已归档",
+                created_at=datetime.now(tz=timezone.utc),
+                updated_at=datetime.now(tz=timezone.utc),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    response = client.delete(f"/api/books/{created['id']}")
+
+    assert response.status_code == 204
+    assert db_session.query(BorrowRecord).filter_by(book_id=created["id"]).count() == 0
+    assert db_session.query(ReadingNote).filter_by(book_id=created["id"]).count() == 0
