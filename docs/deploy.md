@@ -218,3 +218,102 @@ docker compose exec ollama ollama pull qwen2.5
 
 **Q：如何使用 HTTPS？**  
 A：在应用前部署反向代理，推荐 [Nginx Proxy Manager](https://nginxproxymanager.com/) 或群晖的 `Application Portal`。
+
+---
+
+## 更新与自动更新
+
+### 手动更新（一键）
+
+**Linux / macOS / 群晖：**
+```bash
+bash ~/home-library/scripts/update.sh
+```
+
+**Windows（PowerShell）：**
+```powershell
+cd $env:USERPROFILE\home-library
+.\scripts\update.ps1
+```
+
+更新流程：
+1. 检查 GitHub 是否有新版本（无新版本则直接退出）
+2. 自动备份数据库（保留最近 7 天）
+3. 拉取最新代码
+4. 后台重建镜像，重启服务
+5. 健康检查失败时自动回滚
+
+**其他选项：**
+```bash
+bash update.sh --check    # 仅检查新版本，不执行更新
+bash update.sh --force    # 强制重建（即使无新版本）
+```
+
+---
+
+### 配置自动更新
+
+**Linux / macOS（一键配置，默认每天凌晨 3 点）：**
+```bash
+bash ~/home-library/scripts/auto-update-setup.sh
+```
+
+自定义更新时间（每天 2:30）：
+```bash
+bash ~/home-library/scripts/auto-update-setup.sh --interval "30 2 * * *"
+```
+
+每 6 小时检查一次：
+```bash
+bash ~/home-library/scripts/auto-update-setup.sh --interval "0 */6 * * *"
+```
+
+移除自动更新：
+```bash
+bash ~/home-library/scripts/auto-update-setup.sh --remove
+```
+
+**Windows（任务计划）：**
+```powershell
+# 配置每天 03:00 自动更新
+.\scripts\update.ps1 -SetupAuto -AutoTime "03:00"
+
+# 移除
+.\scripts\update.ps1 -RemoveAuto
+```
+
+**群晖 DSM（图形界面）：**
+
+控制面板 → 任务计划 → 新增 → 计划的任务 → 用户定义的脚本：
+- 任务名称：`Home Library 自动更新`
+- 计划：每日 03:00
+- 运行命令：`bash /volume1/docker/home-library/scripts/update.sh --auto`
+
+---
+
+### 更新通知（可选）
+
+在 `.env` 中添加 Webhook 地址，更新成功后自动推送通知：
+
+```env
+# 企业微信机器人
+UPDATE_NOTIFY_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
+
+# 钉钉机器人
+UPDATE_NOTIFY_URL=https://oapi.dingtalk.com/robot/send?access_token=xxx
+
+# Slack
+UPDATE_NOTIFY_URL=https://hooks.slack.com/services/xxx/yyy/zzz
+```
+
+---
+
+### 查看更新日志
+
+```bash
+# Linux / macOS / 群晖
+tail -f ~/home-library/logs/update.log
+
+# systemd 日志（Linux）
+sudo journalctl -u home-library-update.service -f
+```
