@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -50,12 +51,11 @@ class OllamaService:
         self.timeout = self.settings.ollama_timeout_seconds
 
     def list_models(self) -> OllamaModelsResponse:
+        response: httpx.Response | None = None
         try:
-            with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
-                response = client.get("/api/tags")
-                response.raise_for_status()
+            response = self._request("GET", "/api/tags")
         except httpx.HTTPError as exc:
-            raise OllamaUnavailableError("Ollama 服务不可用，请确认本地 Ollama 已启动") from exc
+            raise OllamaUnavailableError(_ollama_unavailable_message(self.base_url)) from exc
 
         try:
             return OllamaModelsResponse.model_validate(response.json())
@@ -78,11 +78,9 @@ class OllamaService:
         }
 
         try:
-            with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
-                response = client.post("/api/generate", json=payload)
-                response.raise_for_status()
+            response = self._request("POST", "/api/generate", json=payload)
         except httpx.HTTPError as exc:
-            raise OllamaUnavailableError("Ollama 服务不可用，请确认本地 Ollama 已启动") from exc
+            raise OllamaUnavailableError(_ollama_unavailable_message(self.base_url)) from exc
 
         try:
             raw = response.json()
@@ -101,6 +99,20 @@ class OllamaService:
         except ValidationError as exc:
             raise OllamaValidationError("模型输出不符合预期结构") from exc
 
+    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        last_exc: httpx.HTTPError | None = None
+        for base_url in _candidate_base_urls(self.base_url):
+            try:
+                with httpx.Client(base_url=base_url, timeout=self.timeout) as client:
+                    response = client.request(method, path, **kwargs)
+                    response.raise_for_status()
+                    return response
+            except httpx.HTTPError as exc:
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+        raise httpx.ConnectError("No Ollama base URL configured")
+
 
 def _parse_model_json(content: str) -> dict[str, Any]:
     cleaned = content.strip()
@@ -117,3 +129,26 @@ def _parse_model_json(content: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise OllamaInvalidJSONError("模型输出 JSON 必须是对象")
     return data
+
+
+def _candidate_base_urls(base_url: str) -> list[str]:
+    candidates = [base_url.rstrip("/")]
+    parsed = urlsplit(base_url)
+    if parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        netloc = "host.docker.internal"
+        if parsed.port:
+            netloc = f"{netloc}:{parsed.port}"
+        docker_host_url = urlunsplit((parsed.scheme or "http", netloc, parsed.path, "", "")).rstrip("/")
+        if docker_host_url not in candidates:
+            candidates.append(docker_host_url)
+    return candidates
+
+
+def _ollama_unavailable_message(base_url: str) -> str:
+    candidates = _candidate_base_urls(base_url)
+    if len(candidates) > 1:
+        return (
+            "Ollama 服务不可用。已尝试配置地址及 Docker 宿主机地址："
+            f"{', '.join(candidates)}。请确认 Ollama 已启动并允许网络访问。"
+        )
+    return "Ollama 服务不可用，请确认本地 Ollama 已启动"

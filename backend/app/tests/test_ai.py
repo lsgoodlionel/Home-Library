@@ -128,6 +128,47 @@ def test_models_use_account_ollama_base_url(
     assert response.json()["models"][0]["name"] == "remote-qwen"
 
 
+def test_models_fallback_to_docker_host_for_localhost_ollama(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client.put(
+        "/api/ai/config",
+        headers=admin_headers,
+        json={
+            "active_provider": "ollama",
+            "default_model": "local-qwen",
+            "providers": [
+                {
+                    "provider": "ollama",
+                    "enabled": True,
+                    "base_url": "http://localhost:11434",
+                    "default_model": "local-qwen",
+                    "note": "local ollama",
+                }
+            ],
+        },
+    )
+
+    requested_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_hosts.append(request.url.host or "")
+        if request.url.host == "localhost":
+            raise httpx.ConnectError("connection refused", request=request)
+        assert request.url.host == "host.docker.internal"
+        return httpx.Response(200, json={"models": [{"name": "local-qwen"}]})
+
+    _mock_ollama(monkeypatch, handler)
+
+    response = client.get("/api/ai/models", headers=admin_headers)
+
+    assert response.status_code == 200
+    assert response.json()["models"][0]["name"] == "local-qwen"
+    assert requested_hosts == ["localhost", "host.docker.internal"]
+
+
 def test_classify_book_accepts_valid_model_json(
     client: TestClient,
     db: Session,
