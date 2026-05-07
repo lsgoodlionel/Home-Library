@@ -217,8 +217,23 @@ def upgrade() -> None:
     op.create_index("idx_ai_tasks_model", "ai_tasks", ["model"])
     op.create_index("idx_ai_tasks_status", "ai_tasks", ["status"])
 
+    op.create_table(
+        "user_ai_settings",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("user_id", sa.Integer(), nullable=False),
+        sa.Column("active_provider", sa.String(40), nullable=False, server_default="ollama"),
+        sa.Column("default_model", sa.String(120), nullable=False, server_default=""),
+        sa.Column("provider_configs", sa.Text(), nullable=False, server_default="{}"),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("user_id"),
+    )
+
 
 def downgrade() -> None:
+    op.drop_table("user_ai_settings")
     op.drop_table("ai_tasks")
     op.drop_table("external_book_results")
     op.drop_table("reading_notes")

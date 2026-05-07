@@ -7,9 +7,10 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.core.errors import ApiError
+from app.core.security import get_current_user, get_optional_current_user
 from app.db.session import get_db
+from app.models.user import User
 from app.schemas.ai import (
     ClassifyBookRequest,
     ClassifyBookResponse,
@@ -25,6 +26,12 @@ from app.schemas.ai import (
     SummarizeBookRequest,
     SummarizeBookResponse,
 )
+from app.schemas.ai_setting import AISettingsResponse, AISettingsUpdate
+from app.services.ai_setting_service import (
+    get_effective_ai_settings,
+    get_ollama_runtime_config,
+    update_user_ai_settings,
+)
 from app.services.ai_task_service import create_ai_task
 from app.services.ollama_service import (
     OllamaInvalidJSONError,
@@ -38,8 +45,8 @@ from app.services.ollama_service import (
 router = APIRouter(prefix="/ai", tags=["ai"])
 
 
-def _model_name(requested_model: str | None) -> str:
-    return requested_model or get_settings().ollama_default_model
+def _model_name(requested_model: str | None, default_model: str) -> str:
+    return requested_model or default_model
 
 
 def _clean_text(value: str | None) -> str:
@@ -67,6 +74,7 @@ def _record_failure_and_raise(
     model: str | None,
     input_data: dict[str, Any],
     exc: OllamaServiceError,
+    created_by: int | None = None,
 ) -> None:
     create_ai_task(
         db,
@@ -75,6 +83,7 @@ def _record_failure_and_raise(
         input_data=input_data,
         status="failed",
         error_message=str(exc),
+        created_by=created_by,
     )
     raise _ai_error_from_ollama(exc)
 
@@ -87,12 +96,21 @@ def _run_json_task(
     input_data: dict[str, Any],
     prompt: str,
     response_model: type[BaseModel],
+    base_url: str,
+    created_by: int | None = None,
 ) -> BaseModel:
-    service = OllamaService()
+    service = OllamaService(base_url=base_url, default_model=model)
     try:
         result = service.generate_json(prompt=prompt, response_model=response_model, model=model)
     except OllamaServiceError as exc:
-        _record_failure_and_raise(db, task_type=task_type, model=model, input_data=input_data, exc=exc)
+        _record_failure_and_raise(
+            db,
+            task_type=task_type,
+            model=model,
+            input_data=input_data,
+            exc=exc,
+            created_by=created_by,
+        )
 
     output_data = result.model_dump(mode="json")
     create_ai_task(
@@ -102,18 +120,47 @@ def _run_json_task(
         input_data=input_data,
         output_data=output_data,
         status="success",
+        created_by=created_by,
     )
     return result
 
 
+@router.get("/config", response_model=AISettingsResponse)
+def get_ai_config(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AISettingsResponse:
+    return get_effective_ai_settings(db, current_user)
+
+
+@router.put("/config", response_model=AISettingsResponse)
+def update_ai_config(
+    payload: AISettingsUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AISettingsResponse:
+    return update_user_ai_settings(db, current_user, payload)
+
+
 @router.get("/models", response_model=OllamaModelsResponse)
-def list_models(db: Annotated[Session, Depends(get_db)]) -> OllamaModelsResponse:
-    input_data = {"base_url": get_settings().ollama_base_url}
-    service = OllamaService()
+def list_models(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User | None, Depends(get_optional_current_user)],
+) -> OllamaModelsResponse:
+    base_url, default_model = get_ollama_runtime_config(db, current_user)
+    input_data = {"base_url": base_url}
+    service = OllamaService(base_url=base_url, default_model=default_model)
     try:
         result = service.list_models()
     except OllamaServiceError as exc:
-        _record_failure_and_raise(db, task_type="models", model=None, input_data=input_data, exc=exc)
+        _record_failure_and_raise(
+            db,
+            task_type="models",
+            model=None,
+            input_data=input_data,
+            exc=exc,
+            created_by=current_user.id if current_user else None,
+        )
 
     create_ai_task(
         db,
@@ -122,6 +169,7 @@ def list_models(db: Annotated[Session, Depends(get_db)]) -> OllamaModelsResponse
         input_data=input_data,
         output_data=result.model_dump(mode="json"),
         status="success",
+        created_by=current_user.id if current_user else None,
     )
     return result
 
@@ -130,8 +178,10 @@ def list_models(db: Annotated[Session, Depends(get_db)]) -> OllamaModelsResponse
 def classify_book(
     payload: ClassifyBookRequest,
     db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> ClassifyBookResponse:
-    model = _model_name(payload.model)
+    base_url, default_model = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, default_model)
     input_data = payload.model_dump(mode="json")
     prompt = load_prompt_template("classify_book.txt").format(
         title=payload.title,
@@ -146,6 +196,8 @@ def classify_book(
         input_data=input_data,
         prompt=prompt,
         response_model=ClassifyBookResponse,
+        base_url=base_url,
+        created_by=current_user.id if current_user else None,
     )
 
 
@@ -153,8 +205,10 @@ def classify_book(
 def generate_tags(
     payload: GenerateTagsRequest,
     db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> GenerateTagsResponse:
-    model = _model_name(payload.model)
+    base_url, default_model = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, default_model)
     input_data = payload.model_dump(mode="json")
     prompt = load_prompt_template("generate_tags.txt").format(
         title=payload.title,
@@ -171,6 +225,8 @@ def generate_tags(
         input_data=input_data,
         prompt=prompt,
         response_model=GenerateTagsResponse,
+        base_url=base_url,
+        created_by=current_user.id if current_user else None,
     )
 
 
@@ -178,8 +234,10 @@ def generate_tags(
 def recommend_book_content(
     payload: RecommendBookContentRequest,
     db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> RecommendBookContentResponse:
-    model = _model_name(payload.model)
+    base_url, default_model = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, default_model)
     input_data = payload.model_dump(mode="json")
     prompt = load_prompt_template("recommend_book_content.txt").format(
         current=_dump(payload.current),
@@ -193,6 +251,8 @@ def recommend_book_content(
         input_data=input_data,
         prompt=prompt,
         response_model=RecommendBookContentResponse,
+        base_url=base_url,
+        created_by=current_user.id if current_user else None,
     )
 
 
@@ -200,8 +260,10 @@ def recommend_book_content(
 def summarize_book(
     payload: SummarizeBookRequest,
     db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> SummarizeBookResponse:
-    model = _model_name(payload.model)
+    base_url, default_model = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, default_model)
     input_data = payload.model_dump(mode="json")
     prompt = load_prompt_template("summarize_book.txt").format(
         title=payload.title,
@@ -217,6 +279,8 @@ def summarize_book(
         input_data=input_data,
         prompt=prompt,
         response_model=SummarizeBookResponse,
+        base_url=base_url,
+        created_by=current_user.id if current_user else None,
     )
 
 
@@ -224,8 +288,10 @@ def summarize_book(
 def detect_duplicate(
     payload: DetectDuplicateRequest,
     db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> DetectDuplicateResponse:
-    model = _model_name(payload.model)
+    base_url, default_model = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, default_model)
     input_data = payload.model_dump(mode="json")
     prompt = load_prompt_template("detect_duplicate.txt").format(
         first=_dump(payload.first),
@@ -238,6 +304,8 @@ def detect_duplicate(
         input_data=input_data,
         prompt=prompt,
         response_model=DetectDuplicateResponse,
+        base_url=base_url,
+        created_by=current_user.id if current_user else None,
     )
 
 
@@ -245,8 +313,10 @@ def detect_duplicate(
 def natural_search(
     payload: NaturalSearchRequest,
     db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> NaturalSearchResponse:
-    model = _model_name(payload.model)
+    base_url, default_model = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, default_model)
     input_data = payload.model_dump(mode="json")
     prompt = load_prompt_template("natural_search.txt").format(query=payload.query)
     return _run_json_task(
@@ -256,4 +326,6 @@ def natural_search(
         input_data=input_data,
         prompt=prompt,
         response_model=NaturalSearchResponse,
+        base_url=base_url,
+        created_by=current_user.id if current_user else None,
     )

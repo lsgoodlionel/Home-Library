@@ -70,6 +70,25 @@ def get_current_user(
     return user
 
 
+def get_optional_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    db: Annotated[Session, Depends(get_db)],
+) -> object | None:
+    from app.models.user import User
+
+    if credentials is None:
+        return None
+    payload = _decode_token(credentials.credentials)
+    raw_sub = payload.get("sub")
+    if raw_sub is None:
+        return None
+
+    user = db.get(User, int(raw_sub))
+    if user is None or user.status != "active":
+        return None
+    return user
+
+
 def require_admin(
     current_user: Annotated[object, Depends(get_current_user)],
 ) -> object:

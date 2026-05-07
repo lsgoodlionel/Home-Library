@@ -49,6 +49,85 @@ def test_models_reads_ollama_tags(client: TestClient, monkeypatch: pytest.Monkey
     assert response.json()["models"][0]["name"] == "qwen2.5"
 
 
+def test_ai_config_is_persisted_per_account(client: TestClient, admin_headers: dict[str, str]) -> None:
+    response = client.get("/api/ai/config", headers=admin_headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["active_provider"] == "ollama"
+    assert any(provider["provider"] == "openai" for provider in data["providers"])
+
+    updated = client.put(
+        "/api/ai/config",
+        headers=admin_headers,
+        json={
+            "active_provider": "ollama",
+            "default_model": "remote-qwen",
+            "providers": [
+                {
+                    "provider": "ollama",
+                    "enabled": True,
+                    "base_url": "http://192.168.1.10:11434",
+                    "default_model": "remote-qwen",
+                    "note": "remote ollama",
+                },
+                {
+                    "provider": "openai",
+                    "enabled": True,
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key": "sk-test",
+                    "default_model": "gpt-test",
+                    "note": "openai placeholder",
+                },
+            ],
+        },
+    )
+
+    assert updated.status_code == 200
+    saved = updated.json()
+    assert saved["default_model"] == "remote-qwen"
+    ollama = next(provider for provider in saved["providers"] if provider["provider"] == "ollama")
+    assert ollama["base_url"] == "http://192.168.1.10:11434"
+    openai = next(provider for provider in saved["providers"] if provider["provider"] == "openai")
+    assert openai["api_key"] == ""
+    assert openai["has_api_key"] is True
+
+
+def test_models_use_account_ollama_base_url(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client.put(
+        "/api/ai/config",
+        headers=admin_headers,
+        json={
+            "active_provider": "ollama",
+            "default_model": "remote-qwen",
+            "providers": [
+                {
+                    "provider": "ollama",
+                    "enabled": True,
+                    "base_url": "http://remote-ollama.local:11434",
+                    "default_model": "remote-qwen",
+                    "note": "remote ollama",
+                }
+            ],
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url).startswith("http://remote-ollama.local:11434")
+        return httpx.Response(200, json={"models": [{"name": "remote-qwen"}]})
+
+    _mock_ollama(monkeypatch, handler)
+
+    response = client.get("/api/ai/models", headers=admin_headers)
+
+    assert response.status_code == 200
+    assert response.json()["models"][0]["name"] == "remote-qwen"
+
+
 def test_classify_book_accepts_valid_model_json(
     client: TestClient,
     db: Session,

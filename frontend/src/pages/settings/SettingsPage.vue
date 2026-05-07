@@ -6,22 +6,43 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import {
   DEFAULT_EXTERNAL_PROVIDER_ORDER,
   EXTERNAL_BOOK_PROVIDERS,
+  fetchAIModelSettings,
   fetchAvailableModels,
   loadLocalSettings,
+  saveAIModelSettings,
   saveLocalSettings,
 } from '@/api/settings';
 import type { AIModel } from '@/types/ai';
+import type { AIModelSettings, AIProviderConfig, AIProviderKey } from '@/types/settings';
 
 const models = ref<AIModel[]>([]);
 const loadingModels = ref(false);
 const savingSettings = ref(false);
+const loadingAISettings = ref(false);
 
 const settings = reactive(loadLocalSettings());
+const aiSettings = reactive<AIModelSettings>({
+  activeProvider: 'ollama',
+  defaultModel: '',
+  providers: [],
+});
 const orderedProviders = computed(() =>
   settings.externalProviderOrder
     .map((key) => EXTERNAL_BOOK_PROVIDERS.find((provider) => provider.key === key))
     .filter((provider): provider is (typeof EXTERNAL_BOOK_PROVIDERS)[number] => Boolean(provider)),
 );
+const activeAIProvider = computed(() =>
+  aiSettings.providers.find((provider) => provider.provider === aiSettings.activeProvider),
+);
+const aiProviderLabels: Record<AIProviderKey, string> = {
+  ollama: 'Ollama',
+  openai: 'OpenAI',
+  gemini: 'Google Gemini',
+  deepseek: 'DeepSeek',
+  moonshot: 'Kimi / Moonshot',
+  qwen: '通义千问',
+  custom: '自定义兼容接口',
+};
 
 async function loadModels() {
   loadingModels.value = true;
@@ -34,18 +55,48 @@ async function loadModels() {
   }
 }
 
-onMounted(loadModels);
+async function loadAISettings() {
+  loadingAISettings.value = true;
+  try {
+    const data = await fetchAIModelSettings();
+    applyAISettings(data);
+  } catch {
+    ElMessage.error('AI 模型配置加载失败');
+  } finally {
+    loadingAISettings.value = false;
+  }
+}
 
-function handleSave() {
+onMounted(async () => {
+  await loadAISettings();
+  await loadModels();
+});
+
+function applyAISettings(data: AIModelSettings) {
+  aiSettings.activeProvider = data.activeProvider;
+  aiSettings.defaultModel = data.defaultModel;
+  aiSettings.providers = data.providers.map((provider) => ({ ...provider, apiKey: '' }));
+}
+
+async function handleSave() {
   savingSettings.value = true;
   try {
+    const savedAI = await saveAIModelSettings({
+      activeProvider: aiSettings.activeProvider,
+      defaultModel: aiSettings.defaultModel,
+      providers: aiSettings.providers,
+    });
+    applyAISettings(savedAI);
     saveLocalSettings({
-      ollamaBaseUrl: settings.ollamaBaseUrl,
-      defaultModel: settings.defaultModel,
+      ollamaBaseUrl: getProvider('ollama')?.baseUrl || settings.ollamaBaseUrl,
+      defaultModel: aiSettings.defaultModel,
       externalSearchEnabled: settings.externalSearchEnabled,
       externalProviderOrder: [...settings.externalProviderOrder],
     });
-    ElMessage.success('设置已保存（本地）');
+    ElMessage.success('设置已保存到当前账号');
+    await loadModels();
+  } catch {
+    ElMessage.error('设置保存失败');
   } finally {
     savingSettings.value = false;
   }
@@ -69,6 +120,17 @@ function moveProvider(index: number, direction: -1 | 1) {
 function resetProviderOrder() {
   settings.externalProviderOrder = [...DEFAULT_EXTERNAL_PROVIDER_ORDER];
 }
+
+function getProvider(provider: AIProviderKey): AIProviderConfig | undefined {
+  return aiSettings.providers.find((item) => item.provider === provider);
+}
+
+function handleProviderChange(provider: AIProviderKey) {
+  const selected = getProvider(provider);
+  if (selected?.defaultModel) {
+    aiSettings.defaultModel = selected.defaultModel;
+  }
+}
 </script>
 
 <template>
@@ -81,41 +143,38 @@ function resetProviderOrder() {
       type="info"
       :closable="false"
       show-icon
-      title="当前设置仅保存在本地浏览器，后端持久化接口尚未开放。刷新后仍可读取，清除浏览器数据后将重置为默认值。"
+      title="AI 模型配置已按当前登录账号保存到后端；外部检索顺序暂保留浏览器本地设置。"
       class="info-alert"
     />
 
     <el-card class="settings-card">
       <template #header>
-        <span>Ollama 配置</span>
+        <span>AI 模型配置</span>
       </template>
 
-      <el-form label-width="140px">
-        <el-form-item label="Ollama 地址">
-          <el-input
-            v-model="settings.ollamaBaseUrl"
-            placeholder="http://localhost:11434"
-            style="max-width: 400px"
-          />
-          <div class="field-hint">前端展示用，实际请求由后端转发。修改此处不影响后端配置。</div>
+      <el-form v-loading="loadingAISettings" label-width="140px">
+        <el-form-item label="当前服务商">
+          <el-select
+            v-model="aiSettings.activeProvider"
+            style="max-width: 320px"
+            @change="handleProviderChange"
+          >
+            <el-option
+              v-for="provider in aiSettings.providers"
+              :key="provider.provider"
+              :label="aiProviderLabels[provider.provider]"
+              :value="provider.provider"
+            />
+          </el-select>
+          <div class="field-hint">
+            当前仅 Ollama 接入实际调用；其他服务商先保存接口地址、API Key 与默认模型，后续接入调用层。
+          </div>
         </el-form-item>
 
         <el-form-item label="默认模型">
-          <el-select
-            v-model="settings.defaultModel"
-            placeholder="选择默认模型"
-            clearable
-            style="max-width: 300px"
-            :loading="loadingModels"
-          >
-            <el-option
-              v-for="m in models"
-              :key="m.name"
-              :label="m.name"
-              :value="m.name"
-            />
-          </el-select>
+          <el-input v-model="aiSettings.defaultModel" placeholder="如 qwen2.5" style="max-width: 320px" />
           <el-button
+            v-if="aiSettings.activeProvider === 'ollama'"
             :loading="loadingModels"
             style="margin-left: 8px"
             @click="handleRefreshModels"
@@ -124,13 +183,54 @@ function resetProviderOrder() {
           </el-button>
           <div class="field-hint">
             <template v-if="models.length === 0 && !loadingModels">
-              未能获取模型列表，请确认 Ollama 已启动且后端可访问。
+              未能获取模型列表，请确认当前 Ollama 地址可由后端访问。
             </template>
             <template v-else-if="models.length > 0">
               共 {{ models.length }} 个可用模型。
             </template>
           </div>
         </el-form-item>
+
+        <el-divider />
+
+        <div class="provider-config-list">
+          <div
+            v-for="provider in aiSettings.providers"
+            :key="provider.provider"
+            class="ai-provider-panel"
+          >
+            <div class="provider-panel-header">
+              <div>
+                <div class="provider-name">{{ aiProviderLabels[provider.provider] }}</div>
+                <div class="provider-desc">{{ provider.note }}</div>
+              </div>
+              <el-switch
+                v-model="provider.enabled"
+                active-text="启用"
+                inactive-text="停用"
+                :disabled="provider.provider === 'ollama'"
+              />
+            </div>
+
+            <el-form-item :label="provider.provider === 'ollama' ? 'Ollama 地址' : 'API 地址'">
+              <el-input
+                v-model="provider.baseUrl"
+                :placeholder="provider.provider === 'ollama' ? 'http://localhost:11434 或远程 Ollama 地址' : 'https://...'"
+              />
+            </el-form-item>
+            <el-form-item v-if="provider.provider !== 'ollama'" label="API Key">
+              <el-input
+                v-model="provider.apiKey"
+                show-password
+                placeholder="留空表示保持已保存的 Key"
+              />
+              <div v-if="provider.hasApiKey" class="field-hint">当前账号已有已保存 Key；输入新值会覆盖。</div>
+            </el-form-item>
+            <el-form-item label="服务商默认模型">
+              <el-input v-model="provider.defaultModel" placeholder="例如 qwen2.5、gpt-4.1-mini、gemini-2.5-flash" />
+            </el-form-item>
+          </div>
+        </div>
       </el-form>
     </el-card>
 
@@ -308,6 +408,26 @@ function resetProviderOrder() {
   color: var(--el-text-color-secondary);
   font-size: 12px;
   line-height: 1.4;
+}
+
+.provider-config-list {
+  display: grid;
+  gap: 12px;
+}
+
+.ai-provider-panel {
+  padding: 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-blank);
+}
+
+.provider-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .provider-actions {

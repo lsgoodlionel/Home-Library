@@ -37,9 +37,16 @@ def load_prompt_template(name: str) -> str:
 
 
 class OllamaService:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        base_url: str | None = None,
+        default_model: str | None = None,
+    ) -> None:
         self.settings = settings or get_settings()
-        self.base_url = self.settings.ollama_base_url.rstrip("/")
+        self.base_url = (base_url or self.settings.ollama_base_url).rstrip("/")
+        self.default_model = default_model or self.settings.ollama_default_model
         self.timeout = self.settings.ollama_timeout_seconds
 
     def list_models(self) -> OllamaModelsResponse:
@@ -62,7 +69,7 @@ class OllamaService:
         response_model: type[T],
         model: str | None = None,
     ) -> T:
-        selected_model = model or self.settings.ollama_default_model
+        selected_model = model or self.default_model
         payload = {
             "model": selected_model,
             "prompt": prompt,

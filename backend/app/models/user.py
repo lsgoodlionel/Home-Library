@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from .borrow_record import BorrowRecord
     from .reading_note import ReadingNote
     from .ai_task import AITask
+    from .user_ai_setting import UserAISetting
 
 
 class User(Base):
@@ -31,6 +32,12 @@ class User(Base):
     borrow_records: Mapped[List["BorrowRecord"]] = relationship("BorrowRecord", back_populates="creator")
     reading_notes: Mapped[List["ReadingNote"]] = relationship("ReadingNote", back_populates="user")
     ai_tasks: Mapped[List["AITask"]] = relationship("AITask", back_populates="creator")
+    ai_setting: Mapped[Optional["UserAISetting"]] = relationship(
+        "UserAISetting",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     __table_args__ = (
         Index("idx_users_username", "username"),

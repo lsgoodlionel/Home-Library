@@ -1,6 +1,7 @@
 import { getAIModels } from './ai';
+import { apiClient } from './client';
 import type { AIModel } from '@/types/ai';
-import type { AppSettings } from '@/types/settings';
+import type { AIModelSettings, AIProviderConfig, AIProviderKey, AppSettings } from '@/types/settings';
 
 export type { AIModel };
 
@@ -74,4 +75,61 @@ export function saveLocalSettings(settings: AppSettings) {
 
 export async function fetchAvailableModels(): Promise<AIModel[]> {
   return getAIModels();
+}
+
+interface ApiAIProviderConfig {
+  provider: AIProviderKey;
+  enabled: boolean;
+  base_url: string;
+  api_key: string;
+  default_model: string;
+  note: string;
+  has_api_key: boolean;
+}
+
+interface ApiAISettingsResponse {
+  active_provider: AIProviderKey;
+  default_model: string;
+  providers: ApiAIProviderConfig[];
+}
+
+function normalizeAIProvider(config: ApiAIProviderConfig): AIProviderConfig {
+  return {
+    provider: config.provider,
+    enabled: config.enabled,
+    baseUrl: config.base_url,
+    apiKey: config.api_key,
+    defaultModel: config.default_model,
+    note: config.note,
+    hasApiKey: config.has_api_key,
+  };
+}
+
+function normalizeAISettings(data: ApiAISettingsResponse): AIModelSettings {
+  return {
+    activeProvider: data.active_provider,
+    defaultModel: data.default_model,
+    providers: data.providers.map(normalizeAIProvider),
+  };
+}
+
+export async function fetchAIModelSettings(): Promise<AIModelSettings> {
+  const { data } = await apiClient.get<ApiAISettingsResponse>('/ai/config');
+  return normalizeAISettings(data);
+}
+
+export async function saveAIModelSettings(settings: AIModelSettings): Promise<AIModelSettings> {
+  const { data } = await apiClient.put<ApiAISettingsResponse>('/ai/config', {
+    active_provider: settings.activeProvider,
+    default_model: settings.defaultModel,
+    providers: settings.providers.map((provider) => ({
+      provider: provider.provider,
+      enabled: provider.enabled,
+      base_url: provider.baseUrl,
+      api_key: provider.apiKey,
+      default_model: provider.defaultModel,
+      note: provider.note,
+    })),
+  });
+  return normalizeAISettings(data);
 }
