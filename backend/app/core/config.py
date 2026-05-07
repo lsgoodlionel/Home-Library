@@ -55,7 +55,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_DEFAULT_MODEL", "OLLAMA_DEFAULT_MODEL"),
     )
     ollama_timeout_seconds: float = Field(
-        default=30.0,
+        default=120.0,
         validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_TIMEOUT_SECONDS", "OLLAMA_TIMEOUT_SECONDS"),
     )
     ollama_optional: bool = Field(

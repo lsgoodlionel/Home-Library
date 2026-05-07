@@ -1,4 +1,4 @@
-import { apiClient } from './client';
+import { API_TIMEOUTS, apiClient } from './client';
 import { loadLocalSettings } from './settings';
 import type { ImportResultPayload, SearchResultItem, SearchResultsResponse } from '@/types/search';
 
@@ -47,6 +47,7 @@ export async function searchBooks(
 ): Promise<SearchResultItem[]> {
   const providerOrder = loadLocalSettings().externalProviderOrder.join(',');
   const { data } = await apiClient.get<ApiSearchResultsResponse>('/search/books', {
+    timeout: API_TIMEOUTS.search,
     params: {
       query,
       limit,
@@ -61,6 +62,7 @@ export async function searchBooks(
 export async function searchByISBN(isbn: string): Promise<SearchResultItem[]> {
   const providerOrder = loadLocalSettings().externalProviderOrder.join(',');
   const { data } = await apiClient.get<ApiSearchResultsResponse>(`/search/isbn/${encodeURIComponent(isbn)}`, {
+    timeout: API_TIMEOUTS.search,
     params: {
       provider_order: providerOrder,
     },

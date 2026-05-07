@@ -1,4 +1,4 @@
-import { apiClient } from './client';
+import { API_TIMEOUTS, apiClient } from './client';
 import type {
   AIModel,
   ClassifyBookRequest,
@@ -91,6 +91,8 @@ export async function classifyBook(req: ClassifyBookRequest): Promise<ClassifyBo
     publisher: req.publisher,
     summary: req.summary,
     model: req.model,
+  }, {
+    timeout: API_TIMEOUTS.aiGeneration,
   });
   return {
     categoryCode: data.category_code,
@@ -109,6 +111,8 @@ export async function generateTags(req: GenerateTagsRequest): Promise<GenerateTa
     publisher: req.publisher,
     summary: req.summary,
     model: req.model,
+  }, {
+    timeout: API_TIMEOUTS.aiGeneration,
   });
   return { tags: data.tags, model: data.model };
 }
@@ -167,6 +171,8 @@ export async function recommendBookContent(
     candidates,
     missing_fields: req.missingFields,
     model: req.model,
+  }, {
+    timeout: API_TIMEOUTS.aiGeneration,
   });
   return {
     recommended: fromApiBookContentFields(data.recommended),
@@ -184,6 +190,8 @@ export async function summarizeBook(req: SummarizeBookRequest): Promise<Summariz
     publisher: req.publisher,
     summary: req.summary,
     model: req.model,
+  }, {
+    timeout: API_TIMEOUTS.aiGeneration,
   });
   return { summary: data.summary, model: data.model };
 }
@@ -193,6 +201,8 @@ export async function detectDuplicate(req: DetectDuplicateRequest): Promise<Dete
     book_a: req.bookA,
     book_b: req.bookB,
     model: req.model,
+  }, {
+    timeout: API_TIMEOUTS.aiGeneration,
   });
   return {
     isDuplicate: data.is_duplicate,
