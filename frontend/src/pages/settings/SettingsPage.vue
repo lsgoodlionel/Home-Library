@@ -34,6 +34,13 @@ const orderedProviders = computed(() =>
 const activeAIProvider = computed(() =>
   aiSettings.providers.find((provider) => provider.provider === aiSettings.activeProvider),
 );
+const modelOptions = computed(() => {
+  const names = models.value.map((model) => model.name).filter(Boolean);
+  if (aiSettings.defaultModel && !names.includes(aiSettings.defaultModel)) {
+    names.unshift(aiSettings.defaultModel);
+  }
+  return names;
+});
 const aiProviderLabels: Record<AIProviderKey, string> = {
   ollama: 'Ollama',
   openai: 'OpenAI',
@@ -48,6 +55,9 @@ async function loadModels() {
   loadingModels.value = true;
   try {
     models.value = await fetchAvailableModels();
+    if (!aiSettings.defaultModel && models.value.length > 0) {
+      setDefaultModel(models.value[0].name);
+    }
   } catch {
     models.value = [];
   } finally {
@@ -128,7 +138,15 @@ function getProvider(provider: AIProviderKey): AIProviderConfig | undefined {
 function handleProviderChange(provider: AIProviderKey) {
   const selected = getProvider(provider);
   if (selected?.defaultModel) {
-    aiSettings.defaultModel = selected.defaultModel;
+    setDefaultModel(selected.defaultModel);
+  }
+}
+
+function setDefaultModel(model: string) {
+  aiSettings.defaultModel = model;
+  const provider = getProvider(aiSettings.activeProvider);
+  if (provider) {
+    provider.defaultModel = model;
   }
 }
 </script>
@@ -172,7 +190,22 @@ function handleProviderChange(provider: AIProviderKey) {
         </el-form-item>
 
         <el-form-item label="默认模型">
-          <el-input v-model="aiSettings.defaultModel" placeholder="如 qwen2.5" style="max-width: 320px" />
+          <el-select
+            v-model="aiSettings.defaultModel"
+            allow-create
+            clearable
+            filterable
+            placeholder="刷新后选择模型，或手动输入模型名"
+            style="max-width: 360px"
+            @change="setDefaultModel"
+          >
+            <el-option
+              v-for="model in modelOptions"
+              :key="model"
+              :label="model"
+              :value="model"
+            />
+          </el-select>
           <el-button
             v-if="aiSettings.activeProvider === 'ollama'"
             :loading="loadingModels"
@@ -186,7 +219,7 @@ function handleProviderChange(provider: AIProviderKey) {
               未能获取模型列表，请确认当前 Ollama 地址可由后端访问。
             </template>
             <template v-else-if="models.length > 0">
-              共 {{ models.length }} 个可用模型。
+              共 {{ models.length }} 个可用模型，可在左侧下拉框中选择。
             </template>
           </div>
         </el-form-item>
