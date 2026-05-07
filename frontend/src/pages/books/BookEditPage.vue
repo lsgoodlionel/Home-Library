@@ -11,6 +11,7 @@ import {
   getLocationOptions,
   updateBook,
 } from '@/api/books';
+import BookCompletionPanel from '@/components/book/BookCompletionPanel.vue';
 import BookForm from '@/components/book/BookForm.vue';
 import {
   createEmptyBookForm,
@@ -80,14 +81,28 @@ onMounted(() => {
       </el-button>
     </div>
 
-    <BookForm
-      v-model="form"
-      :categories="categories"
-      :loading="saving"
-      :locations="locations"
-      @cancel="router.push({ name: 'book-detail', params: { id: bookId } })"
-      @submit="handleSubmit"
-    />
+    <div class="edit-layout">
+      <BookCompletionPanel
+        v-model="form"
+        :categories="categories"
+      />
+      <el-card>
+        <template #header>
+          <div class="form-header">
+            <span>图书信息</span>
+            <span>可先导入简单书名，再在这里逐步补全</span>
+          </div>
+        </template>
+        <BookForm
+          v-model="form"
+          :categories="categories"
+          :loading="saving"
+          :locations="locations"
+          @cancel="router.push({ name: 'book-detail', params: { id: bookId } })"
+          @submit="handleSubmit"
+        />
+      </el-card>
+    </div>
   </section>
 </template>
 
@@ -113,5 +128,39 @@ onMounted(() => {
 .page-toolbar p {
   margin: 6px 0 0;
   color: var(--app-muted);
+}
+
+.edit-layout {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.edit-layout > :first-child {
+  position: sticky;
+  top: 16px;
+}
+
+.form-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.form-header span:last-child {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+@media (max-width: 960px) {
+  .edit-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .edit-layout > :first-child {
+    position: static;
+  }
 }
 </style>

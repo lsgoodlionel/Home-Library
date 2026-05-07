@@ -60,3 +60,15 @@ def export_books(
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/import/template")
+def export_import_template(
+    format: Annotated[str, Query(pattern="^(csv|json|xlsx|excel)$")] = "xlsx",
+) -> StreamingResponse:
+    content, media_type, filename = import_export_service.export_import_template(format)
+    return StreamingResponse(
+        iter([content]),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

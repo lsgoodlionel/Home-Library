@@ -12,6 +12,14 @@ import {
   saveAIModelSettings,
   saveLocalSettings,
 } from '@/api/settings';
+import {
+  confirmBooksImport,
+  downloadBooksExport,
+  downloadImportTemplate,
+  previewBooksImport,
+  type BackupFormat,
+  type ImportPreviewResult,
+} from '@/api/importExport';
 import type { AIModel } from '@/types/ai';
 import type { AIModelSettings, AIProviderConfig, AIProviderKey } from '@/types/settings';
 
@@ -19,6 +27,13 @@ const models = ref<AIModel[]>([]);
 const loadingModels = ref(false);
 const savingSettings = ref(false);
 const loadingAISettings = ref(false);
+const backupFormat = ref<BackupFormat>('xlsx');
+const backupFile = ref<File | null>(null);
+const importPreview = ref<ImportPreviewResult | null>(null);
+const importing = ref(false);
+const exporting = ref(false);
+const downloadingTemplate = ref(false);
+const fileInputRef = ref<HTMLInputElement | null>(null);
 
 const settings = reactive(loadLocalSettings());
 const aiSettings = reactive<AIModelSettings>({
@@ -148,6 +163,89 @@ function setDefaultModel(model: string) {
   if (provider) {
     provider.defaultModel = model;
   }
+}
+
+async function handleDownloadTemplate() {
+  downloadingTemplate.value = true;
+  try {
+    await downloadImportTemplate(backupFormat.value);
+    ElMessage.success('已下载导入模板');
+  } catch (err: unknown) {
+    ElMessage.error(`模板下载失败：${getErrorMessage(err)}`);
+  } finally {
+    downloadingTemplate.value = false;
+  }
+}
+
+async function handleExportBooks() {
+  exporting.value = true;
+  try {
+    await downloadBooksExport(backupFormat.value);
+    ElMessage.success('已导出全部图书数据');
+  } catch (err: unknown) {
+    ElMessage.error(`导出失败：${getErrorMessage(err)}`);
+  } finally {
+    exporting.value = false;
+  }
+}
+
+function openImportPicker() {
+  fileInputRef.value?.click();
+}
+
+async function handleImportFileChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0] || null;
+  input.value = '';
+  if (!file) return;
+  backupFile.value = file;
+  importing.value = true;
+  try {
+    importPreview.value = await previewBooksImport(file, backupFormat.value);
+    if (importPreview.value.invalidRows > 0) {
+      ElMessage.warning(`预览完成：${importPreview.value.invalidRows} 行存在错误，修正后再导入`);
+    } else {
+      ElMessage.success(`预览完成：${importPreview.value.validRows} 行可导入`);
+    }
+  } catch (err: unknown) {
+    importPreview.value = null;
+    backupFile.value = null;
+    ElMessage.error(`导入预览失败：${getErrorMessage(err)}`);
+  } finally {
+    importing.value = false;
+  }
+}
+
+async function handleConfirmImport() {
+  if (!backupFile.value || !importPreview.value) {
+    ElMessage.warning('请先选择文件并完成预览');
+    return;
+  }
+  if (importPreview.value.invalidRows > 0) {
+    ElMessage.warning('导入文件仍有错误，请修正后重新预览');
+    return;
+  }
+  importing.value = true;
+  try {
+    const result = await confirmBooksImport(backupFile.value, backupFormat.value);
+    ElMessage.success(`导入完成：新增 ${result.importedCount} 本图书`);
+    backupFile.value = null;
+    importPreview.value = null;
+  } catch (err: unknown) {
+    ElMessage.error(`导入失败：${getErrorMessage(err)}`);
+  } finally {
+    importing.value = false;
+  }
+}
+
+function getErrorMessage(err: unknown): string {
+  if (err && typeof err === 'object' && 'response' in err) {
+    const data = (err as { response?: { data?: { detail?: unknown; message?: string } } }).response?.data;
+    if (data?.message) return data.message;
+    if (typeof data?.detail === 'string') return data.detail;
+  }
+  if (err instanceof Error) return err.message;
+  return '未知错误';
 }
 </script>
 
@@ -334,19 +432,65 @@ function setDefaultModel(model: string) {
       </template>
 
       <el-alert
-        type="warning"
+        type="info"
         :closable="false"
         show-icon
-        title="备份功能正在开发中，当前版本暂不支持自动备份配置。可通过导出功能手动导出图书数据。"
+        title="支持导出或导入全部图书信息。Excel 模板可只填写书名，导入后再到藏书编辑中逐步补全。"
       />
 
       <el-form label-width="140px" style="margin-top: 16px">
-        <el-form-item label="手动导出">
-          <el-button disabled>导出全部图书数据（开发中）</el-button>
+        <el-form-item label="备份格式">
+          <el-radio-group v-model="backupFormat">
+            <el-radio-button value="xlsx">Excel</el-radio-button>
+            <el-radio-button value="csv">CSV</el-radio-button>
+            <el-radio-button value="json">JSON</el-radio-button>
+          </el-radio-group>
+          <div class="field-hint">Excel 适合日常编辑；CSV 便于批量整理；JSON 适合完整结构备份。</div>
         </el-form-item>
-        <el-form-item label="自动备份">
-          <el-switch disabled />
-          <div class="field-hint">自动备份功能暂未开放。</div>
+        <el-form-item label="模板与导出">
+          <div class="backup-actions">
+            <el-button :loading="downloadingTemplate" @click="handleDownloadTemplate">
+              下载默认模板
+            </el-button>
+            <el-button type="primary" :loading="exporting" @click="handleExportBooks">
+              导出全部图书
+            </el-button>
+          </div>
+          <div class="field-hint">模板包含完整字段表头，也支持只填写 title / 书名后导入。</div>
+        </el-form-item>
+        <el-form-item label="导入图书">
+          <input
+            ref="fileInputRef"
+            class="hidden-file-input"
+            type="file"
+            accept=".xlsx,.csv,.json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/json"
+            @change="handleImportFileChange"
+          />
+          <div class="backup-import">
+            <el-button :loading="importing" @click="openImportPicker">选择文件并预览</el-button>
+            <el-button
+              type="success"
+              :disabled="!importPreview || importPreview.invalidRows > 0"
+              :loading="importing"
+              @click="handleConfirmImport"
+            >
+              确认导入
+            </el-button>
+          </div>
+          <div v-if="backupFile" class="field-hint">已选择：{{ backupFile.name }}</div>
+          <div v-if="importPreview" class="import-preview">
+            <el-tag type="info">总行数 {{ importPreview.totalRows }}</el-tag>
+            <el-tag type="success">可导入 {{ importPreview.validRows }}</el-tag>
+            <el-tag :type="importPreview.invalidRows ? 'danger' : 'info'">错误 {{ importPreview.invalidRows }}</el-tag>
+            <div v-if="importPreview.errors.length" class="import-errors">
+              <div
+                v-for="error in importPreview.errors.slice(0, 5)"
+                :key="`${error.rowNumber}-${error.field}-${error.code}`"
+              >
+                第 {{ error.rowNumber }} 行：{{ error.message }}
+              </div>
+            </div>
+          </div>
         </el-form-item>
       </el-form>
     </el-card>
@@ -470,6 +614,31 @@ function setDefaultModel(model: string) {
 
 .reset-order-button {
   margin-top: 10px;
+}
+
+.backup-actions,
+.backup-import,
+.import-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.import-preview {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.import-errors {
+  width: 100%;
+  color: var(--el-color-danger);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .save-bar {

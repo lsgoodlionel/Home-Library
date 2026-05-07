@@ -525,3 +525,38 @@ def export_books(db: Session, file_format: str) -> tuple[bytes, str, str]:
             "books.xlsx",
         )
     raise ApiError("VALIDATION_ERROR", "format 仅支持 csv、json、xlsx", status_code=422)
+
+
+def export_import_template(file_format: str) -> tuple[bytes, str, str]:
+    rows = [
+        {
+            "title": "资本论",
+            "author": "卡尔·马克思",
+            "publisher": "",
+            "publish_year": None,
+            "isbn": "",
+            "tag_names": "",
+            "note": "可以只填写 title，导入后再到藏书编辑中逐步补全。",
+        },
+        {
+            "title": "乡土中国",
+            "author": "",
+            "publisher": "",
+            "publish_year": None,
+            "isbn": "",
+            "tag_names": "",
+            "note": "",
+        },
+    ]
+    normalized = file_format.lower()
+    if normalized == "csv":
+        return export_csv(rows), "text/csv; charset=utf-8", "books_import_template.csv"
+    if normalized == "json":
+        return export_json(rows), "application/json", "books_import_template.json"
+    if normalized in {"xlsx", "excel"}:
+        return (
+            export_xlsx(rows),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "books_import_template.xlsx",
+        )
+    raise ApiError("VALIDATION_ERROR", "format 仅支持 csv、json、xlsx", status_code=422)

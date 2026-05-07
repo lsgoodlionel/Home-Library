@@ -206,3 +206,17 @@ def test_excel_preview(client: TestClient, db: Session) -> None:
 
     assert response.status_code == 200
     assert response.json()["valid_rows"] == 1
+
+
+def test_import_template_can_be_previewed(client: TestClient, db: Session) -> None:
+    response = client.get("/api/books/import/template", params={"format": "xlsx"})
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == 'attachment; filename="books_import_template.xlsx"'
+
+    preview = client.post("/api/books/import/preview", **_upload(response.content, "template.xlsx", "xlsx"))
+    assert preview.status_code == 200
+    data = preview.json()
+    assert data["total_rows"] == 2
+    assert data["valid_rows"] == 2
+    assert data["rows"][0]["data"]["title"] == "资本论"
