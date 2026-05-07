@@ -5,7 +5,7 @@
 ## 功能概览
 
 - ✅ 图书增删改查，支持手动录入、ISBN 查询、书名联网检索
-- ✅ 简化中图法分类体系（一级 + 常用二级），支持自定义扩展
+- ✅ 完整中图法分类体系：22 大类 + 213 二级 + 520 三级，共 755 个类目
 - ✅ 四层位置管理：房间 / 书架 / 层数 / 具体位置
 - ✅ 用户登录与角色权限（管理员 / 普通用户 / 访客）
 - ✅ 接入 Open Library、Google Books 等外部数据源
@@ -37,7 +37,13 @@ Home-Library/
 ├── .editorconfig
 ├── docker-compose.yml         Docker Compose 编排
 ├── e2e/                       Playwright E2E 冒烟测试
-├── scripts/                   运维脚本（备份等）
+├── scripts/                   运维脚本
+│   ├── deploy.sh              Linux / macOS / 群晖 一键部署
+│   ├── deploy.ps1             Windows 一键部署（PowerShell）
+│   ├── update.sh              Linux / macOS / 群晖 智能更新
+│   ├── update.ps1             Windows 智能更新（PowerShell）
+│   ├── auto-update-setup.sh   配置定时自动更新（systemd/cron/launchd）
+│   └── backup.sh              数据库与文件备份
 │
 ├── docs/                      项目文档
 │   ├── DOCS_INDEX.md          文档索引
@@ -85,7 +91,77 @@ Home-Library/
 └── docker/                    Dockerfile 与 Nginx 配置
 ```
 
-## 快速开始
+## 一键部署
+
+> 基于 Docker，**无需手动安装依赖**，支持主流服务器和 NAS。
+
+### Ubuntu / Debian / CentOS（自动安装 Docker）
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/deploy.sh)
+```
+
+自定义端口和管理员密码：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/deploy.sh) \
+  -p 8080 -u admin -w "MyPass123"
+```
+
+### macOS
+
+```bash
+# 需先安装 Docker Desktop，建议用 8080（80 需 root）
+bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/deploy.sh) -p 8080
+```
+
+### Windows（PowerShell 管理员）
+
+```powershell
+irm https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/deploy.ps1 | iex
+```
+
+### 群晖 NAS
+
+- **图形界面**：Container Manager → 项目 → 导入 `docker-compose.yml` 和 `.env`
+- **SSH 命令行**：同 Linux 脚本，加 `-d` 参数
+
+> 完整说明、参数列表和常见问题见 [`docs/deploy.md`](docs/deploy.md)
+
+---
+
+## 更新
+
+### 手动一键更新
+
+```bash
+# Linux / macOS / 群晖
+bash ~/home-library/scripts/update.sh
+
+# Windows
+.\scripts\update.ps1
+```
+
+更新流程：检查新版本 → 备份数据库 → 拉取代码 → 重建镜像 → 健康检查（失败自动回滚）
+
+### 配置自动更新（定时）
+
+```bash
+# Linux / macOS：默认每天凌晨 3 点，自动选择 systemd timer / cron / launchd
+bash ~/home-library/scripts/auto-update-setup.sh
+
+# 自定义时间（每天 2:30）
+bash ~/home-library/scripts/auto-update-setup.sh --interval "30 2 * * *"
+
+# Windows：注册任务计划
+.\scripts\update.ps1 -SetupAuto -AutoTime "03:00"
+```
+
+> 支持企业微信 / 钉钉 / Slack 更新通知，详见 [`docs/deploy.md`](docs/deploy.md#更新与自动更新)
+
+---
+
+## 本地开发
 
 ### 前提条件
 
@@ -129,16 +205,6 @@ ollama serve
 ollama pull qwen2.5   # 推荐中文模型
 ```
 
-### Docker Compose
-
-```bash
-cp .env.example .env
-docker compose up -d --build
-curl http://localhost/api/health
-```
-
-默认使用宿主机 `80` 端口；如端口被占用，在 `.env` 中设置 `HTTP_PORT=8080`。完整部署、NAS、备份和恢复说明见 [`docs/deployment.md`](docs/deployment.md)。
-
 ## 测试与质量
 
 ```bash
@@ -176,6 +242,7 @@ npm run test:e2e
 | [API 契约](docs/api-contract.md) | 前后端接口协议 |
 | [数据库设计](docs/database-schema.md) | 表结构与关系 |
 | [前端规范](docs/frontend-spec.md) | 组件、目录、类型约定 |
+| [部署与更新指南](docs/deploy.md) | 一键部署、自动更新、常见问题 |
 | [本地开发流程](docs/development.md) | 环境搭建、命令参考 |
 | [协作规则](docs/contributing.md) | 分支管理、汇报模板 |
 | [文档索引](docs/DOCS_INDEX.md) | 所有文档入口 |
