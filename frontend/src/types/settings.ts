@@ -22,3 +22,25 @@ export interface AIModelSettings {
   defaultModel: string;
   providers: AIProviderConfig[];
 }
+
+export type ExternalSearchProviderKey = 'google_books' | 'isbn_work' | 'douban';
+
+export interface ExternalSearchProviderConfig {
+  provider: ExternalSearchProviderKey;
+  enabled: boolean;
+  apiKey: string;
+  extra: string;
+  note: string;
+  hasApiKey: boolean;
+  hasExtra: boolean;
+}
+
+export interface ExternalSearchSettings {
+  providers: ExternalSearchProviderConfig[];
+}
+
+export interface ExternalProviderValidationResult {
+  provider: ExternalSearchProviderKey;
+  ok: boolean;
+  message: string;
+}

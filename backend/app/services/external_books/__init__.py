@@ -35,7 +35,7 @@ __all__ = [
 ]
 
 
-def get_all_providers() -> list[BookProvider]:
+def get_all_providers(configs: dict[str, dict] | None = None) -> list[BookProvider]:
     """Return all configured providers in priority order.
 
     Search order rationale:
@@ -46,10 +46,16 @@ def get_all_providers() -> list[BookProvider]:
     - Google Books: comprehensive metadata esp. for non-Chinese titles
     - Open Library: free fallback, strong on English titles
     """
-    return [
-        NLCProvider(),
-        IsbnWorkProvider(),
-        DoubanBooksProvider(),
-        GoogleBooksProvider(),
-        OpenLibraryProvider(),
-    ]
+    configs = configs or {}
+    google = configs.get("google_books", {})
+    isbn_work = configs.get("isbn_work", {})
+    douban = configs.get("douban", {})
+    providers: list[BookProvider] = [NLCProvider()]
+    if isbn_work.get("enabled", True):
+        providers.append(IsbnWorkProvider(api_key=isbn_work.get("api_key")))
+    if douban.get("enabled", True):
+        providers.append(DoubanBooksProvider(cookie=douban.get("extra")))
+    if google.get("enabled", True):
+        providers.append(GoogleBooksProvider(api_key=google.get("api_key")))
+    providers.append(OpenLibraryProvider())
+    return providers

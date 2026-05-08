@@ -9,6 +9,7 @@ from .reading_note import ReadingNote
 from .external_book_result import ExternalBookResult
 from .ai_task import AITask
 from .user_ai_setting import UserAISetting
+from .user_external_search_setting import UserExternalSearchSetting
 
 __all__ = [
     "Base",
@@ -23,4 +24,5 @@ __all__ = [
     "ExternalBookResult",
     "AITask",
     "UserAISetting",
+    "UserExternalSearchSetting",
 ]

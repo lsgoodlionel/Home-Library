@@ -29,6 +29,32 @@ const enhanceDialogVisible = ref(false);
 const enhanceSearching = ref(false);
 const enhanceResults = ref<SearchResultItem[]>([]);
 const enhanceError = ref('');
+const activeEnhanceSource = ref('all');
+const SOURCE_LABELS: Record<string, string> = {
+  all: '全部',
+  nlc: 'NLC（国家图书馆）',
+  open_library: 'Open Library',
+  google_books: 'Google Books',
+  isbn_work: 'ISBN Work',
+  douban: '豆瓣读书',
+};
+const enhanceSourceTabs = computed(() => {
+  const counts = new Map<string, number>();
+  enhanceResults.value.forEach((item) => counts.set(item.source, (counts.get(item.source) || 0) + 1));
+  return [
+    { source: 'all', label: '全部', count: enhanceResults.value.length },
+    ...Array.from(counts.entries()).map(([source, count]) => ({
+      source,
+      label: SOURCE_LABELS[source] || source,
+      count,
+    })),
+  ];
+});
+const displayedEnhanceResults = computed(() =>
+  activeEnhanceSource.value === 'all'
+    ? enhanceResults.value
+    : enhanceResults.value.filter((item) => item.source === activeEnhanceSource.value),
+);
 
 const aiModels = ref<AIModel[]>([]);
 const selectedModel = ref('');
@@ -77,6 +103,7 @@ async function handleExternalEnhance() {
   enhanceSearching.value = true;
   enhanceError.value = '';
   enhanceResults.value = [];
+  activeEnhanceSource.value = 'all';
   try {
     enhanceResults.value = await fetchEnhanceCandidates(20);
     if (enhanceResults.value.length === 0) {
@@ -468,8 +495,17 @@ function getErrorMessage(err: unknown): string {
       <el-alert v-else-if="enhanceError" :title="enhanceError" :closable="false" type="warning" show-icon />
       <div v-else class="enhance-results">
         <p>选择一个数据源版本，仅补充当前为空的字段。可重复打开并选择其他数据源累计补全。</p>
+        <el-radio-group v-model="activeEnhanceSource" class="source-filter">
+          <el-radio-button
+            v-for="tab in enhanceSourceTabs"
+            :key="tab.source"
+            :value="tab.source"
+          >
+            {{ tab.label }}（{{ tab.count }}）
+          </el-radio-button>
+        </el-radio-group>
         <SearchResultCard
-          v-for="(result, index) in enhanceResults"
+          v-for="(result, index) in displayedEnhanceResults"
           :key="index"
           :result="result"
           @select="handleApplyEnhanceResult"
@@ -534,5 +570,9 @@ function getErrorMessage(err: unknown): string {
 .enhance-results {
   display: grid;
   gap: 12px;
+}
+
+.source-filter {
+  justify-self: start;
 }
 </style>

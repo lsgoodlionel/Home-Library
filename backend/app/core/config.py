@@ -30,6 +30,10 @@ class Settings(BaseSettings):
         default="sqlite:///./home_library.db",
         validation_alias=AliasChoices("HOME_LIBRARY_DATABASE_URL", "DATABASE_URL"),
     )
+    upload_dir: str = Field(
+        default="./uploads",
+        validation_alias=AliasChoices("HOME_LIBRARY_UPLOAD_DIR", "UPLOAD_DIR"),
+    )
     initial_admin_username: str = Field(
         default="admin",
         validation_alias=AliasChoices("HOME_LIBRARY_INITIAL_ADMIN_USERNAME", "INITIAL_ADMIN_USERNAME"),

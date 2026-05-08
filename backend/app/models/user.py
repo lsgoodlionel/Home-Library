@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from .reading_note import ReadingNote
     from .ai_task import AITask
     from .user_ai_setting import UserAISetting
+    from .user_external_search_setting import UserExternalSearchSetting
 
 
 class User(Base):
@@ -34,6 +35,12 @@ class User(Base):
     ai_tasks: Mapped[List["AITask"]] = relationship("AITask", back_populates="creator")
     ai_setting: Mapped[Optional["UserAISetting"]] = relationship(
         "UserAISetting",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    external_search_setting: Mapped[Optional["UserExternalSearchSetting"]] = relationship(
+        "UserExternalSearchSetting",
         back_populates="user",
         cascade="all, delete-orphan",
         uselist=False,

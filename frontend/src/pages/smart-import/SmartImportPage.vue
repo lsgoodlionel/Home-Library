@@ -40,6 +40,32 @@ const searching = ref(false);
 const searchError = ref('');
 const searchResults = ref<SearchResultItem[]>([]);
 const selectedResult = ref<SearchResultItem | null>(null);
+const activeSearchSource = ref('all');
+const SOURCE_LABELS: Record<string, string> = {
+  all: '全部',
+  nlc: 'NLC（国家图书馆）',
+  open_library: 'Open Library',
+  google_books: 'Google Books',
+  isbn_work: 'ISBN Work',
+  douban: '豆瓣读书',
+};
+const sourceTabs = computed(() => {
+  const counts = new Map<string, number>();
+  searchResults.value.forEach((item) => counts.set(item.source, (counts.get(item.source) || 0) + 1));
+  return [
+    { source: 'all', label: '全部', count: searchResults.value.length },
+    ...Array.from(counts.entries()).map(([source, count]) => ({
+      source,
+      label: SOURCE_LABELS[source] || source,
+      count,
+    })),
+  ];
+});
+const displayedSearchResults = computed(() =>
+  activeSearchSource.value === 'all'
+    ? searchResults.value
+    : searchResults.value.filter((item) => item.source === activeSearchSource.value),
+);
 
 // ── ISBN camera scanner ──────────────────────────────────────────────────────
 const scannerDialogVisible = ref(false);
@@ -129,6 +155,7 @@ async function handleSearch() {
   searching.value = true;
   searchError.value = '';
   searchResults.value = [];
+  activeSearchSource.value = 'all';
 
   try {
     if (searchType.value === 'isbn') {
@@ -782,9 +809,18 @@ function getAIButtonStatus(status: AIStatus): boolean {
         <div class="results-header">
           <span class="results-count">找到 {{ searchResults.length }} 条候选结果，点击「选择此版本」进入入库流程</span>
         </div>
+        <el-radio-group v-model="activeSearchSource" class="source-filter">
+          <el-radio-button
+            v-for="tab in sourceTabs"
+            :key="tab.source"
+            :value="tab.source"
+          >
+            {{ tab.label }}（{{ tab.count }}）
+          </el-radio-button>
+        </el-radio-group>
         <div class="results-list">
           <SearchResultCard
-            v-for="(result, index) in searchResults"
+            v-for="(result, index) in displayedSearchResults"
             :key="index"
             :result="result"
             :selected="selectedResult?.sourceId === result.sourceId"
@@ -1116,6 +1152,10 @@ function getAIButtonStatus(status: AIStatus): boolean {
 .results-header {
   font-size: 13px;
   color: var(--el-text-color-secondary);
+}
+
+.source-filter {
+  align-self: flex-start;
 }
 
 .results-list {

@@ -278,6 +278,8 @@ def _parse_html_list_item(block: str) -> tuple[ExternalBookCandidate | None, str
     author = _strip_role_suffix(_field_from_html(block, "著者") or "") or None
     publisher = _field_from_html(block, "出版社")
     publish_year = _parse_year(_field_from_html(block, "出版年份"))
+    cover_match = re.search(r"<img[^>]+class=\"book_img\"[^>]+src=\"([^\"]+)\"", block, re.S)
+    cover_url = _clean_text(cover_match.group(1)) if cover_match else None
 
     raw = {"docId": source_id, "dataSource": data_source}
     candidate = ExternalBookCandidate(
@@ -289,7 +291,7 @@ def _parse_html_list_item(block: str) -> tuple[ExternalBookCandidate | None, str
         publisher=publisher,
         publish_year=publish_year,
         isbn=None,
-        cover_url=None,
+        cover_url=cover_url,
         summary=None,
         language="zh",
         pages=None,
@@ -394,7 +396,7 @@ async def _search_html(client: httpx.AsyncClient, query: str, limit: int) -> lis
             if detail_text:
                 detail = _parse_html_detail(detail_text, candidate.source_id, data_source)
                 if detail:
-                    candidate = detail
+                    candidate = detail.model_copy(update={"cover_url": detail.cover_url or candidate.cover_url})
         results.append(candidate)
         if len(results) >= limit:
             break

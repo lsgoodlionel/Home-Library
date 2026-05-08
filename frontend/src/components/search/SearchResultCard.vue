@@ -24,6 +24,16 @@ const SOURCE_LABELS: Record<string, string> = {
 function getSourceLabel(source: string): string {
   return SOURCE_LABELS[source] || source;
 }
+
+function coverFallbackText(source: string, hasCoverUrl: boolean): string {
+  if (source === 'nlc') {
+    return hasCoverUrl ? 'NLC封面不可用' : 'NLC暂无封面';
+  }
+  if (source === 'douban' && hasCoverUrl) {
+    return '封面缓存失败';
+  }
+  return hasCoverUrl ? '封面不可用' : '暂无封面';
+}
 </script>
 
 <template>
@@ -44,11 +54,13 @@ function getSourceLabel(source: string): string {
           <template #error>
             <div class="cover-placeholder">
               <el-icon :size="28"><Picture /></el-icon>
+              <span>{{ coverFallbackText(result.source, true) }}</span>
             </div>
           </template>
         </el-image>
         <div v-else class="cover-placeholder">
           <el-icon :size="28"><Picture /></el-icon>
+          <span>{{ coverFallbackText(result.source, false) }}</span>
         </div>
       </div>
 
@@ -124,11 +136,16 @@ function getSourceLabel(source: string): string {
   width: 72px;
   height: 96px;
   display: flex;
+  flex-direction: column;
+  gap: 4px;
   align-items: center;
   justify-content: center;
   background: var(--el-fill-color);
   border-radius: 4px;
   color: var(--el-text-color-placeholder);
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.2;
 }
 
 .book-info {

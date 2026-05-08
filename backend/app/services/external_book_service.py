@@ -11,13 +11,18 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+from pathlib import Path
+from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import httpx
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.external_book_result import ExternalBookResult
 from app.schemas.external_book import ExternalBookCandidate
 from app.services.external_books import BookProvider, get_all_providers
@@ -26,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _ISBN_CACHE_TTL = timedelta(hours=24)
 _SEARCH_CACHE_TTL = timedelta(hours=1)
+_COVER_CACHE_DIR = "external-covers"
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +202,42 @@ def _save_cache(
         db.rollback()
 
 
+def _cover_proxy_url(url: str) -> str:
+    return f"/api/search/cover?url={quote(url, safe='')}"
+
+
+def _proxied_cover_url(source: str, url: str | None) -> str | None:
+    if not url:
+        return None
+    if source in {"douban", "nlc", "isbn_work"}:
+        return _cover_proxy_url(url)
+    return url
+
+
+def _normalize_cover_urls(candidates: list[ExternalBookCandidate]) -> list[ExternalBookCandidate]:
+    normalized: list[ExternalBookCandidate] = []
+    for candidate in candidates:
+        cover_url = _proxied_cover_url(candidate.source, candidate.cover_url)
+        if cover_url == candidate.cover_url:
+            normalized.append(candidate)
+        else:
+            normalized.append(candidate.model_copy(update={"cover_url": cover_url}))
+    return normalized
+
+
+def _provider_config_cache_key(configs: dict[str, dict[str, Any]] | None) -> str:
+    if not configs:
+        return ""
+    fragments: list[str] = []
+    for provider in ("google_books", "isbn_work", "douban"):
+        config = configs.get(provider, {})
+        enabled = bool(config.get("enabled", True))
+        has_api_key = bool(config.get("api_key"))
+        has_extra = bool(config.get("extra"))
+        fragments.append(f"{provider}:{int(enabled)}:{int(has_api_key)}:{int(has_extra)}")
+    return "|".join(fragments)
+
+
 # ---------------------------------------------------------------------------
 # Deduplication
 # ---------------------------------------------------------------------------
@@ -319,24 +361,26 @@ async def search_books(
     mode: str | None = None,
     provider_filter: str | None = None,
     provider_order: list[str] | None = None,
+    provider_configs: dict[str, dict[str, Any]] | None = None,
 ) -> list[ExternalBookCandidate]:
     # Don't use the shared cache when a provider filter is active (partial results)
     use_cache = provider_filter is None
     order_key = ",".join(provider_order or [])
-    cache_key = f"query:v4:{mode or 'title'}:{order_key}:{query}"
+    config_key = _provider_config_cache_key(provider_configs)
+    cache_key = f"query:v5:{mode or 'title'}:{order_key}:{config_key}:{query}"
     if use_cache:
         cached = _load_cache(db, cache_key, _SEARCH_CACHE_TTL)
         if cached is not None:
-            return cached[:limit]
+            return _normalize_cover_urls(cached[:limit])
 
-    active_providers = providers if providers is not None else get_all_providers()
+    active_providers = providers if providers is not None else get_all_providers(provider_configs)
     active_providers = _apply_provider_order(active_providers, provider_order)
     if provider_filter:
         active_providers = [p for p in active_providers if p.name == provider_filter]
     candidates = await _fetch_search(query, limit, active_providers, mode=mode)
     if use_cache and candidates:
         _save_cache(db, cache_key, candidates)
-    return candidates
+    return _normalize_cover_urls(candidates)
 
 
 async def lookup_isbn(
@@ -344,20 +388,70 @@ async def lookup_isbn(
     isbn: str,
     providers: list[BookProvider] | None = None,
     provider_order: list[str] | None = None,
+    provider_configs: dict[str, dict[str, Any]] | None = None,
 ) -> list[ExternalBookCandidate]:
     clean = clean_isbn(isbn)
     order_key = ",".join(provider_order or [])
-    cache_key = f"isbn:v2:{order_key}:{clean}"
+    config_key = _provider_config_cache_key(provider_configs)
+    cache_key = f"isbn:v3:{order_key}:{config_key}:{clean}"
     cached = _load_cache(db, cache_key, _ISBN_CACHE_TTL)
     if cached is not None:
-        return cached
+        return _normalize_cover_urls(cached)
 
-    active_providers = providers if providers is not None else get_all_providers()
+    active_providers = providers if providers is not None else get_all_providers(provider_configs)
     active_providers = _apply_provider_order(active_providers, provider_order)
     candidates = await _fetch_isbn(clean, active_providers)
     if candidates:
         _save_cache(db, cache_key, candidates)
-    return candidates
+    return _normalize_cover_urls(candidates)
+
+
+def _cover_headers(url: str) -> dict[str, str]:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if "doubanio.com" in url:
+        headers["Referer"] = "https://book.douban.com/"
+    elif "find.nlc.cn" in url:
+        headers["Referer"] = "http://find.nlc.cn/"
+    return headers
+
+
+def _cover_extension(content_type: str) -> str:
+    if "png" in content_type:
+        return ".png"
+    if "webp" in content_type:
+        return ".webp"
+    return ".jpg"
+
+
+def _sniff_image_content_type(content: bytes, content_type: str) -> str | None:
+    if content_type.startswith("image/"):
+        return content_type
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content.startswith(b"RIFF") and b"WEBP" in content[:16]:
+        return "image/webp"
+    return None
+
+
+async def cache_external_cover(url: str) -> tuple[Path, str]:
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    base_dir = Path(get_settings().upload_dir) / _COVER_CACHE_DIR
+    base_dir.mkdir(parents=True, exist_ok=True)
+    for existing in base_dir.glob(f"{digest}.*"):
+        content_type = "image/png" if existing.suffix == ".png" else "image/webp" if existing.suffix == ".webp" else "image/jpeg"
+        return existing, content_type
+
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        resp = await client.get(url, headers=_cover_headers(url))
+        resp.raise_for_status()
+        content_type = _sniff_image_content_type(resp.content, resp.headers.get("content-type", ""))
+        if not content_type:
+            raise ValueError("remote cover is not an image")
+        path = base_dir / f"{digest}{_cover_extension(content_type)}"
+        path.write_bytes(resp.content)
+        return path, content_type
 
 
 def candidate_to_book_create_dict(

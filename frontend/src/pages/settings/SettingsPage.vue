@@ -8,11 +8,14 @@ import { bookDetailToForm, getBook, getBooks, getCategoryOptions, updateBook } f
 import {
   DEFAULT_EXTERNAL_PROVIDER_ORDER,
   EXTERNAL_BOOK_PROVIDERS,
+  fetchExternalSearchSettings,
   fetchAIModelSettings,
   fetchAvailableModels,
   loadLocalSettings,
   saveAIModelSettings,
+  saveExternalSearchSettings,
   saveLocalSettings,
+  validateExternalProvider,
 } from '@/api/settings';
 import {
   confirmBooksImport,
@@ -24,12 +27,21 @@ import {
 } from '@/api/importExport';
 import type { AIModel, ClassifyBookResponse } from '@/types/ai';
 import type { BookListItem, CategoryOption } from '@/types/book';
-import type { AIModelSettings, AIProviderConfig, AIProviderKey } from '@/types/settings';
+import type {
+  AIModelSettings,
+  AIProviderConfig,
+  AIProviderKey,
+  ExternalSearchProviderConfig,
+  ExternalSearchProviderKey,
+  ExternalSearchSettings,
+} from '@/types/settings';
 
 const models = ref<AIModel[]>([]);
 const loadingModels = ref(false);
 const savingSettings = ref(false);
 const loadingAISettings = ref(false);
+const loadingExternalSettings = ref(false);
+const validatingExternalProvider = ref<ExternalSearchProviderKey | ''>('');
 const backupFormat = ref<BackupFormat>('xlsx');
 const backupFile = ref<File | null>(null);
 const importPreview = ref<ImportPreviewResult | null>(null);
@@ -44,6 +56,9 @@ const settings = reactive(loadLocalSettings());
 const aiSettings = reactive<AIModelSettings>({
   activeProvider: 'ollama',
   defaultModel: '',
+  providers: [],
+});
+const externalSearchSettings = reactive<ExternalSearchSettings>({
   providers: [],
 });
 const orderedProviders = computed(() =>
@@ -69,6 +84,11 @@ const aiProviderLabels: Record<AIProviderKey, string> = {
   moonshot: 'Kimi / Moonshot',
   qwen: '通义千问',
   custom: '自定义兼容接口',
+};
+const externalProviderLabels: Record<ExternalSearchProviderKey, string> = {
+  google_books: 'Google Books',
+  isbn_work: 'ISBN Work',
+  douban: '豆瓣读书',
 };
 
 async function loadModels() {
@@ -97,8 +117,20 @@ async function loadAISettings() {
   }
 }
 
+async function loadExternalSettings() {
+  loadingExternalSettings.value = true;
+  try {
+    const data = await fetchExternalSearchSettings();
+    externalSearchSettings.providers = data.providers.map((provider) => ({ ...provider, apiKey: '', extra: '' }));
+  } catch {
+    ElMessage.error('外部检索配置加载失败');
+  } finally {
+    loadingExternalSettings.value = false;
+  }
+}
+
 onMounted(async () => {
-  await loadAISettings();
+  await Promise.all([loadAISettings(), loadExternalSettings()]);
   await loadModels();
 });
 
@@ -111,12 +143,16 @@ function applyAISettings(data: AIModelSettings) {
 async function handleSave() {
   savingSettings.value = true;
   try {
-    const savedAI = await saveAIModelSettings({
+    const [savedAI, savedExternal] = await Promise.all([
+      saveAIModelSettings({
       activeProvider: aiSettings.activeProvider,
       defaultModel: aiSettings.defaultModel,
       providers: aiSettings.providers,
-    });
+      }),
+      saveExternalSearchSettings(externalSearchSettings),
+    ]);
     applyAISettings(savedAI);
+    externalSearchSettings.providers = savedExternal.providers.map((provider) => ({ ...provider, apiKey: '', extra: '' }));
     saveLocalSettings({
       ollamaBaseUrl: getProvider('ollama')?.baseUrl || settings.ollamaBaseUrl,
       defaultModel: aiSettings.defaultModel,
@@ -129,6 +165,22 @@ async function handleSave() {
     ElMessage.error('设置保存失败');
   } finally {
     savingSettings.value = false;
+  }
+}
+
+async function handleValidateExternalProvider(provider: ExternalSearchProviderConfig) {
+  validatingExternalProvider.value = provider.provider;
+  try {
+    const result = await validateExternalProvider(provider);
+    if (result.ok) {
+      ElMessage.success(result.message);
+    } else {
+      ElMessage.warning(result.message);
+    }
+  } catch (err: unknown) {
+    ElMessage.error(`验证失败：${getErrorMessage(err)}`);
+  } finally {
+    validatingExternalProvider.value = '';
   }
 }
 
@@ -597,6 +649,60 @@ function getErrorMessage(err: unknown): string {
           </el-button>
           <div class="field-hint">智能入库和 ISBN 检索会按此顺序调用并排序；需要 API Key 的数据源在未配置时不会返回结果。</div>
         </el-form-item>
+
+        <el-form-item label="数据源接口配置">
+          <div v-loading="loadingExternalSettings" class="external-provider-configs">
+            <div
+              v-for="provider in externalSearchSettings.providers"
+              :key="provider.provider"
+              class="external-provider-panel"
+            >
+              <div class="provider-panel-header">
+                <div>
+                  <div class="provider-name">{{ externalProviderLabels[provider.provider] }}</div>
+                  <div class="provider-desc">{{ provider.note }}</div>
+                </div>
+                <el-switch v-model="provider.enabled" active-text="启用" inactive-text="停用" />
+              </div>
+              <el-form-item
+                v-if="provider.provider !== 'douban'"
+                label="API Key"
+                label-width="90px"
+              >
+                <el-input
+                  v-model="provider.apiKey"
+                  type="password"
+                  show-password
+                  placeholder="留空表示保留已保存 Key 或使用环境变量"
+                />
+                <div v-if="provider.hasApiKey" class="field-hint">当前账号已有已保存 Key；输入新值会覆盖。</div>
+              </el-form-item>
+              <el-form-item
+                v-else
+                label="Cookie"
+                label-width="90px"
+              >
+                <el-input
+                  v-model="provider.extra"
+                  type="textarea"
+                  :rows="2"
+                  placeholder="可选：粘贴个人豆瓣 Cookie，用于辅助检索；封面不依赖 Cookie。"
+                />
+                <div v-if="provider.hasExtra" class="field-hint">当前账号已有已保存 Cookie；输入新值会覆盖。</div>
+              </el-form-item>
+              <div class="provider-actions">
+                <el-button
+                  v-if="provider.provider !== 'douban'"
+                  size="small"
+                  :loading="validatingExternalProvider === provider.provider"
+                  @click="handleValidateExternalProvider(provider)"
+                >
+                  验证
+                </el-button>
+              </div>
+            </div>
+          </div>
+        </el-form-item>
       </el-form>
     </el-card>
 
@@ -790,6 +896,20 @@ function getErrorMessage(err: unknown): string {
 }
 
 .ai-provider-panel {
+  padding: 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-blank);
+}
+
+.external-provider-configs {
+  width: 100%;
+  max-width: 560px;
+  display: grid;
+  gap: 12px;
+}
+
+.external-provider-panel {
   padding: 14px;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;

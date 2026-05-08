@@ -134,12 +134,15 @@ class IsbnWorkProvider(BookProvider):
 
     name = "isbn_work"
 
+    def __init__(self, api_key: str | None = None) -> None:
+        self.api_key = api_key
+
     async def search(self, query: str, limit: int = 10) -> list[ExternalBookCandidate]:
         # isbn.work has no keyword search endpoint — ISBN lookup only.
         return []
 
     async def lookup_isbn(self, isbn: str) -> list[ExternalBookCandidate]:
-        key = _api_key()
+        key = self.api_key or _api_key()
         if not key:
             logger.debug("isbn.work skipped: ISBN_WORK_API_KEY not set")
             return []

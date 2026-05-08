@@ -1,7 +1,16 @@
 import { getAIModels } from './ai';
 import { apiClient } from './client';
 import type { AIModel } from '@/types/ai';
-import type { AIModelSettings, AIProviderConfig, AIProviderKey, AppSettings } from '@/types/settings';
+import type {
+  AIModelSettings,
+  AIProviderConfig,
+  AIProviderKey,
+  AppSettings,
+  ExternalProviderValidationResult,
+  ExternalSearchProviderConfig,
+  ExternalSearchProviderKey,
+  ExternalSearchSettings,
+} from '@/types/settings';
 
 export type { AIModel };
 
@@ -93,6 +102,20 @@ interface ApiAISettingsResponse {
   providers: ApiAIProviderConfig[];
 }
 
+interface ApiExternalSearchProviderConfig {
+  provider: ExternalSearchProviderKey;
+  enabled: boolean;
+  api_key: string;
+  extra: string;
+  note: string;
+  has_api_key: boolean;
+  has_extra: boolean;
+}
+
+interface ApiExternalSearchSettingsResponse {
+  providers: ApiExternalSearchProviderConfig[];
+}
+
 function normalizeAIProvider(config: ApiAIProviderConfig): AIProviderConfig {
   return {
     provider: config.provider,
@@ -132,4 +155,53 @@ export async function saveAIModelSettings(settings: AIModelSettings): Promise<AI
     })),
   });
   return normalizeAISettings(data);
+}
+
+function normalizeExternalProvider(config: ApiExternalSearchProviderConfig): ExternalSearchProviderConfig {
+  return {
+    provider: config.provider,
+    enabled: config.enabled,
+    apiKey: config.api_key,
+    extra: config.extra,
+    note: config.note,
+    hasApiKey: config.has_api_key,
+    hasExtra: config.has_extra,
+  };
+}
+
+function normalizeExternalSettings(data: ApiExternalSearchSettingsResponse): ExternalSearchSettings {
+  return {
+    providers: data.providers.map(normalizeExternalProvider),
+  };
+}
+
+export async function fetchExternalSearchSettings(): Promise<ExternalSearchSettings> {
+  const { data } = await apiClient.get<ApiExternalSearchSettingsResponse>('/search/config');
+  return normalizeExternalSettings(data);
+}
+
+export async function saveExternalSearchSettings(settings: ExternalSearchSettings): Promise<ExternalSearchSettings> {
+  const { data } = await apiClient.put<ApiExternalSearchSettingsResponse>('/search/config', {
+    providers: settings.providers.map((provider) => ({
+      provider: provider.provider,
+      enabled: provider.enabled,
+      api_key: provider.apiKey,
+      extra: provider.extra,
+      note: provider.note,
+    })),
+  });
+  return normalizeExternalSettings(data);
+}
+
+export async function validateExternalProvider(
+  provider: ExternalSearchProviderConfig,
+): Promise<ExternalProviderValidationResult> {
+  const { data } = await apiClient.post<ExternalProviderValidationResult>(`/search/providers/${provider.provider}/validate`, {
+    provider: provider.provider,
+    enabled: provider.enabled,
+    api_key: provider.apiKey,
+    extra: provider.extra,
+    note: provider.note,
+  });
+  return data;
 }

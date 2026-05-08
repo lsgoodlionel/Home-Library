@@ -75,6 +75,9 @@ def _parse_volume(volume: dict[str, Any]) -> ExternalBookCandidate:
 class GoogleBooksProvider(BookProvider):
     name = "google_books"
 
+    def __init__(self, api_key: str | None = None) -> None:
+        self.api_key = api_key
+
     async def search(self, query: str, limit: int = 10) -> list[ExternalBookCandidate]:
         params: dict[str, Any] = {
             "q": query,
@@ -85,7 +88,7 @@ class GoogleBooksProvider(BookProvider):
         if _contains_cjk(query):
             params["langRestrict"] = "zh"
             params["country"] = "CN"
-        key = _api_key()
+        key = self.api_key or _api_key()
         if key:
             params["key"] = key
 

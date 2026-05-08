@@ -111,10 +111,19 @@ class DoubanBooksProvider(BookProvider):
 
     name = "douban"
 
+    def __init__(self, cookie: str | None = None, user_agent: str | None = None) -> None:
+        self.cookie = cookie
+        self.user_agent = user_agent
+
     async def search(self, query: str, limit: int = 10) -> list[ExternalBookCandidate]:
         params = {"q": query}
+        headers = dict(_HEADERS)
+        if self.user_agent:
+            headers["User-Agent"] = self.user_agent
+        if self.cookie:
+            headers["Cookie"] = self.cookie
         try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT, headers=_HEADERS) as client:
+            async with httpx.AsyncClient(timeout=_TIMEOUT, headers=headers) as client:
                 resp = await client.get(_SUGGEST_URL, params=params)
                 resp.raise_for_status()
                 data: list[dict[str, Any]] = resp.json()
