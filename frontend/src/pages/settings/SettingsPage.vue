@@ -37,6 +37,7 @@ const importing = ref(false);
 const exporting = ref(false);
 const downloadingTemplate = ref(false);
 const autoClassifying = ref(false);
+const stopAutoClassifyRequested = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 
 const settings = reactive(loadLocalSettings());
@@ -244,6 +245,7 @@ async function handleConfirmImport() {
 
 async function handleAutoClassifyUncategorized() {
   autoClassifying.value = true;
+  stopAutoClassifyRequested.value = false;
   try {
     const [books, categories] = await Promise.all([fetchUncategorizedBooks(), getCategoryOptions()]);
     if (books.length === 0) {
@@ -258,18 +260,26 @@ async function handleAutoClassifyUncategorized() {
     );
 
     let updatedCount = 0;
+    let skippedCount = 0;
     for (const book of books) {
+      if (stopAutoClassifyRequested.value) break;
       const result = await classifyBook({
         title: book.title,
         author: book.author,
         publisher: book.publisher,
         model: aiSettings.defaultModel || undefined,
       });
+      if (stopAutoClassifyRequested.value) break;
       const category = resolveCategoryRecommendation(categories, result.categoryCode, result.categoryName);
       const accepted = await confirmClassifyBook(book, result, category);
-      if (!accepted || !category) continue;
+      if (stopAutoClassifyRequested.value) break;
+      if (!accepted || !category) {
+        skippedCount += 1;
+        continue;
+      }
 
       const detail = await getBook(book.id);
+      if (stopAutoClassifyRequested.value) break;
       const form = bookDetailToForm(detail);
       form.categoryId = category.id;
       form.tagNames = Array.from(new Set([...form.tagNames, ...result.tags]));
@@ -277,13 +287,23 @@ async function handleAutoClassifyUncategorized() {
       updatedCount += 1;
       ElMessage.success(`已分类：${book.title} -> ${category.code} ${category.name}`);
     }
-    ElMessage.success(`一键分类完成，已更新 ${updatedCount} 本图书`);
+    if (stopAutoClassifyRequested.value) {
+      ElMessage.warning(`一键分类已停止，已更新 ${updatedCount} 本，跳过 ${skippedCount} 本`);
+    } else {
+      ElMessage.success(`一键分类完成，已更新 ${updatedCount} 本图书，跳过 ${skippedCount} 本`);
+    }
   } catch (err: unknown) {
     if (isCancelError(err)) return;
     ElMessage.error(`一键分类失败：${getErrorMessage(err)}`);
   } finally {
     autoClassifying.value = false;
+    stopAutoClassifyRequested.value = false;
   }
+}
+
+function stopAutoClassify() {
+  stopAutoClassifyRequested.value = true;
+  ElMessage.warning('已请求停止一键分类，当前这本处理结束后会停止');
 }
 
 async function fetchUncategorizedBooks(): Promise<BookListItem[]> {
@@ -648,12 +668,25 @@ function getErrorMessage(err: unknown): string {
         </el-form-item>
         <el-form-item label="一键分类">
           <div class="backup-import">
-            <el-button type="warning" :loading="autoClassifying" @click="handleAutoClassifyUncategorized">
+            <el-button
+              type="warning"
+              :disabled="autoClassifying"
+              :loading="autoClassifying && !stopAutoClassifyRequested"
+              @click="handleAutoClassifyUncategorized"
+            >
               AI 处理未分类图书
+            </el-button>
+            <el-button
+              v-if="autoClassifying"
+              type="danger"
+              :disabled="stopAutoClassifyRequested"
+              @click="stopAutoClassify"
+            >
+              关闭一键分类
             </el-button>
           </div>
           <div class="field-hint">
-            自动查看藏书中所有未分类图书，逐本调用 AI 分类推荐；每本书都会弹出推荐分类和标签，确认后才写入。
+            自动查看藏书中所有未分类图书，逐本调用 AI 分类推荐；每本书都会弹出推荐分类和标签，确认后才写入。运行中可点击关闭一键分类停止后续处理。
           </div>
         </el-form-item>
       </el-form>
