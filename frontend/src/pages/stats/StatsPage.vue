@@ -39,6 +39,17 @@ const readingItems = computed(() => [
   { name: '暂停', count: readingStats.value?.paused || 0, color: '#b57a36' },
 ]);
 
+const categoryChartItems = computed(() => collapseOverflowItems(categoryItems.value, 12));
+
+function collapseOverflowItems(items: DistributionItem[], maxItems: number) {
+  if (items.length <= maxItems) {
+    return items;
+  }
+  const visibleItems = items.slice(0, maxItems - 1);
+  const overflowCount = items.slice(maxItems - 1).reduce((sum, item) => sum + item.count, 0);
+  return overflowCount > 0 ? [...visibleItems, { name: '其他', count: overflowCount }] : visibleItems;
+}
+
 function hasValues(items: Array<{ count: number }>) {
   return items.some((item) => item.count > 0);
 }
@@ -116,7 +127,7 @@ onMounted(() => {
         :error="errors.categories"
         :empty="!loading.categories && !hasValues(categoryItems)"
       >
-        <PieChart :items="categoryItems.slice(0, 12)" />
+        <PieChart :items="categoryChartItems" />
       </ChartCard>
 
       <ChartCard
