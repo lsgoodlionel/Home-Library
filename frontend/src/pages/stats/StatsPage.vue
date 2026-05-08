@@ -116,7 +116,7 @@ onMounted(() => {
         :error="errors.categories"
         :empty="!loading.categories && !hasValues(categoryItems)"
       >
-        <PieChart :items="categoryItems.slice(0, 8)" />
+        <PieChart :items="categoryItems.slice(0, 12)" />
       </ChartCard>
 
       <ChartCard
