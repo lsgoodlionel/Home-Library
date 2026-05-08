@@ -3,13 +3,14 @@ import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser'
 import { Back, Camera, Search } from '@element-plus/icons-vue';
 import type { AxiosError } from 'axios';
 import { ElMessage } from 'element-plus';
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 
 import { classifyBook, getAIModels, recommendBookContent } from '@/api/ai';
 import { getCategoryOptions, getLocationOptions } from '@/api/books';
 import { createBook } from '@/api/books';
 import { searchBooks, searchByISBN } from '@/api/search';
+import { fetchAIModelSettings } from '@/api/settings';
 import AIRecommendationCard from '@/components/ai/AIRecommendationCard.vue';
 import BookForm from '@/components/book/BookForm.vue';
 import SearchResultCard from '@/components/search/SearchResultCard.vue';
@@ -65,6 +66,13 @@ const enhanceError = ref('');
 const aiModels = ref<AIModel[]>([]);
 const selectedModel = ref('');
 const aiAvailable = ref(true);
+const aiModelOptions = computed(() => {
+  const names = aiModels.value.map((model) => model.name);
+  if (selectedModel.value && !names.includes(selectedModel.value)) {
+    return [{ name: selectedModel.value }, ...aiModels.value];
+  }
+  return aiModels.value;
+});
 
 const classifyStatus = ref<AIStatus>('idle');
 const classifyResult = ref<ClassifyBookResponse | null>(null);
@@ -101,10 +109,9 @@ async function loadFormOptions() {
 
 async function loadAIModels() {
   try {
-    aiModels.value = await getAIModels();
-    if (aiModels.value.length > 0) {
-      selectedModel.value = aiModels.value[0].name;
-    }
+    const [models, settings] = await Promise.all([getAIModels(), fetchAIModelSettings()]);
+    aiModels.value = models;
+    selectedModel.value = settings.defaultModel || models[0]?.name || '';
     aiAvailable.value = aiModels.value.length > 0;
   } catch {
     aiAvailable.value = false;
@@ -863,7 +870,7 @@ function getAIButtonStatus(status: AIStatus): boolean {
             <template #header>AI 设置</template>
             <el-select v-model="selectedModel" placeholder="选择模型" size="small" style="width: 100%">
               <el-option
-                v-for="model in aiModels"
+                v-for="model in aiModelOptions"
                 :key="model.name"
                 :label="model.name"
                 :value="model.name"

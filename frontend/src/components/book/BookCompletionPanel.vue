@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import type { AxiosError } from 'axios';
 import { ElMessage } from 'element-plus';
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
 import { classifyBook, getAIModels, recommendBookContent } from '@/api/ai';
 import { searchBooks, searchByISBN } from '@/api/search';
+import { fetchAIModelSettings } from '@/api/settings';
 import AIRecommendationCard from '@/components/ai/AIRecommendationCard.vue';
 import SearchResultCard from '@/components/search/SearchResultCard.vue';
 import type {
@@ -32,6 +33,13 @@ const enhanceError = ref('');
 const aiModels = ref<AIModel[]>([]);
 const selectedModel = ref('');
 const aiAvailable = ref(true);
+const aiModelOptions = computed(() => {
+  const names = aiModels.value.map((model) => model.name);
+  if (selectedModel.value && !names.includes(selectedModel.value)) {
+    return [{ name: selectedModel.value }, ...aiModels.value];
+  }
+  return aiModels.value;
+});
 
 const classifyStatus = ref<AIStatus>('idle');
 const classifyResult = ref<ClassifyBookResponse | null>(null);
@@ -49,8 +57,9 @@ onMounted(() => {
 
 async function loadAIModels() {
   try {
-    aiModels.value = await getAIModels();
-    selectedModel.value = aiModels.value[0]?.name || '';
+    const [models, settings] = await Promise.all([getAIModels(), fetchAIModelSettings()]);
+    aiModels.value = models;
+    selectedModel.value = settings.defaultModel || models[0]?.name || '';
     aiAvailable.value = aiModels.value.length > 0;
   } catch {
     aiAvailable.value = false;
@@ -386,7 +395,7 @@ function getErrorMessage(err: unknown): string {
     <el-card v-if="aiAvailable && aiModels.length > 0">
       <template #header>AI 设置</template>
       <el-select v-model="selectedModel" placeholder="选择模型" size="small" style="width: 100%">
-        <el-option v-for="model in aiModels" :key="model.name" :label="model.name" :value="model.name" />
+        <el-option v-for="model in aiModelOptions" :key="model.name" :label="model.name" :value="model.name" />
       </el-select>
     </el-card>
 

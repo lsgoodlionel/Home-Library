@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ArrowDown, ArrowUp, RefreshLeft } from '@element-plus/icons-vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { computed, onMounted, reactive, ref } from 'vue';
 
+import { classifyBook } from '@/api/ai';
+import { bookDetailToForm, getBook, getBooks, getCategoryOptions, updateBook } from '@/api/books';
 import {
   DEFAULT_EXTERNAL_PROVIDER_ORDER,
   EXTERNAL_BOOK_PROVIDERS,
@@ -20,7 +22,8 @@ import {
   type BackupFormat,
   type ImportPreviewResult,
 } from '@/api/importExport';
-import type { AIModel } from '@/types/ai';
+import type { AIModel, ClassifyBookResponse } from '@/types/ai';
+import type { BookListItem, CategoryOption } from '@/types/book';
 import type { AIModelSettings, AIProviderConfig, AIProviderKey } from '@/types/settings';
 
 const models = ref<AIModel[]>([]);
@@ -33,6 +36,7 @@ const importPreview = ref<ImportPreviewResult | null>(null);
 const importing = ref(false);
 const exporting = ref(false);
 const downloadingTemplate = ref(false);
+const autoClassifying = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 
 const settings = reactive(loadLocalSettings());
@@ -236,6 +240,156 @@ async function handleConfirmImport() {
   } finally {
     importing.value = false;
   }
+}
+
+async function handleAutoClassifyUncategorized() {
+  autoClassifying.value = true;
+  try {
+    const [books, categories] = await Promise.all([fetchUncategorizedBooks(), getCategoryOptions()]);
+    if (books.length === 0) {
+      ElMessage.success('当前没有未分类图书');
+      return;
+    }
+
+    await ElMessageBox.confirm(
+      `找到 ${books.length} 本未分类图书。系统会逐本调用 AI 分类推荐，每本都需要确认后才会写入分类和标签。`,
+      '一键分类确认',
+      { type: 'warning', confirmButtonText: '开始处理', cancelButtonText: '取消' },
+    );
+
+    let updatedCount = 0;
+    for (const book of books) {
+      const result = await classifyBook({
+        title: book.title,
+        author: book.author,
+        publisher: book.publisher,
+        model: aiSettings.defaultModel || undefined,
+      });
+      const category = resolveCategoryRecommendation(categories, result.categoryCode, result.categoryName);
+      const accepted = await confirmClassifyBook(book, result, category);
+      if (!accepted || !category) continue;
+
+      const detail = await getBook(book.id);
+      const form = bookDetailToForm(detail);
+      form.categoryId = category.id;
+      form.tagNames = Array.from(new Set([...form.tagNames, ...result.tags]));
+      await updateBook(book.id, form);
+      updatedCount += 1;
+      ElMessage.success(`已分类：${book.title} -> ${category.code} ${category.name}`);
+    }
+    ElMessage.success(`一键分类完成，已更新 ${updatedCount} 本图书`);
+  } catch (err: unknown) {
+    if (isCancelError(err)) return;
+    ElMessage.error(`一键分类失败：${getErrorMessage(err)}`);
+  } finally {
+    autoClassifying.value = false;
+  }
+}
+
+async function fetchUncategorizedBooks(): Promise<BookListItem[]> {
+  const result: BookListItem[] = [];
+  let page = 1;
+  while (true) {
+    const data = await getBooks({ page, pageSize: 100 });
+    result.push(...data.items.filter((book) => !book.category));
+    if (page * data.pageSize >= data.total) break;
+    page += 1;
+  }
+  return result;
+}
+
+async function confirmClassifyBook(
+  book: BookListItem,
+  result: ClassifyBookResponse,
+  category: CategoryOption | null,
+): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      [
+        `图书：${book.title}`,
+        `AI 推荐：${result.categoryCode} ${result.categoryName}`,
+        `匹配分类：${category ? `${category.code} ${category.name}` : '未找到可写入的本地分类'}`,
+        result.tags.length ? `推荐标签：${result.tags.join('、')}` : '推荐标签：无',
+        result.reason ? `理由：${result.reason}` : '',
+      ].filter(Boolean).join('\n'),
+      '确认采用 AI 分类推荐',
+      {
+        type: category ? 'info' : 'warning',
+        confirmButtonText: category ? '采用并更新' : '跳过',
+        cancelButtonText: '跳过',
+      },
+    );
+    return Boolean(category);
+  } catch {
+    return false;
+  }
+}
+
+function resolveCategoryRecommendation(
+  nodes: CategoryOption[],
+  code: string,
+  name: string,
+): CategoryOption | null {
+  const exactCodeMatch = findCategoryByCode(nodes, normalizeCategoryCode(code));
+  if (exactCodeMatch) return exactCodeMatch;
+  const nameMatch = findCategoryByName(nodes, name);
+  if (nameMatch) return nameMatch;
+  for (const fallbackCode of getCategoryFallbackCodes(code)) {
+    const found = findCategoryByCode(nodes, fallbackCode);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findCategoryByCode(nodes: CategoryOption[], code: string): CategoryOption | null {
+  for (const node of nodes) {
+    if (node.code === code) return node;
+    const found = node.children?.length ? findCategoryByCode(node.children, code) : null;
+    if (found) return found;
+  }
+  return null;
+}
+
+function findCategoryByName(nodes: CategoryOption[], name: string): CategoryOption | null {
+  const normalizedName = normalizeCategoryName(name);
+  if (!normalizedName) return null;
+  let looseMatch: CategoryOption | null = null;
+  for (const node of nodes) {
+    const nodeName = normalizeCategoryName(node.name);
+    if (nodeName === normalizedName) return node;
+    if (!looseMatch && (nodeName.includes(normalizedName) || normalizedName.includes(nodeName))) {
+      looseMatch = node;
+    }
+    const found = node.children?.length ? findCategoryByName(node.children, name) : null;
+    if (found) return found;
+  }
+  return looseMatch;
+}
+
+function normalizeCategoryCode(code: string): string {
+  return code.trim().toUpperCase().replace(/\s+/g, '');
+}
+
+function normalizeCategoryName(name: string): string {
+  return name.trim().replace(/[（）()《》\s]/g, '').replace(/类$/, '');
+}
+
+function getCategoryFallbackCodes(code: string): string[] {
+  const normalized = normalizeCategoryCode(code);
+  const fallbacks: string[] = [];
+  const add = (candidate: string) => {
+    if (candidate && candidate !== normalized && !fallbacks.includes(candidate)) fallbacks.push(candidate);
+  };
+  if (normalized.includes('.')) add(normalized.split('.')[0]);
+  const letter = normalized.match(/^[A-Z]+/)?.[0] || '';
+  const rest = normalized.slice(letter.length).replace(/[^0-9]/g, '');
+  for (let len = rest.length - 1; letter && len >= 1; len--) add(`${letter}${rest.slice(0, len)}`);
+  if (letter) add(letter);
+  return fallbacks;
+}
+
+function isCancelError(err: unknown): boolean {
+  return err === 'cancel' || err === 'close';
 }
 
 function getErrorMessage(err: unknown): string {
@@ -490,6 +644,16 @@ function getErrorMessage(err: unknown): string {
                 第 {{ error.rowNumber }} 行：{{ error.message }}
               </div>
             </div>
+          </div>
+        </el-form-item>
+        <el-form-item label="一键分类">
+          <div class="backup-import">
+            <el-button type="warning" :loading="autoClassifying" @click="handleAutoClassifyUncategorized">
+              AI 处理未分类图书
+            </el-button>
+          </div>
+          <div class="field-hint">
+            自动查看藏书中所有未分类图书，逐本调用 AI 分类推荐；每本书都会弹出推荐分类和标签，确认后才写入。
           </div>
         </el-form-item>
       </el-form>
