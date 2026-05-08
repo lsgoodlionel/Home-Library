@@ -22,6 +22,7 @@ Known limitations:
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 from typing import Any
@@ -34,8 +35,12 @@ from .base import BookProvider
 
 logger = logging.getLogger(__name__)
 
-_SEARCH_URL = "https://find.nlc.cn/search/searchList"
-_DETAIL_URL = "https://find.nlc.cn/search/searchDetail"
+# The old JSON paths currently time out on HTTPS from Docker but fail quickly
+# on HTTP, allowing the active HTML fallback below to return promptly.
+_SEARCH_URL = "http://find.nlc.cn/search/searchList"
+_DETAIL_URL = "http://find.nlc.cn/search/searchDetail"
+_HTML_SEARCH_URL = "http://find.nlc.cn/search/doSearch"
+_HTML_DETAIL_URL = "http://find.nlc.cn/search/showDocDetails"
 _TIMEOUT = 12.0
 
 # Browser-like headers to avoid 403 / bot-detection
@@ -49,6 +54,12 @@ _HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9",
     "X-Requested-With": "XMLHttpRequest",
+}
+
+_HTML_HEADERS = {
+    **_HEADERS,
+    "Referer": "http://find.nlc.cn/",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
 
@@ -77,9 +88,41 @@ def _safe_int(val: Any) -> int | None:
         return None
 
 
+def _parse_pages(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    text = str(raw)
+    if not re.search(r"(页|pages?|p\.)", text, re.I):
+        return None
+    if "册" in text:
+        inner_match = re.search(r"[（(]([^）)]*页)[）)]", text)
+        if inner_match:
+            volume_pages = [int(item) for item in re.findall(r"\d+", inner_match.group(1))]
+            return sum(volume_pages) if volume_pages else None
+
+    matches = re.findall(r"(\d[\d,]*)\s*页", text)
+    if not matches:
+        return None
+    value = matches[-1]
+    parts = value.split(",")
+    if len(parts) > 1 and len(parts[0]) <= 2:
+        value = parts[-1]
+    else:
+        value = value.replace(",", "")
+    return int(value)
+
+
 def _strip_role_suffix(text: str) -> str:
     """Remove trailing role labels like 著、编著、译 that NLC appends to names."""
     return re.sub(r"[\s　]*[，,]?\s*[著编译等]{1,3}$", "", text).strip()
+
+
+def _clean_text(raw: str | None) -> str:
+    if not raw:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", raw)
+    text = html.unescape(text).replace("\xa0", " ")
+    return re.sub(r"[\s　]+", " ", text).strip()
 
 
 def _parse_list_item(item: dict[str, Any]) -> ExternalBookCandidate | None:
@@ -171,6 +214,105 @@ def _parse_detail(detail: dict[str, Any], source_id: str | None) -> ExternalBook
     )
 
 
+def _field_from_html(block: str, label: str) -> str | None:
+    pattern = (
+        rf"{re.escape(label)}\s*[：:]?\s*</?span[^>]*>\s*"
+        rf"(?:<a[^>]*>\s*)?<span[^>]*class=\"(?:book_t_val|book_val|book_type)\"[^>]*>(.*?)</span>"
+    )
+    match = re.search(pattern, block, re.S)
+    return _clean_text(match.group(1)) or None if match else None
+
+
+def _parse_html_detail(text: str, source_id: str | None, data_source: str | None = None) -> ExternalBookCandidate | None:
+    title_match = re.search(r"<div[^>]+class=\"book_name\"[^>]*>(.*?)</div>", text, re.S)
+    title = _clean_text(title_match.group(1)) if title_match else ""
+    if not title:
+        return None
+
+    author = _strip_role_suffix(_field_from_html(text, "责任者") or _field_from_html(text, "所有责任者") or "") or None
+    publisher = _field_from_html(text, "出版、发行者")
+    publish_year = _parse_year(_field_from_html(text, "出版发行时间"))
+    isbn = _clean_isbn(_field_from_html(text, "标识号"))
+    pages = _parse_pages(_field_from_html(text, "载体形态"))
+
+    summary_match = re.search(r"<div[^>]+class=\"zy_pp_val\"[^>]*>(.*?)</div>", text, re.S)
+    summary = _clean_text(summary_match.group(1)) or None if summary_match else None
+
+    raw = {
+        "docId": source_id,
+        "dataSource": data_source,
+        "classification": _field_from_html(text, "分类"),
+    }
+
+    return ExternalBookCandidate(
+        source="nlc",
+        source_id=source_id,
+        title=title,
+        subtitle=None,
+        author=author,
+        publisher=publisher,
+        publish_year=publish_year,
+        isbn=isbn,
+        cover_url=None,
+        summary=summary,
+        language="zh",
+        pages=pages,
+        raw=raw,
+    )
+
+
+def _parse_html_list_item(block: str) -> tuple[ExternalBookCandidate | None, str | None]:
+    detail_match = re.search(
+        r"makeDetailUrl\([^)]*?,\s*'[^']*',\s*'([^']+)',\s*'([^']+)'",
+        block,
+        re.S,
+    )
+    source_id = detail_match.group(1) if detail_match else None
+    data_source = detail_match.group(2) if detail_match else None
+
+    title_match = re.search(r"<div[^>]+class=\"book_name\"[^>]*>.*?<a[^>]*>(.*?)</a>", block, re.S)
+    title = _clean_text(title_match.group(1)) if title_match else ""
+    if not title:
+        return None, data_source
+
+    author = _strip_role_suffix(_field_from_html(block, "著者") or "") or None
+    publisher = _field_from_html(block, "出版社")
+    publish_year = _parse_year(_field_from_html(block, "出版年份"))
+
+    raw = {"docId": source_id, "dataSource": data_source}
+    candidate = ExternalBookCandidate(
+        source="nlc",
+        source_id=source_id,
+        title=title,
+        subtitle=None,
+        author=author,
+        publisher=publisher,
+        publish_year=publish_year,
+        isbn=None,
+        cover_url=None,
+        summary=None,
+        language="zh",
+        pages=None,
+        raw=raw,
+    )
+    return candidate, data_source
+
+
+def _parse_html_search(text: str, limit: int) -> list[tuple[ExternalBookCandidate, str | None]]:
+    blocks = re.findall(r"<div class=\"article_item\">(.*?)(?=<div class=\"article_item\">|<div class=\"page_fix\"|$)", text, re.S)
+    results: list[tuple[ExternalBookCandidate, str | None]] = []
+    for block in blocks:
+        try:
+            candidate, data_source = _parse_html_list_item(block)
+            if candidate:
+                results.append((candidate, data_source))
+        except Exception as exc:
+            logger.debug("NLC HTML list item parse error: %s", exc)
+        if len(results) >= limit:
+            break
+    return results
+
+
 def _extract_items(data: Any) -> list[dict[str, Any]]:
     """Normalise various possible JSON shapes returned by the NLC API."""
     if isinstance(data, list):
@@ -217,6 +359,48 @@ async def _fetch_json(client: httpx.AsyncClient, url: str, params: dict) -> Any:
         return None
 
 
+async def _fetch_html(client: httpx.AsyncClient, url: str, params: dict) -> str | None:
+    try:
+        resp = await client.get(url, params=params)
+        resp.raise_for_status()
+        return resp.text
+    except Exception as exc:
+        logger.warning("NLC HTML request failed [%s %s]: %s", url, params, exc)
+        return None
+
+
+async def _search_html(client: httpx.AsyncClient, query: str, limit: int) -> list[ExternalBookCandidate]:
+    params = {
+        "query": query,
+        "secQuery": "",
+        "actualQuery": query,
+        "searchType": 2,
+        "docType": "图书",
+        "targetFieldLog": "全部字段",
+    }
+    text = await _fetch_html(client, _HTML_SEARCH_URL, params)
+    if not text:
+        return []
+
+    parsed = _parse_html_search(text, limit)
+    results: list[ExternalBookCandidate] = []
+    for candidate, data_source in parsed:
+        if candidate.source_id and data_source:
+            detail_text = await _fetch_html(
+                client,
+                _HTML_DETAIL_URL,
+                {"docId": candidate.source_id, "dataSource": data_source, "query": query},
+            )
+            if detail_text:
+                detail = _parse_html_detail(detail_text, candidate.source_id, data_source)
+                if detail:
+                    candidate = detail
+        results.append(candidate)
+        if len(results) >= limit:
+            break
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Provider
 # ---------------------------------------------------------------------------
@@ -243,7 +427,8 @@ class NLCProvider(BookProvider):
             payload = await _fetch_json(client, _SEARCH_URL, params)
 
         if payload is None:
-            return []
+            async with httpx.AsyncClient(timeout=_TIMEOUT, headers=_HTML_HEADERS) as client:
+                return await _search_html(client, query, limit)
 
         inner = _unwrap_response(payload)
         if inner is None:
@@ -280,7 +465,7 @@ class NLCProvider(BookProvider):
             payload = await _fetch_json(client, _SEARCH_URL, params)
 
             if payload is None:
-                return []
+                return await _search_html(client, isbn, 1)
 
             inner = _unwrap_response(payload)
             if inner is None:
@@ -297,7 +482,7 @@ class NLCProvider(BookProvider):
                         items = _extract_items(inner2)
 
             if not items:
-                return []
+                return await _search_html(client, isbn, 1)
 
             # Step 2: fetch full detail for the first matching record
             first = items[0] if isinstance(items[0], dict) else {}
