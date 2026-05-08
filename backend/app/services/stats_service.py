@@ -77,50 +77,17 @@ def get_overview(db: Session) -> StatsOverview:
 
 
 def get_category_distribution(db: Session) -> list[DistributionItem]:
-    # 1. 取所有分类（含层级关系）
-    all_cats = db.query(Category).all()
-    cat_by_id: dict[int, Category] = {c.id: c for c in all_cats}
-
-    # 2. 直接分配到各分类的图书数（不含子分类）
-    direct_rows = (
+    rows = (
         db.query(Category.id, Category.code, Category.name, Category.sort_order, func.count(Book.id))
         .outerjoin(Book, Book.category_id == Category.id)
         .group_by(Category.id, Category.code, Category.name, Category.sort_order)
+        .having(func.count(Book.id) > 0)
+        .order_by(func.count(Book.id).desc(), Category.sort_order.asc(), Category.id.asc())
         .all()
     )
-    direct_counts: dict[int, int] = {
-        cat_id: int(count) for cat_id, _, _, _, count in direct_rows
-    }
-
-    # 3. 向上汇总：每本书的分类计入所有祖先分类
-    def ancestors(cat_id: int) -> list[int]:
-        """返回包含自身在内的所有祖先分类 id。"""
-        result = []
-        cid = cat_id
-        seen: set[int] = set()
-        while cid and cid not in seen:
-            seen.add(cid)
-            result.append(cid)
-            cat = cat_by_id.get(cid)
-            cid = cat.parent_id if cat else None
-        return result
-
-    rolled_counts: dict[int, int] = {}
-    for cat_id, direct in direct_counts.items():
-        if direct == 0:
-            continue
-        for ancestor_id in ancestors(cat_id):
-            rolled_counts[ancestor_id] = rolled_counts.get(ancestor_id, 0) + direct
-
-    # 4. 仅保留有书（含子分类汇总）的分类，按数量降序
-    cat_info: dict[int, tuple[str, str, int]] = {
-        cat_id: (code, name, sort_order)
-        for cat_id, code, name, sort_order, _ in direct_rows
-    }
     items = [
-        DistributionItem(id=cat_id, code=cat_info[cat_id][0], name=cat_info[cat_id][1], count=count)
-        for cat_id, count in sorted(rolled_counts.items(), key=lambda x: -x[1])
-        if count > 0 and cat_id in cat_info
+        DistributionItem(id=cat_id, code=code, name=name, count=int(count))
+        for cat_id, code, name, _sort_order, count in rows
     ]
 
     uncategorized = db.query(func.count(Book.id)).filter(Book.category_id.is_(None)).scalar() or 0

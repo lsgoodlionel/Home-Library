@@ -130,6 +130,34 @@ def test_category_distribution_includes_uncategorized(client: TestClient, db: Se
     assert items["未分类"] == 1
 
 
+def test_category_distribution_does_not_roll_child_counts_to_parent(
+    client: TestClient, db: Session
+) -> None:
+    parent, _location = _seed_refs(db)
+    child = Category(
+        code="I2475",
+        name="当代小说",
+        parent_id=parent.id,
+        sort_order=1,
+        is_system=True,
+        created_at=_dt(2026, 1),
+        updated_at=_dt(2026, 1),
+    )
+    db.add(child)
+    db.commit()
+    db.refresh(child)
+    _book(db, "父类图书", category_id=parent.id)
+    _book(db, "子类图书", category_id=child.id)
+
+    response = client.get("/api/stats/categories")
+
+    assert response.status_code == 200
+    items = {item["name"]: item["count"] for item in response.json()}
+    assert items["中国小说"] == 1
+    assert items["当代小说"] == 1
+    assert sum(items.values()) == 2
+
+
 def test_location_distribution_includes_unspecified(client: TestClient, db: Session) -> None:
     _category, location = _seed_refs(db)
     _book(db, "有位置", location_id=location.id)
