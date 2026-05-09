@@ -15,12 +15,16 @@ services:
       OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       UPGRADE_PASSWORD: ${UPGRADE_PASSWORD:-}
       UPGRADE_COMMAND: ${UPGRADE_COMMAND:-}
-      UPGRADE_WORKDIR: ${UPGRADE_WORKDIR:-/app}
+      UPGRADE_WORKDIR: /host-project
       UPGRADE_TIMEOUT_SECONDS: ${UPGRADE_TIMEOUT_SECONDS:-900}
     volumes:
       - db_data:/data
       - uploads:/uploads
       - backups:/backups
+      # 升级功能所需：挂载宿主机项目目录和 Docker socket
+      # 需在 .env 中设置 HOST_PROJECT_DIR 为项目实际安装路径
+      - ${HOST_PROJECT_DIR:-/tmp}:/host-project
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
       interval: 10s
