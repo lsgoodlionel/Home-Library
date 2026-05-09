@@ -47,9 +47,41 @@ async def _run_upgrade_task(task_id: str, command: str, workdir: str, timeout_se
             command,
             cwd=str(Path(workdir).resolve()),
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,   # 合并 stderr → stdout，实时统一输出
         )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+
+        async def _read_lines() -> None:
+            assert process.stdout is not None
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace")
+                async with _UPGRADE_LOCK:
+                    prev = _UPGRADE_TASKS[task_id].get("output", "")
+                    # 保留最近 8000 字符，避免内存无限增长
+                    _UPGRADE_TASKS[task_id]["output"] = (prev + text)[-8000:]
+
+        try:
+            await asyncio.wait_for(_read_lines(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+            async with _UPGRADE_LOCK:
+                _UPGRADE_TASKS[task_id].update(
+                    {
+                        "status": "failed",
+                        "finished_at": _utc_now(),
+                        "exit_code": None,
+                        "error": f"升级命令执行超时（{timeout_seconds} 秒）",
+                    }
+                )
+            return
+
+        await process.wait()
         status_value = "success" if process.returncode == 0 else "failed"
         async with _UPGRADE_LOCK:
             _UPGRADE_TASKS[task_id].update(
@@ -57,18 +89,7 @@ async def _run_upgrade_task(task_id: str, command: str, workdir: str, timeout_se
                     "status": status_value,
                     "finished_at": _utc_now(),
                     "exit_code": process.returncode,
-                    "output": stdout.decode("utf-8", errors="replace")[-6000:],
-                    "error": stderr.decode("utf-8", errors="replace")[-6000:],
-                }
-            )
-    except asyncio.TimeoutError:
-        async with _UPGRADE_LOCK:
-            _UPGRADE_TASKS[task_id].update(
-                {
-                    "status": "failed",
-                    "finished_at": _utc_now(),
-                    "exit_code": None,
-                    "error": f"升级命令执行超时（{timeout_seconds} 秒）",
+                    "error": "" if process.returncode == 0 else f"进程退出码：{process.returncode}",
                 }
             )
     except Exception as exc:

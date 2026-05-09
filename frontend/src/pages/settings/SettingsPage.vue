@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ArrowDown, ArrowUp, RefreshLeft } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 
 import { classifyBook } from '@/api/ai';
 import { bookDetailToForm, getBook, getBooks, getCategoryOptions, updateBook } from '@/api/books';
@@ -62,6 +62,7 @@ const upgradingServer = ref(false);
 const upgradePassword = ref('');
 const upgradeDialogVisible = ref(false);
 const upgradeTask = ref<UpgradeTaskStatus | null>(null);
+const upgradeLogRef = ref<HTMLPreElement | null>(null);
 let upgradePollTimer: number | null = null;
 
 const settings = reactive(loadLocalSettings());
@@ -264,6 +265,18 @@ function stopUpgradePolling() {
     upgradePollTimer = null;
   }
 }
+
+// 日志输出变化时自动滚动到底部
+watch(
+  () => upgradeTask.value?.output,
+  () => {
+    void nextTick(() => {
+      if (upgradeLogRef.value) {
+        upgradeLogRef.value.scrollTop = upgradeLogRef.value.scrollHeight;
+      }
+    });
+  },
+);
 
 async function pollUpgradeStatus(taskId: string) {
   try {
@@ -620,7 +633,7 @@ function getErrorMessage(err: unknown): string {
       </div>
     </el-card>
 
-    <el-dialog v-model="upgradeDialogVisible" title="服务器版本升级" width="620px" append-to-body>
+    <el-dialog v-model="upgradeDialogVisible" title="服务器版本升级" width="700px" append-to-body>
       <el-alert
         type="warning"
         :closable="false"
@@ -635,17 +648,25 @@ function getErrorMessage(err: unknown): string {
             type="password"
             autocomplete="new-password"
             placeholder="输入服务器部署时设置的升级密码"
+            :disabled="upgradingServer"
             @keyup.enter="handleConfirmServerUpgrade"
           />
           <div class="field-hint">该密码只用于前端控制后端升级，不等同于登录密码。</div>
         </el-form-item>
       </el-form>
       <div v-if="upgradeTask" class="upgrade-status">
-        <el-tag :type="upgradeTask.status === 'success' ? 'success' : upgradeTask.status === 'failed' ? 'danger' : 'warning'">
-          {{ upgradeTask.status }}
-        </el-tag>
-        <div class="field-hint">任务 ID：{{ upgradeTask.taskId }}</div>
-        <pre v-if="upgradeTask.output" class="upgrade-log">{{ upgradeTask.output }}</pre>
+        <div class="upgrade-status-bar">
+          <el-tag :type="upgradeTask.status === 'success' ? 'success' : upgradeTask.status === 'failed' ? 'danger' : 'warning'">
+            {{ upgradeTask.status === 'pending' ? '等待中' : upgradeTask.status === 'running' ? '执行中' : upgradeTask.status === 'success' ? '成功' : '失败' }}
+          </el-tag>
+          <span v-if="upgradingServer" class="upgrade-cursor">▌</span>
+          <span class="upgrade-task-id">任务 {{ upgradeTask.taskId.slice(0, 8) }}</span>
+        </div>
+        <pre
+          v-if="upgradeTask.output || upgradingServer"
+          ref="upgradeLogRef"
+          class="upgrade-log"
+        >{{ upgradeTask.output || '等待输出...' }}</pre>
         <pre v-if="upgradeTask.error" class="upgrade-log upgrade-log--error">{{ upgradeTask.error }}</pre>
       </div>
       <template #footer>
@@ -1021,20 +1042,46 @@ function getErrorMessage(err: unknown): string {
   margin-top: 12px;
 }
 
+.upgrade-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.upgrade-task-id {
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+  font-family: monospace;
+}
+
+.upgrade-cursor {
+  color: var(--el-color-primary);
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
 .upgrade-log {
   overflow: auto;
-  max-height: 180px;
+  max-height: 320px;
   margin: 0;
-  padding: 10px;
+  padding: 10px 12px;
   border-radius: 6px;
-  background: #f5f7fa;
-  color: var(--app-text);
+  background: #1e1e1e;
+  color: #d4d4d4;
   font-size: 12px;
+  font-family: 'SF Mono', 'Fira Code', Menlo, Consolas, monospace;
+  line-height: 1.6;
   white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .upgrade-log--error {
-  color: var(--el-color-danger);
+  background: #2d1a1a;
+  color: var(--el-color-danger-light-3);
 }
 
 .field-hint {
