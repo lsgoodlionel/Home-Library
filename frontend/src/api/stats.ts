@@ -129,6 +129,14 @@ export async function getLocationStats(): Promise<DistributionItem[]> {
   return normalizeDistribution(data);
 }
 
+export async function getAuthorStats(limit = 10): Promise<DistributionItem[]> {
+  const { data } = await apiClient.get<ApiDistributionItem[] | { items?: ApiDistributionItem[] }>(
+    '/stats/authors',
+    { params: { limit } },
+  );
+  return normalizeDistribution(data);
+}
+
 export async function getReadingStats(): Promise<ReadingStats> {
   const { data } = await apiClient.get<ApiReadingStats>('/stats/reading');
   if (data.items) {

@@ -27,6 +27,14 @@ def locations(db: Annotated[Session, Depends(get_db)]) -> list[DistributionItem]
     return stats_service.get_location_distribution(db)
 
 
+@router.get("/authors", response_model=list[DistributionItem])
+def authors(
+    db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> list[DistributionItem]:
+    return stats_service.get_author_distribution(db, limit=limit)
+
+
 @router.get("/reading", response_model=ReadingStats)
 def reading(db: Annotated[Session, Depends(get_db)]) -> ReadingStats:
     return stats_service.get_reading_stats(db)

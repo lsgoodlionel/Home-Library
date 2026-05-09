@@ -35,6 +35,7 @@ def _book(
     db: Session,
     title: str,
     *,
+    author: str | None = "作者",
     category_id: int | None = None,
     location_id: int | None = None,
     status: str = "available",
@@ -45,7 +46,7 @@ def _book(
     created = created_at or _dt(2026, 5)
     book = Book(
         title=title,
-        author="作者",
+        author=author,
         category_id=category_id,
         location_id=location_id,
         status=status,
@@ -64,6 +65,7 @@ def test_stats_empty_database(client: TestClient) -> None:
     overview = client.get("/api/stats/overview")
     categories = client.get("/api/stats/categories")
     locations = client.get("/api/stats/locations")
+    authors = client.get("/api/stats/authors")
     reading = client.get("/api/stats/reading")
     timeline = client.get("/api/stats/timeline")
 
@@ -72,6 +74,7 @@ def test_stats_empty_database(client: TestClient) -> None:
     assert overview.json()["recent_books"] == []
     assert categories.json() == []
     assert locations.json() == []
+    assert authors.json() == []
     assert reading.json() == {"unread": 0, "reading": 0, "read": 0, "paused": 0}
     assert timeline.json() == []
 
@@ -169,6 +172,33 @@ def test_location_distribution_includes_unspecified(client: TestClient, db: Sess
     items = {item["name"]: item["count"] for item in response.json()}
     assert items["书房 / A 架 / 1 层"] == 1
     assert items["未指定"] == 1
+
+
+def test_author_distribution_splits_and_ranks_authors(client: TestClient, db: Session) -> None:
+    _book(db, "合著 A", author="马克思, 恩格斯")
+    _book(db, "合著 B", author="马克思、列宁")
+    _book(db, "独著", author="恩格斯")
+    _book(db, "无作者", author=None)
+
+    response = client.get("/api/stats/authors")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"id": None, "code": None, "name": "恩格斯", "count": 2},
+        {"id": None, "code": None, "name": "马克思", "count": 2},
+        {"id": None, "code": None, "name": "作者未记录", "count": 1},
+        {"id": None, "code": None, "name": "列宁", "count": 1},
+    ]
+
+
+def test_author_distribution_limit(client: TestClient, db: Session) -> None:
+    _book(db, "作者 A", author="作者 A")
+    _book(db, "作者 B", author="作者 B")
+
+    response = client.get("/api/stats/authors", params={"limit": 1})
+
+    assert response.status_code == 200
+    assert len(response.json()) == 1
 
 
 def test_reading_stats_four_states(client: TestClient, db: Session) -> None:

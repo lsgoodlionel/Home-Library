@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 
 import {
+  getAuthorStats,
   getCategoryStats,
   getLocationStats,
   getReadingStats,
@@ -15,12 +16,14 @@ import type { DistributionItem, ReadingStats, TimelinePoint } from '@/types/stat
 
 const categoryItems = ref<DistributionItem[]>([]);
 const locationItems = ref<DistributionItem[]>([]);
+const authorItems = ref<DistributionItem[]>([]);
 const readingStats = ref<ReadingStats | null>(null);
 const timelineItems = ref<TimelinePoint[]>([]);
 
 const loading = ref({
   categories: false,
   locations: false,
+  authors: false,
   reading: false,
   timeline: false,
 });
@@ -28,6 +31,7 @@ const loading = ref({
 const errors = ref({
   categories: '',
   locations: '',
+  authors: '',
   reading: '',
   timeline: '',
 });
@@ -78,6 +82,18 @@ async function loadLocations() {
   }
 }
 
+async function loadAuthors() {
+  loading.value.authors = true;
+  errors.value.authors = '';
+  try {
+    authorItems.value = await getAuthorStats(10);
+  } catch {
+    errors.value.authors = '作者排行接口暂不可用。';
+  } finally {
+    loading.value.authors = false;
+  }
+}
+
 async function loadReading() {
   loading.value.reading = true;
   errors.value.reading = '';
@@ -105,6 +121,7 @@ async function loadTimeline() {
 onMounted(() => {
   void loadCategories();
   void loadLocations();
+  void loadAuthors();
   void loadReading();
   void loadTimeline();
 });
@@ -160,7 +177,15 @@ onMounted(() => {
         <LineChart :items="timelineItems" />
       </ChartCard>
 
-      <ChartCard title="作者排行" subtitle="等待后端统计接口提供作者聚合数据" empty empty-text="作者排行接口待接入" />
+      <ChartCard
+        title="作者排行"
+        subtitle="按作者聚合藏书数量"
+        :loading="loading.authors"
+        :error="errors.authors"
+        :empty="!loading.authors && !hasValues(authorItems)"
+      >
+        <BarChart :items="authorItems" />
+      </ChartCard>
     </div>
   </section>
 </template>

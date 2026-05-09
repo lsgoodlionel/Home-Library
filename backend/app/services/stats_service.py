@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from collections import Counter
+
 from sqlalchemy import case, extract, func
 from sqlalchemy.orm import Session, joinedload
 
@@ -12,6 +15,16 @@ from app.schemas.stats import (
     StatsOverview,
     TimelinePoint,
 )
+
+_AUTHOR_UNKNOWN = "作者未记录"
+_AUTHOR_SPLIT_RE = re.compile(r"\s*(?:,|，|、|;|；|/|／|&|\band\b)\s*", re.IGNORECASE)
+
+
+def _split_author_names(author: str | None) -> list[str]:
+    if not author or not author.strip():
+        return [_AUTHOR_UNKNOWN]
+    names = [name.strip() for name in _AUTHOR_SPLIT_RE.split(author) if name.strip()]
+    return names or [_AUTHOR_UNKNOWN]
 
 
 def get_overview(db: Session) -> StatsOverview:
@@ -113,6 +126,18 @@ def get_location_distribution(db: Session) -> list[DistributionItem]:
     if unspecified:
         items.append(DistributionItem(name="未指定", count=int(unspecified)))
     return items
+
+
+def get_author_distribution(db: Session, *, limit: int = 10) -> list[DistributionItem]:
+    counter: Counter[str] = Counter()
+    for author, in db.query(Book.author).all():
+        counter.update(set(_split_author_names(author)))
+
+    ranked = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    return [
+        DistributionItem(name=name, count=int(count))
+        for name, count in ranked[:limit]
+    ]
 
 
 def get_reading_stats(db: Session) -> ReadingStats:
