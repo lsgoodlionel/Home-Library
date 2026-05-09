@@ -462,11 +462,13 @@ function getCategoryFallbackCodes(code: string): string[] {
 }
 
 function getErrorMessage(err: unknown): string {
-  const axiosError = err as AxiosError<{ detail?: unknown; message?: string }>;
+  const axiosError = err as AxiosError<{ error?: { message?: string }; detail?: unknown; message?: string }>;
   if (axiosError.response?.data) {
-    const { detail, message } = axiosError.response.data;
-    if (typeof message === 'string' && message) return message;
-    if (typeof detail === 'string' && detail) return detail;
+    const data = axiosError.response.data;
+    // 后端标准格式 { error: { message } }
+    if (typeof data.error?.message === 'string' && data.error.message) return data.error.message;
+    if (typeof data.message === 'string' && data.message) return data.message;
+    if (typeof data.detail === 'string' && data.detail) return data.detail;
   }
   if (err instanceof Error) return err.message;
   return '未知错误';

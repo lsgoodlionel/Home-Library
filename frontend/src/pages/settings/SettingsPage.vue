@@ -564,8 +564,10 @@ function isCancelError(err: unknown): boolean {
 
 function getErrorMessage(err: unknown): string {
   if (err && typeof err === 'object' && 'response' in err) {
-    const data = (err as { response?: { data?: { detail?: unknown; message?: string } } }).response?.data;
-    if (data?.message) return data.message;
+    const data = (err as { response?: { data?: { error?: { message?: string }; detail?: unknown; message?: string } } }).response?.data;
+    // 后端标准格式 { error: { message } }
+    if (typeof data?.error?.message === 'string' && data.error.message) return data.error.message;
+    if (typeof data?.message === 'string' && data.message) return data.message;
     if (typeof data?.detail === 'string') return data.detail;
   }
   if (err instanceof Error) return err.message;

@@ -55,13 +55,17 @@ def _clean_text(value: str | None) -> str:
 
 
 def _format_categories_for_prompt(db: Session) -> str:
-    """从数据库读取全部分类，格式化为提示词注入文本。"""
-    cats = (
-        db.query(Category.code, Category.name)
-        .order_by(Category.code)
-        .all()
-    )
-    return "\n".join(f"{code}: {name}" for code, name in cats)
+    """从数据库读取 L1+L2 分类（约 235 条），格式化为提示词注入文本。
+    仅注入前两层以控制提示词长度，避免超出小模型上下文窗口。
+    """
+    # 取所有分类，内存中过滤 L1（parent_id=None）和 L2（父是 L1）
+    all_cats = db.query(Category).order_by(Category.code).all()
+    l1_ids = {c.id for c in all_cats if c.parent_id is None}
+    filtered = [
+        c for c in all_cats
+        if c.parent_id is None or c.parent_id in l1_ids
+    ]
+    return "\n".join(f"{c.code}: {c.name}" for c in filtered)
 
 
 def _dump(value: Any) -> str:
