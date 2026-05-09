@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ArrowDown, ArrowUp, RefreshLeft } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 
 import { classifyBook } from '@/api/ai';
 import { bookDetailToForm, getBook, getBooks, getCategoryOptions, updateBook } from '@/api/books';
@@ -12,12 +12,10 @@ import {
   fetchExternalSearchSettings,
   fetchAIModelSettings,
   fetchAvailableModels,
-  fetchUpgradeStatus,
   loadLocalSettings,
   saveAIModelSettings,
   saveExternalSearchSettings,
   saveLocalSettings,
-  startServerUpgrade,
   validateExternalProvider,
 } from '@/api/settings';
 import {
@@ -38,7 +36,6 @@ import type {
   ExternalSearchProviderConfig,
   ExternalSearchProviderKey,
   ExternalSearchSettings,
-  UpgradeTaskStatus,
 } from '@/types/settings';
 
 const models = ref<AIModel[]>([]);
@@ -58,12 +55,6 @@ const autoClassifying = ref(false);
 const stopAutoClassifyRequested = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const versionInfo = ref<AppVersionInfo | null>(null);
-const upgradingServer = ref(false);
-const upgradePassword = ref('');
-const upgradeDialogVisible = ref(false);
-const upgradeTask = ref<UpgradeTaskStatus | null>(null);
-const upgradeLogRef = ref<HTMLPreElement | null>(null);
-let upgradePollTimer: number | null = null;
 
 const settings = reactive(loadLocalSettings());
 const aiSettings = reactive<AIModelSettings>({
@@ -147,10 +138,6 @@ onMounted(async () => {
   await loadModels();
 });
 
-onBeforeUnmount(() => {
-  stopUpgradePolling();
-});
-
 async function loadVersionInfo() {
   loadingVersion.value = true;
   try {
@@ -215,88 +202,6 @@ async function handleValidateExternalProvider(provider: ExternalSearchProviderCo
 
 function handleRefreshModels() {
   loadModels();
-}
-
-function handleVersionUpgrade() {
-  upgradePassword.value = '';
-  upgradeTask.value = null;
-  upgradeDialogVisible.value = true;
-}
-
-async function handleConfirmServerUpgrade() {
-  if (!upgradePassword.value.trim()) {
-    ElMessage.warning('请输入服务器升级专用密码');
-    return;
-  }
-  try {
-    await ElMessageBox.confirm(
-      '确认后后端会在服务器执行预设升级命令。升级过程可能重启服务，请确认当前没有正在保存的数据。',
-      '确认执行服务器升级',
-      { type: 'warning', confirmButtonText: '确认升级', cancelButtonText: '取消' },
-    );
-  } catch {
-    return;
-  }
-
-  upgradingServer.value = true;
-  stopUpgradePolling();
-  try {
-    const started = await startServerUpgrade(upgradePassword.value);
-    ElMessage.success(started.message);
-    await pollUpgradeStatus(started.taskId);
-    startUpgradePolling(started.taskId);
-  } catch (err: unknown) {
-    ElMessage.error(`升级启动失败：${getErrorMessage(err)}`);
-    upgradingServer.value = false;
-  } finally {
-    upgradePassword.value = '';
-  }
-}
-
-function startUpgradePolling(taskId: string) {
-  upgradePollTimer = window.setInterval(() => {
-    void pollUpgradeStatus(taskId);
-  }, 2000);
-}
-
-function stopUpgradePolling() {
-  if (upgradePollTimer !== null) {
-    window.clearInterval(upgradePollTimer);
-    upgradePollTimer = null;
-  }
-}
-
-// 日志输出变化时自动滚动到底部
-watch(
-  () => upgradeTask.value?.output,
-  () => {
-    void nextTick(() => {
-      if (upgradeLogRef.value) {
-        upgradeLogRef.value.scrollTop = upgradeLogRef.value.scrollHeight;
-      }
-    });
-  },
-);
-
-async function pollUpgradeStatus(taskId: string) {
-  try {
-    const status = await fetchUpgradeStatus(taskId);
-    upgradeTask.value = status;
-    if (status.status === 'success' || status.status === 'failed') {
-      stopUpgradePolling();
-      upgradingServer.value = false;
-      if (status.status === 'success') {
-        ElMessage.success('服务器升级命令执行完成');
-        await loadVersionInfo();
-      } else {
-        ElMessage.error('服务器升级命令执行失败');
-      }
-    }
-  } catch (err: unknown) {
-    stopUpgradePolling();
-    upgradingServer.value = false;
-    ElMessage.error(`升级状态获取失败：${getErrorMessage(err)}`);
-  }
 }
 
 function moveProvider(index: number, direction: -1 | 1) {
@@ -623,59 +528,9 @@ function getErrorMessage(err: unknown): string {
           <el-button :icon="RefreshLeft" :loading="loadingVersion" @click="loadVersionInfo">
             刷新版本信息
           </el-button>
-          <el-button type="primary" :loading="upgradingServer" @click="handleVersionUpgrade">
-            版本升级
-          </el-button>
-        </div>
-        <div class="field-hint">
-          仅管理员可执行服务器升级；执行前需要输入服务器部署时设置的升级专用密码进行二次认证。
         </div>
       </div>
     </el-card>
-
-    <el-dialog v-model="upgradeDialogVisible" title="服务器版本升级" width="700px" append-to-body>
-      <el-alert
-        type="warning"
-        :closable="false"
-        show-icon
-        title="升级会在服务器后端执行预设命令，可能拉取代码、重建 Docker 并重启服务。"
-      />
-      <el-form label-width="150px" class="upgrade-form">
-        <el-form-item label="升级专用密码">
-          <el-input
-            v-model="upgradePassword"
-            show-password
-            type="password"
-            autocomplete="new-password"
-            placeholder="输入服务器部署时设置的升级密码"
-            :disabled="upgradingServer"
-            @keyup.enter="handleConfirmServerUpgrade"
-          />
-          <div class="field-hint">该密码只用于前端控制后端升级，不等同于登录密码。</div>
-        </el-form-item>
-      </el-form>
-      <div v-if="upgradeTask" class="upgrade-status">
-        <div class="upgrade-status-bar">
-          <el-tag :type="upgradeTask.status === 'success' ? 'success' : upgradeTask.status === 'failed' ? 'danger' : 'warning'">
-            {{ upgradeTask.status === 'pending' ? '等待中' : upgradeTask.status === 'running' ? '执行中' : upgradeTask.status === 'success' ? '成功' : '失败' }}
-          </el-tag>
-          <span v-if="upgradingServer" class="upgrade-cursor">▌</span>
-          <span class="upgrade-task-id">任务 {{ upgradeTask.taskId.slice(0, 8) }}</span>
-        </div>
-        <pre
-          v-if="upgradeTask.output || upgradingServer"
-          ref="upgradeLogRef"
-          class="upgrade-log"
-        >{{ upgradeTask.output || '等待输出...' }}</pre>
-        <pre v-if="upgradeTask.error" class="upgrade-log upgrade-log--error">{{ upgradeTask.error }}</pre>
-      </div>
-      <template #footer>
-        <el-button :disabled="upgradingServer" @click="upgradeDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :loading="upgradingServer" @click="handleConfirmServerUpgrade">
-          确认升级
-        </el-button>
-      </template>
-    </el-dialog>
 
     <el-card class="settings-card">
       <template #header>
@@ -1030,58 +885,6 @@ function getErrorMessage(err: unknown): string {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
-}
-
-.upgrade-form {
-  margin-top: 16px;
-}
-
-.upgrade-status {
-  display: grid;
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.upgrade-status-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.upgrade-task-id {
-  font-size: 11px;
-  color: var(--el-text-color-placeholder);
-  font-family: monospace;
-}
-
-.upgrade-cursor {
-  color: var(--el-color-primary);
-  animation: blink 1s step-end infinite;
-}
-
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0; }
-}
-
-.upgrade-log {
-  overflow: auto;
-  max-height: 320px;
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 6px;
-  background: #1e1e1e;
-  color: #d4d4d4;
-  font-size: 12px;
-  font-family: 'SF Mono', 'Fira Code', Menlo, Consolas, monospace;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.upgrade-log--error {
-  background: #2d1a1a;
-  color: var(--el-color-danger-light-3);
 }
 
 .field-hint {
