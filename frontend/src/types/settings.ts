@@ -44,3 +44,27 @@ export interface ExternalProviderValidationResult {
   ok: boolean;
   message: string;
 }
+
+export interface AppVersionInfo {
+  appName: string;
+  version: string;
+  environment: string;
+}
+
+export type UpgradeStatus = 'pending' | 'running' | 'success' | 'failed';
+
+export interface UpgradeStartResult {
+  taskId: string;
+  status: UpgradeStatus;
+  message: string;
+}
+
+export interface UpgradeTaskStatus {
+  taskId: string;
+  status: UpgradeStatus;
+  startedAt: string;
+  finishedAt: string;
+  exitCode: number | null;
+  output: string;
+  error: string;
+}

@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import uuid
 from pathlib import Path
 from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
@@ -23,15 +24,21 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.db.session import SessionLocal
 from app.models.external_book_result import ExternalBookResult
 from app.schemas.external_book import ExternalBookCandidate
 from app.services.external_books import BookProvider, get_all_providers
 
 logger = logging.getLogger(__name__)
 
-_ISBN_CACHE_TTL = timedelta(hours=24)
+_ISBN_CACHE_TTL = timedelta(hours=1)
 _SEARCH_CACHE_TTL = timedelta(hours=1)
 _COVER_CACHE_DIR = "external-covers"
+_TASK_TTL = timedelta(hours=1)
+_FAST_RESULT_TIMEOUT_SECONDS = 2.0
+
+_SEARCH_TASKS: dict[str, dict[str, Any]] = {}
+_TASKS_LOCK = asyncio.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +310,25 @@ async def _run_provider_isbn(
         return []
 
 
+async def _run_provider_search_variants(
+    provider: BookProvider,
+    query_variants: list[str],
+    per_variant_limit: int,
+) -> tuple[str, list[ExternalBookCandidate]]:
+    tasks = [_run_provider_search(provider, query_variant, per_variant_limit) for query_variant in query_variants]
+    if not tasks:
+        return provider.name, []
+    batches = await asyncio.gather(*tasks)
+    return provider.name, [candidate for batch in batches for candidate in batch]
+
+
+async def _run_provider_isbn_named(
+    provider: BookProvider,
+    isbn: str,
+) -> tuple[str, list[ExternalBookCandidate]]:
+    return provider.name, await _run_provider_isbn(provider, isbn)
+
+
 def _apply_provider_order(
     providers: list[BookProvider],
     provider_order: list[str] | None,
@@ -349,6 +375,141 @@ async def _fetch_isbn(
     return _deduplicate(combined)
 
 
+async def _cleanup_search_tasks() -> None:
+    cutoff = _now() - _TASK_TTL
+    stale = [
+        task_id
+        for task_id, state in _SEARCH_TASKS.items()
+        if state.get("updated_at", cutoff) < cutoff
+    ]
+    for task_id in stale:
+        _SEARCH_TASKS.pop(task_id, None)
+
+
+async def _create_search_task() -> str:
+    async with _TASKS_LOCK:
+        await _cleanup_search_tasks()
+        task_id = uuid.uuid4().hex
+        _SEARCH_TASKS[task_id] = {
+            "items": [],
+            "is_complete": False,
+            "error": "",
+            "updated_at": _now(),
+        }
+        return task_id
+
+
+async def _update_search_task(
+    task_id: str,
+    *,
+    items: list[ExternalBookCandidate] | None = None,
+    is_complete: bool | None = None,
+    error: str | None = None,
+) -> None:
+    async with _TASKS_LOCK:
+        state = _SEARCH_TASKS.get(task_id)
+        if not state:
+            return
+        if items is not None:
+            state["items"] = _normalize_cover_urls(items)
+        if is_complete is not None:
+            state["is_complete"] = is_complete
+        if error is not None:
+            state["error"] = error
+        state["updated_at"] = _now()
+
+
+async def get_search_task(task_id: str) -> tuple[list[ExternalBookCandidate], bool] | None:
+    async with _TASKS_LOCK:
+        await _cleanup_search_tasks()
+        state = _SEARCH_TASKS.get(task_id)
+        if not state:
+            return None
+        return list(state["items"]), bool(state["is_complete"])
+
+
+def _cache_completed_results(cache_key: str, candidates: list[ExternalBookCandidate]) -> None:
+    db = SessionLocal()
+    try:
+        _save_cache(db, cache_key, candidates)
+    finally:
+        db.close()
+
+
+async def _run_progressive_search_task(
+    task_id: str,
+    *,
+    cache_key: str,
+    query: str,
+    limit: int,
+    providers: list[BookProvider],
+    mode: str | None,
+) -> None:
+    try:
+        query_variants = _search_query_variants(query, mode)
+        per_variant_limit = min(max(limit, 10), 40)
+        tasks = [
+            asyncio.create_task(_run_provider_search_variants(provider, query_variants, per_variant_limit))
+            for provider in providers
+        ]
+        combined: list[ExternalBookCandidate] = []
+        for done in asyncio.as_completed(tasks):
+            _provider_name, batch = await done
+            combined.extend(batch)
+            ranked = _rank_candidates(
+                _deduplicate(combined),
+                query,
+                provider_order=[provider.name for provider in providers],
+            )[:limit]
+            await _update_search_task(task_id, items=ranked, is_complete=False)
+        final = _rank_candidates(
+            _deduplicate(combined),
+            query,
+            provider_order=[provider.name for provider in providers],
+        )[:limit]
+        if final:
+            _cache_completed_results(cache_key, final)
+        await _update_search_task(task_id, items=final, is_complete=True)
+    except Exception as exc:
+        logger.warning("Progressive search task %s failed: %s", task_id, exc)
+        await _update_search_task(task_id, is_complete=True, error=str(exc))
+
+
+async def _run_progressive_isbn_task(
+    task_id: str,
+    *,
+    cache_key: str,
+    isbn: str,
+    providers: list[BookProvider],
+) -> None:
+    try:
+        tasks = [asyncio.create_task(_run_provider_isbn_named(provider, isbn)) for provider in providers]
+        combined: list[ExternalBookCandidate] = []
+        for done in asyncio.as_completed(tasks):
+            _provider_name, batch = await done
+            combined.extend(batch)
+            await _update_search_task(task_id, items=_deduplicate(combined), is_complete=False)
+        final = _deduplicate(combined)
+        if final:
+            _cache_completed_results(cache_key, final)
+        await _update_search_task(task_id, items=final, is_complete=True)
+    except Exception as exc:
+        logger.warning("Progressive ISBN task %s failed: %s", task_id, exc)
+        await _update_search_task(task_id, is_complete=True, error=str(exc))
+
+
+async def _wait_for_fast_results(task_id: str, timeout_seconds: float) -> tuple[list[ExternalBookCandidate], bool]:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        state = await get_search_task(task_id)
+        if state is None:
+            return [], True
+        items, is_complete = state
+        if items or is_complete or asyncio.get_running_loop().time() >= deadline:
+            return items, is_complete
+        await asyncio.sleep(0.1)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -383,6 +544,48 @@ async def search_books(
     return _normalize_cover_urls(candidates)
 
 
+async def search_books_progressive(
+    db: Session,
+    query: str,
+    limit: int = 10,
+    providers: list[BookProvider] | None = None,
+    mode: str | None = None,
+    provider_filter: str | None = None,
+    provider_order: list[str] | None = None,
+    provider_configs: dict[str, dict[str, Any]] | None = None,
+    fast_timeout_seconds: float = _FAST_RESULT_TIMEOUT_SECONDS,
+) -> tuple[list[ExternalBookCandidate], str | None, bool]:
+    use_cache = provider_filter is None
+    order_key = ",".join(provider_order or [])
+    config_key = _provider_config_cache_key(provider_configs)
+    cache_key = f"query:v6:{mode or 'title'}:{order_key}:{config_key}:{query}"
+    if use_cache:
+        cached = _load_cache(db, cache_key, _SEARCH_CACHE_TTL)
+        if cached is not None:
+            return _normalize_cover_urls(cached[:limit]), None, True
+
+    active_providers = providers if providers is not None else get_all_providers(provider_configs)
+    active_providers = _apply_provider_order(active_providers, provider_order)
+    if provider_filter:
+        active_providers = [p for p in active_providers if p.name == provider_filter]
+    if not active_providers:
+        return [], None, True
+
+    task_id = await _create_search_task()
+    asyncio.create_task(
+        _run_progressive_search_task(
+            task_id,
+            cache_key=cache_key,
+            query=query,
+            limit=limit,
+            providers=active_providers,
+            mode=mode,
+        )
+    )
+    items, is_complete = await _wait_for_fast_results(task_id, fast_timeout_seconds)
+    return items, None if is_complete else task_id, is_complete
+
+
 async def lookup_isbn(
     db: Session,
     isbn: str,
@@ -404,6 +607,40 @@ async def lookup_isbn(
     if candidates:
         _save_cache(db, cache_key, candidates)
     return _normalize_cover_urls(candidates)
+
+
+async def lookup_isbn_progressive(
+    db: Session,
+    isbn: str,
+    providers: list[BookProvider] | None = None,
+    provider_order: list[str] | None = None,
+    provider_configs: dict[str, dict[str, Any]] | None = None,
+    fast_timeout_seconds: float = _FAST_RESULT_TIMEOUT_SECONDS,
+) -> tuple[list[ExternalBookCandidate], str | None, bool]:
+    clean = clean_isbn(isbn)
+    order_key = ",".join(provider_order or [])
+    config_key = _provider_config_cache_key(provider_configs)
+    cache_key = f"isbn:v4:{order_key}:{config_key}:{clean}"
+    cached = _load_cache(db, cache_key, _ISBN_CACHE_TTL)
+    if cached is not None:
+        return _normalize_cover_urls(cached), None, True
+
+    active_providers = providers if providers is not None else get_all_providers(provider_configs)
+    active_providers = _apply_provider_order(active_providers, provider_order)
+    if not active_providers:
+        return [], None, True
+
+    task_id = await _create_search_task()
+    asyncio.create_task(
+        _run_progressive_isbn_task(
+            task_id,
+            cache_key=cache_key,
+            isbn=clean,
+            providers=active_providers,
+        )
+    )
+    items, is_complete = await _wait_for_fast_results(task_id, fast_timeout_seconds)
+    return items, None if is_complete else task_id, is_complete
 
 
 def _cover_headers(url: str) -> dict[str, str]:

@@ -4,7 +4,14 @@ import { ElMessage } from 'element-plus';
 import { computed, onMounted, ref } from 'vue';
 
 import { classifyBook, getAIModels, recommendBookContent } from '@/api/ai';
-import { searchBooks, searchByISBN } from '@/api/search';
+import {
+  fetchSearchTask,
+  searchBooks,
+  searchBooksProgressive,
+  searchByISBN,
+  searchByISBNProgressive,
+  type ProgressiveSearchResponse,
+} from '@/api/search';
 import { fetchAIModelSettings } from '@/api/settings';
 import AIRecommendationCard from '@/components/ai/AIRecommendationCard.vue';
 import SearchResultCard from '@/components/search/SearchResultCard.vue';
@@ -105,7 +112,12 @@ async function handleExternalEnhance() {
   enhanceResults.value = [];
   activeEnhanceSource.value = 'all';
   try {
-    enhanceResults.value = await fetchEnhanceCandidates(20);
+    enhanceResults.value = await fetchEnhanceCandidatesProgressively(20, (items, isComplete) => {
+      enhanceResults.value = items;
+      if (items.length > 0 || isComplete) {
+        enhanceSearching.value = false;
+      }
+    });
     if (enhanceResults.value.length === 0) {
       enhanceError.value = '其他数据源未找到可补全的书目，请尝试补充书名、作者、出版社或 ISBN';
     }
@@ -188,6 +200,50 @@ function handleAcceptContentRecommendation() {
   ElMessage.success(changed > 0 ? `已采用 ${changed} 项 AI 检索内容推荐` : '暂无可填充的空字段');
 }
 
+async function fetchEnhanceCandidatesProgressively(
+  limit = 20,
+  onUpdate?: (items: SearchResultItem[], isComplete: boolean) => void,
+): Promise<SearchResultItem[]> {
+  const requests: Array<Promise<ProgressiveSearchResponse>> = [];
+  const title = form.value.title.trim();
+  const author = form.value.author.trim();
+  const publisher = form.value.publisher.trim();
+  const isbn = form.value.isbn.trim();
+
+  if (isbn) requests.push(searchByISBNProgressive(isbn));
+  if (title && author) requests.push(searchBooksProgressive(`${title} ${author}`, limit));
+  if (title && publisher) requests.push(searchBooksProgressive(`${title} ${publisher}`, limit, { mode: 'title_publisher' }));
+  if (title) requests.push(searchBooksProgressive(title, limit));
+
+  const initial = await Promise.allSettled(requests);
+  let collected = initial
+    .filter((item): item is PromiseFulfilledResult<ProgressiveSearchResponse> => item.status === 'fulfilled')
+    .flatMap((item) => item.value.items);
+  let results = dedupeSearchResults(collected).slice(0, limit);
+  let pendingTaskIds = initial
+    .filter((item): item is PromiseFulfilledResult<ProgressiveSearchResponse> => item.status === 'fulfilled')
+    .map((item) => item.value.taskId)
+    .filter((taskId): taskId is string => Boolean(taskId));
+  onUpdate?.(results, pendingTaskIds.length === 0);
+
+  while (pendingTaskIds.length > 0) {
+    await delay(1000);
+    const polled = await Promise.allSettled(pendingTaskIds.map(fetchSearchTask));
+    pendingTaskIds = [];
+    for (const item of polled) {
+      if (item.status !== 'fulfilled') continue;
+      collected = [...collected, ...item.value.items];
+      if (item.value.taskId) {
+        pendingTaskIds.push(item.value.taskId);
+      }
+    }
+    results = dedupeSearchResults(collected).slice(0, limit);
+    onUpdate?.(results, pendingTaskIds.length === 0);
+  }
+
+  return results;
+}
+
 async function fetchEnhanceCandidates(limit = 20): Promise<SearchResultItem[]> {
   const tasks: Array<Promise<SearchResultItem[]>> = [];
   const title = form.value.title.trim();
@@ -205,6 +261,10 @@ async function fetchEnhanceCandidates(limit = 20): Promise<SearchResultItem[]> {
     .filter((item): item is PromiseFulfilledResult<SearchResultItem[]> => item.status === 'fulfilled')
     .flatMap((item) => item.value);
   return dedupeSearchResults(fulfilled).slice(0, limit);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function dedupeSearchResults(items: SearchResultItem[]): SearchResultItem[] {

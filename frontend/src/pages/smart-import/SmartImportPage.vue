@@ -9,7 +9,14 @@ import { useRouter } from 'vue-router';
 import { classifyBook, getAIModels, recommendBookContent } from '@/api/ai';
 import { getCategoryOptions, getLocationOptions } from '@/api/books';
 import { createBook } from '@/api/books';
-import { searchBooks, searchByISBN } from '@/api/search';
+import {
+  fetchSearchTask,
+  searchBooks,
+  searchBooksProgressive,
+  searchByISBN,
+  searchByISBNProgressive,
+  type ProgressiveSearchResponse,
+} from '@/api/search';
 import { fetchAIModelSettings } from '@/api/settings';
 import AIRecommendationCard from '@/components/ai/AIRecommendationCard.vue';
 import BookForm from '@/components/book/BookForm.vue';
@@ -158,13 +165,12 @@ async function handleSearch() {
   activeSearchSource.value = 'all';
 
   try {
-    if (searchType.value === 'isbn') {
-      searchResults.value = await searchByISBN(query);
-    } else if (searchType.value === 'title_publisher') {
-      searchResults.value = await searchBooks(query, 30, { mode: 'title_publisher' });
-    } else {
-      searchResults.value = await searchBooks(query, 30);
-    }
+    searchResults.value = await searchCandidatesProgressively(query, 30, (items, isComplete) => {
+      searchResults.value = items;
+      if (items.length > 0 || isComplete) {
+        searching.value = false;
+      }
+    });
 
     if (searchResults.value.length === 0) {
       searchError.value = '未找到匹配结果，请尝试其他关键词';
@@ -175,6 +181,29 @@ async function handleSearch() {
   } finally {
     searching.value = false;
   }
+}
+
+async function searchCandidatesProgressively(
+  query: string,
+  limit = 30,
+  onUpdate?: (items: SearchResultItem[], isComplete: boolean) => void,
+): Promise<SearchResultItem[]> {
+  const response = searchType.value === 'isbn'
+    ? await searchByISBNProgressive(query)
+    : await searchBooksProgressive(query, limit, searchType.value === 'title_publisher' ? { mode: 'title_publisher' } : undefined);
+  let results = dedupeSearchResults(response.items).slice(0, limit);
+  let taskId = response.taskId;
+  onUpdate?.(results, !taskId);
+
+  while (taskId) {
+    await delay(1000);
+    const next = await fetchSearchTask(taskId);
+    results = dedupeSearchResults([...results, ...next.items]).slice(0, limit);
+    taskId = next.taskId;
+    onUpdate?.(results, !taskId);
+  }
+
+  return results;
 }
 
 async function openBarcodeScanner() {
@@ -339,7 +368,12 @@ async function handleExternalEnhance() {
   enhanceError.value = '';
   enhanceResults.value = [];
   try {
-    enhanceResults.value = await fetchEnhanceCandidates(20);
+    enhanceResults.value = await fetchEnhanceCandidatesProgressively(20, (items, isComplete) => {
+      enhanceResults.value = items;
+      if (items.length > 0 || isComplete) {
+        enhanceSearching.value = false;
+      }
+    });
     if (enhanceResults.value.length === 0) {
       enhanceError.value = '其他数据源未找到可补全的书目，请尝试修改书名、作者、出版社或 ISBN';
     }
@@ -388,6 +422,50 @@ function searchResultToForm(result: SearchResultItem): BookFormModel {
   };
 }
 
+async function fetchEnhanceCandidatesProgressively(
+  limit = 20,
+  onUpdate?: (items: SearchResultItem[], isComplete: boolean) => void,
+): Promise<SearchResultItem[]> {
+  const requests: Array<Promise<ProgressiveSearchResponse>> = [];
+  const title = form.value.title.trim();
+  const author = form.value.author.trim();
+  const publisher = form.value.publisher.trim();
+  const isbn = form.value.isbn.trim();
+
+  if (isbn) requests.push(searchByISBNProgressive(isbn));
+  if (title && author) requests.push(searchBooksProgressive(`${title} ${author}`, limit));
+  if (title && publisher) requests.push(searchBooksProgressive(`${title} ${publisher}`, limit, { mode: 'title_publisher' }));
+  if (title) requests.push(searchBooksProgressive(title, limit));
+
+  const initial = await Promise.allSettled(requests);
+  let collected = initial
+    .filter((item): item is PromiseFulfilledResult<ProgressiveSearchResponse> => item.status === 'fulfilled')
+    .flatMap((item) => item.value.items);
+  let results = dedupeSearchResults(collected).slice(0, limit);
+  let pendingTaskIds = initial
+    .filter((item): item is PromiseFulfilledResult<ProgressiveSearchResponse> => item.status === 'fulfilled')
+    .map((item) => item.value.taskId)
+    .filter((taskId): taskId is string => Boolean(taskId));
+  onUpdate?.(results, pendingTaskIds.length === 0);
+
+  while (pendingTaskIds.length > 0) {
+    await delay(1000);
+    const polled = await Promise.allSettled(pendingTaskIds.map(fetchSearchTask));
+    pendingTaskIds = [];
+    for (const item of polled) {
+      if (item.status !== 'fulfilled') continue;
+      collected = [...collected, ...item.value.items];
+      if (item.value.taskId) {
+        pendingTaskIds.push(item.value.taskId);
+      }
+    }
+    results = dedupeSearchResults(collected).slice(0, limit);
+    onUpdate?.(results, pendingTaskIds.length === 0);
+  }
+
+  return results;
+}
+
 async function fetchEnhanceCandidates(limit = 20): Promise<SearchResultItem[]> {
   const tasks: Array<Promise<SearchResultItem[]>> = [];
   const title = form.value.title.trim();
@@ -405,6 +483,10 @@ async function fetchEnhanceCandidates(limit = 20): Promise<SearchResultItem[]> {
     .filter((item): item is PromiseFulfilledResult<SearchResultItem[]> => item.status === 'fulfilled')
     .flatMap((item) => item.value);
   return dedupeSearchResults(fulfilled).slice(0, limit);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function dedupeSearchResults(items: SearchResultItem[]): SearchResultItem[] {

@@ -13,6 +13,10 @@ services:
       UPLOAD_DIR: /uploads
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      UPGRADE_PASSWORD: ${UPGRADE_PASSWORD:-}
+      UPGRADE_COMMAND: ${UPGRADE_COMMAND:-}
+      UPGRADE_WORKDIR: ${UPGRADE_WORKDIR:-/app}
+      UPGRADE_TIMEOUT_SECONDS: ${UPGRADE_TIMEOUT_SECONDS:-900}
     volumes:
       - db_data:/data
       - uploads:/uploads

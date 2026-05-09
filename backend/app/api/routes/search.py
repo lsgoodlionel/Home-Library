@@ -54,6 +54,7 @@ async def search_books(
     mode: Annotated[str | None, Query(pattern="^(title|title_author|title_publisher)$")] = None,
     provider: Annotated[str | None, Query()] = None,
     provider_order: Annotated[str | None, Query()] = None,
+    progressive: Annotated[bool, Query()] = False,
 ) -> ExternalBookSearchResponse:
     """Search external providers by title, author, or combined keyword.
 
@@ -63,6 +64,18 @@ async def search_books(
       - title_publisher "书名 出版社" format
     provider: restrict to a single provider by name (e.g. "douban")
     """
+    if progressive:
+        candidates, task_id, is_complete = await external_book_service.search_books_progressive(
+            db,
+            query=query,
+            limit=limit,
+            mode=mode,
+            provider_filter=provider,
+            provider_order=_parse_provider_order(provider_order),
+            provider_configs=get_effective_external_configs(db, current_user),
+        )
+        return ExternalBookSearchResponse(items=candidates, task_id=task_id, is_complete=is_complete)
+
     candidates = await external_book_service.search_books(
         db,
         query=query,
@@ -81,9 +94,19 @@ async def search_by_isbn(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
     provider_order: Annotated[str | None, Query()] = None,
+    progressive: Annotated[bool, Query()] = False,
 ) -> ExternalBookSearchResponse:
     """Look up a book by ISBN across all configured providers."""
     clean = external_book_service.clean_isbn(isbn)
+    if progressive:
+        candidates, task_id, is_complete = await external_book_service.lookup_isbn_progressive(
+            db,
+            isbn=clean,
+            provider_order=_parse_provider_order(provider_order),
+            provider_configs=get_effective_external_configs(db, current_user),
+        )
+        return ExternalBookSearchResponse(items=candidates, task_id=task_id, is_complete=is_complete)
+
     candidates = await external_book_service.lookup_isbn(
         db,
         isbn=clean,
@@ -91,6 +114,15 @@ async def search_by_isbn(
         provider_configs=get_effective_external_configs(db, current_user),
     )
     return ExternalBookSearchResponse(items=candidates)
+
+
+@router.get("/tasks/{task_id}", response_model=ExternalBookSearchResponse)
+async def get_search_task(task_id: str) -> ExternalBookSearchResponse:
+    state = await external_book_service.get_search_task(task_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="检索任务不存在或已过期")
+    items, is_complete = state
+    return ExternalBookSearchResponse(items=items, task_id=None if is_complete else task_id, is_complete=is_complete)
 
 
 @router.get("/config", response_model=ExternalSearchSettingsResponse)

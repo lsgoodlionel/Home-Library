@@ -66,6 +66,22 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_OPTIONAL", "OLLAMA_OPTIONAL"),
     )
+    upgrade_password: str = Field(
+        default="",
+        validation_alias=AliasChoices("HOME_LIBRARY_UPGRADE_PASSWORD", "UPGRADE_PASSWORD"),
+    )
+    upgrade_command: str = Field(
+        default="",
+        validation_alias=AliasChoices("HOME_LIBRARY_UPGRADE_COMMAND", "UPGRADE_COMMAND"),
+    )
+    upgrade_workdir: str = Field(
+        default=".",
+        validation_alias=AliasChoices("HOME_LIBRARY_UPGRADE_WORKDIR", "UPGRADE_WORKDIR"),
+    )
+    upgrade_timeout_seconds: int = Field(
+        default=900,
+        validation_alias=AliasChoices("HOME_LIBRARY_UPGRADE_TIMEOUT_SECONDS", "UPGRADE_TIMEOUT_SECONDS"),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

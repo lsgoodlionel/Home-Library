@@ -20,6 +20,14 @@ interface ApiSearchResultItem {
 
 interface ApiSearchResultsResponse {
   items: ApiSearchResultItem[];
+  task_id?: string | null;
+  is_complete?: boolean;
+}
+
+export interface ProgressiveSearchResponse {
+  items: SearchResultItem[];
+  taskId: string | null;
+  isComplete: boolean;
 }
 
 function normalizeSearchResultItem(item: ApiSearchResultItem): SearchResultItem {
@@ -59,6 +67,30 @@ export async function searchBooks(
   return data.items.map(normalizeSearchResultItem);
 }
 
+export async function searchBooksProgressive(
+  query: string,
+  limit = 30,
+  options?: { mode?: string; provider?: string },
+): Promise<ProgressiveSearchResponse> {
+  const providerOrder = loadLocalSettings().externalProviderOrder.join(',');
+  const { data } = await apiClient.get<ApiSearchResultsResponse>('/search/books', {
+    timeout: API_TIMEOUTS.search,
+    params: {
+      query,
+      limit,
+      progressive: true,
+      provider_order: providerOrder,
+      ...(options?.mode && { mode: options.mode }),
+      ...(options?.provider && { provider: options.provider }),
+    },
+  });
+  return {
+    items: data.items.map(normalizeSearchResultItem),
+    taskId: data.task_id || null,
+    isComplete: data.is_complete ?? true,
+  };
+}
+
 export async function searchByISBN(isbn: string): Promise<SearchResultItem[]> {
   const providerOrder = loadLocalSettings().externalProviderOrder.join(',');
   const { data } = await apiClient.get<ApiSearchResultsResponse>(`/search/isbn/${encodeURIComponent(isbn)}`, {
@@ -68,6 +100,33 @@ export async function searchByISBN(isbn: string): Promise<SearchResultItem[]> {
     },
   });
   return data.items.map(normalizeSearchResultItem);
+}
+
+export async function searchByISBNProgressive(isbn: string): Promise<ProgressiveSearchResponse> {
+  const providerOrder = loadLocalSettings().externalProviderOrder.join(',');
+  const { data } = await apiClient.get<ApiSearchResultsResponse>(`/search/isbn/${encodeURIComponent(isbn)}`, {
+    timeout: API_TIMEOUTS.search,
+    params: {
+      progressive: true,
+      provider_order: providerOrder,
+    },
+  });
+  return {
+    items: data.items.map(normalizeSearchResultItem),
+    taskId: data.task_id || null,
+    isComplete: data.is_complete ?? true,
+  };
+}
+
+export async function fetchSearchTask(taskId: string): Promise<ProgressiveSearchResponse> {
+  const { data } = await apiClient.get<ApiSearchResultsResponse>(`/search/tasks/${taskId}`, {
+    timeout: API_TIMEOUTS.default,
+  });
+  return {
+    items: data.items.map(normalizeSearchResultItem),
+    taskId: data.task_id || null,
+    isComplete: data.is_complete ?? true,
+  };
 }
 
 export async function importSearchResult(payload: ImportResultPayload): Promise<void> {

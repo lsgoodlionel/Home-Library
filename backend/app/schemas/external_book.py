@@ -27,6 +27,8 @@ class ExternalBookCandidate(BaseModel):
 
 class ExternalBookSearchResponse(BaseModel):
     items: list[ExternalBookCandidate]
+    task_id: Optional[str] = None
+    is_complete: bool = True
 
 
 class ImportResultRequest(BaseModel):

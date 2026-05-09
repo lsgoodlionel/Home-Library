@@ -5,11 +5,14 @@ import type {
   AIModelSettings,
   AIProviderConfig,
   AIProviderKey,
+  AppVersionInfo,
   AppSettings,
   ExternalProviderValidationResult,
   ExternalSearchProviderConfig,
   ExternalSearchProviderKey,
   ExternalSearchSettings,
+  UpgradeStartResult,
+  UpgradeTaskStatus,
 } from '@/types/settings';
 
 export type { AIModel };
@@ -116,6 +119,28 @@ interface ApiExternalSearchSettingsResponse {
   providers: ApiExternalSearchProviderConfig[];
 }
 
+interface ApiVersionResponse {
+  app_name?: string;
+  version?: string;
+  environment?: string;
+}
+
+interface ApiUpgradeStartResponse {
+  task_id: string;
+  status: UpgradeStartResult['status'];
+  message: string;
+}
+
+interface ApiUpgradeStatusResponse {
+  task_id: string;
+  status: UpgradeTaskStatus['status'];
+  started_at: string;
+  finished_at?: string | null;
+  exit_code?: number | null;
+  output?: string;
+  error?: string;
+}
+
 function normalizeAIProvider(config: ApiAIProviderConfig): AIProviderConfig {
   return {
     provider: config.provider,
@@ -178,6 +203,39 @@ function normalizeExternalSettings(data: ApiExternalSearchSettingsResponse): Ext
 export async function fetchExternalSearchSettings(): Promise<ExternalSearchSettings> {
   const { data } = await apiClient.get<ApiExternalSearchSettingsResponse>('/search/config');
   return normalizeExternalSettings(data);
+}
+
+export async function fetchAppVersion(): Promise<AppVersionInfo> {
+  const { data } = await apiClient.get<ApiVersionResponse>('/version');
+  return {
+    appName: data.app_name || 'Home Library',
+    version: data.version || 'unknown',
+    environment: data.environment || 'unknown',
+  };
+}
+
+export async function startServerUpgrade(upgradePassword: string): Promise<UpgradeStartResult> {
+  const { data } = await apiClient.post<ApiUpgradeStartResponse>('/upgrade', {
+    upgrade_password: upgradePassword,
+  });
+  return {
+    taskId: data.task_id,
+    status: data.status,
+    message: data.message,
+  };
+}
+
+export async function fetchUpgradeStatus(taskId: string): Promise<UpgradeTaskStatus> {
+  const { data } = await apiClient.get<ApiUpgradeStatusResponse>(`/upgrade/${taskId}`);
+  return {
+    taskId: data.task_id,
+    status: data.status,
+    startedAt: data.started_at,
+    finishedAt: data.finished_at || '',
+    exitCode: data.exit_code ?? null,
+    output: data.output || '',
+    error: data.error || '',
+  };
 }
 
 export async function saveExternalSearchSettings(settings: ExternalSearchSettings): Promise<ExternalSearchSettings> {
