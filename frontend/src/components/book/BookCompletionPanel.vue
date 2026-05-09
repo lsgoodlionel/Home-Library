@@ -154,12 +154,19 @@ async function handleClassify() {
 
 function handleAcceptClassify() {
   if (!classifyResult.value) return;
-  const code = normalizeCategoryCode(classifyResult.value.categoryCode);
-  const found = resolveCategoryRecommendation(props.categories, code, classifyResult.value.categoryName);
+  const aiCode = normalizeCategoryCode(classifyResult.value.categoryCode);
+  const aiName = classifyResult.value.categoryName;
+  const found = resolveCategoryRecommendation(props.categories, aiCode, aiName);
   if (found) {
     form.value.categoryId = found.id;
+    const actualLabel = `${found.code} ${found.name}`;
+    if (found.code.toUpperCase() === aiCode) {
+      ElMessage.success(`已采用分类「${actualLabel}」和标签推荐`);
+    } else {
+      ElMessage.success(`已采用分类「${actualLabel}」和标签推荐（AI推荐「${aiCode} ${aiName}」，已自动匹配至最近分类）`);
+    }
   } else {
-    ElMessage.warning(`未找到匹配分类「${code}」，请在表单中手动选择`);
+    ElMessage.warning(`未找到匹配分类「${aiCode}」，请在表单中手动选择`);
   }
   const tags = new Set(form.value.tagNames);
   for (const tag of classifyResult.value.tags) {
@@ -167,7 +174,6 @@ function handleAcceptClassify() {
   }
   form.value.tagNames = Array.from(tags);
   classifyDismissed.value = true;
-  ElMessage.success('已采用 AI 分类和标签推荐');
 }
 
 async function handleGenerateContentRecommendation() {

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import ApiError
 from app.core.security import get_current_user, get_optional_current_user
 from app.db.session import get_db
+from app.models import Category
 from app.models.user import User
 from app.schemas.ai import (
     ClassifyBookRequest,
@@ -51,6 +52,16 @@ def _model_name(requested_model: str | None, default_model: str) -> str:
 
 def _clean_text(value: str | None) -> str:
     return value.strip() if value else ""
+
+
+def _format_categories_for_prompt(db: Session) -> str:
+    """从数据库读取全部分类，格式化为提示词注入文本。"""
+    cats = (
+        db.query(Category.code, Category.name)
+        .order_by(Category.code)
+        .all()
+    )
+    return "\n".join(f"{code}: {name}" for code, name in cats)
 
 
 def _dump(value: Any) -> str:
@@ -183,11 +194,13 @@ def classify_book(
     base_url, default_model = get_ollama_runtime_config(db, current_user)
     model = _model_name(payload.model, default_model)
     input_data = payload.model_dump(mode="json")
+    categories_text = _format_categories_for_prompt(db)
     prompt = load_prompt_template("classify_book.txt").format(
         title=payload.title,
         author=_clean_text(payload.author),
         publisher=_clean_text(payload.publisher),
         summary=_clean_text(payload.summary),
+        categories=categories_text,
     )
     return _run_json_task(
         db,
