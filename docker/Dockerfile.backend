@@ -11,7 +11,10 @@ COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl sqlite3 ca-certificates git \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # 容器以 root 运行，挂载的宿主机目录属主不同，需设置 safe.directory
+    # 避免 "fatal: not a git repository" 跨文件系统权限错误
+    && git config --global safe.directory '*'
 
 WORKDIR /app/backend
 
