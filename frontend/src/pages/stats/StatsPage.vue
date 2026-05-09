@@ -43,7 +43,7 @@ const readingItems = computed(() => [
   { name: '暂停', count: readingStats.value?.paused || 0, color: '#b57a36' },
 ]);
 
-const categoryChartItems = computed(() => collapseOverflowItems(categoryItems.value, 12));
+const categoryChartItems = computed(() => collapseOverflowItems(categoryItems.value, 22));
 
 function collapseOverflowItems(items: DistributionItem[], maxItems: number) {
   if (items.length <= maxItems) {

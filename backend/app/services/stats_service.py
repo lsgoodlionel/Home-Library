@@ -90,17 +90,39 @@ def get_overview(db: Session) -> StatsOverview:
 
 
 def get_category_distribution(db: Session) -> list[DistributionItem]:
-    rows = (
-        db.query(Category.id, Category.code, Category.name, Category.sort_order, func.count(Book.id))
-        .outerjoin(Book, Book.category_id == Category.id)
-        .group_by(Category.id, Category.code, Category.name, Category.sort_order)
-        .having(func.count(Book.id) > 0)
-        .order_by(func.count(Book.id).desc(), Category.sort_order.asc(), Category.id.asc())
-        .all()
-    )
+    """只返回 L1 大类，计数包含其下所有子级分类的图书。"""
+    # 1. 取所有分类，建立 id → category 映射
+    all_cats = db.query(Category).all()
+    cat_by_id: dict[int, Category] = {c.id: c for c in all_cats}
+    l1_by_id: dict[int, Category] = {c.id: c for c in all_cats if c.parent_id is None}
+
+    # 2. 向上追溯：找到某 category_id 所属的 L1 祖先 id
+    def find_l1_id(cat_id: int) -> int | None:
+        cid: int | None = cat_id
+        seen: set[int] = set()
+        while cid is not None and cid not in seen:
+            seen.add(cid)
+            cat = cat_by_id.get(cid)
+            if cat is None:
+                return None
+            if cat.parent_id is None:
+                return cid          # 已是 L1
+            cid = cat.parent_id
+        return None
+
+    # 3. 统计每本书归属的 L1 大类
+    book_cat_ids = db.query(Book.category_id).filter(Book.category_id.isnot(None)).all()
+    l1_counts: dict[int, int] = {}
+    for (cat_id,) in book_cat_ids:
+        l1_id = find_l1_id(cat_id)
+        if l1_id is not None:
+            l1_counts[l1_id] = l1_counts.get(l1_id, 0) + 1
+
+    # 4. 按数量降序，只返回有书的 L1 大类
     items = [
-        DistributionItem(id=cat_id, code=code, name=name, count=int(count))
-        for cat_id, code, name, _sort_order, count in rows
+        DistributionItem(id=cat_id, code=l1_by_id[cat_id].code, name=l1_by_id[cat_id].name, count=count)
+        for cat_id, count in sorted(l1_counts.items(), key=lambda x: -x[1])
+        if cat_id in l1_by_id and count > 0
     ]
 
     uncategorized = db.query(func.count(Book.id)).filter(Book.category_id.is_(None)).scalar() or 0
