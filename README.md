@@ -159,6 +159,27 @@ bash ~/home-library/scripts/auto-update-setup.sh --interval "30 2 * * *"
 
 > 支持企业微信 / 钉钉 / Slack 更新通知，详见 [`docs/deploy.md`](docs/deploy.md#更新与自动更新)
 
+### 故障诊断与自动修复
+
+如果 Ubuntu 服务器上原本已经部署成功，但现在页面打不开，可执行一键诊断修复脚本：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/doctor.sh)
+```
+
+如果脚本未能自动定位部署目录，手动指定项目目录：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/doctor.sh) /opt/Home-Library
+```
+
+脚本会检查 Docker、Compose、部署目录、`.env` 配置摘要、Git 版本、容器状态、健康接口和最近日志，并尝试非破坏性恢复运行状态：
+
+- `docker compose up -d --remove-orphans`
+- 健康检查失败后再执行 `docker compose up -d --build --remove-orphans`
+
+脚本不会删除数据库、不会删除 Docker volume，执行过程会生成 `home-library-doctor-*.log` 日志文件，便于继续排查。
+
 ---
 
 ## 本地开发
