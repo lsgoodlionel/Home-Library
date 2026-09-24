@@ -1,0 +1,89 @@
+# =============================================================================
+# 家藏书库 Home Library — 生产部署配置（使用预构建镜像）
+# =============================================================================
+# 优先使用此文件部署，无需在服务器上构建镜像，速度快、稳定性高。
+#
+# 首次部署：
+#   cp .env.example .env
+#   nano .env   # 修改 SECRET_KEY、INITIAL_ADMIN_PASSWORD、CORS_ORIGINS
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# 更新到最新版本：
+#   bash scripts/update.sh
+#   # 或手动：
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# 指定版本（如 0.1.50）：
+#   VERSION=0.1.50 docker compose -f docker-compose.prod.yml up -d
+# =============================================================================
+
+services:
+  backend:
+    image: ghcr.io/lsgoodlionel/home-library-backend:${VERSION:-latest}
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8000
+      DATABASE_URL: sqlite:////data/home_library.sqlite3
+      UPLOAD_DIR: /uploads
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    volumes:
+      - db_data:/data
+      - uploads:/uploads
+      - backups:/backups
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    image: ghcr.io/lsgoodlionel/home-library-frontend:${VERSION:-latest}
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - uploads:/uploads:ro
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles:
+      - ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    profiles:
+      - postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-home_library}
+      POSTGRES_USER: ${POSTGRES_USER:-home_library}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-home_library} -d ${POSTGRES_DB:-home_library}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  uploads:
+  backups:
+  ollama_data:
+  postgres_data:

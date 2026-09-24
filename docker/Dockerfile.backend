@@ -1,9 +1,14 @@
 FROM python:3.11-slim AS runtime
 
+# CI 构建时通过 --build-arg APP_VERSION=x.y.z 传入版本号，
+# 覆盖容器内 git commit count 方式（镜像内无完整 git 历史）
+ARG APP_VERSION=
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_SYSTEM_PYTHON=1 \
-    UV_HTTP_TIMEOUT=120
+    UV_HTTP_TIMEOUT=120 \
+    HOME_LIBRARY_APP_VERSION=${APP_VERSION}
 
 COPY --from=ghcr.io/astral-sh/uv:0.5.26 /uv /usr/local/bin/uv
 # 从官方 docker 镜像复制 docker CLI（仅二进制，不需要完整 daemon）

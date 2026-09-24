@@ -24,18 +24,20 @@ SECRET_KEY=""
 ADMIN_USER="admin"
 ADMIN_PASS="Admin@123"
 UPDATE_ONLY=false
+SOURCE_BUILD=false  # 默认使用预构建镜像
 REPO_URL="https://github.com/lsgoodlionel/Home-Library.git"
 INSTALL_DIR="$HOME/home-library"
 
 # ---------- 解析参数 ----------
-while getopts "p:s:u:w:d" opt; do
+while getopts "p:s:u:w:db" opt; do
   case $opt in
     p) HTTP_PORT="$OPTARG" ;;
     s) SECRET_KEY="$OPTARG" ;;
     u) ADMIN_USER="$OPTARG" ;;
     w) ADMIN_PASS="$OPTARG" ;;
     d) UPDATE_ONLY=true ;;
-    *) echo "用法: $0 [-p 端口] [-s 密钥] [-u 管理员] [-w 密码] [-d 仅更新]"; exit 1 ;;
+    b) SOURCE_BUILD=true ;;  # -b 从源码构建（慢，不推荐）
+    *) echo "用法: $0 [-p 端口] [-s 密钥] [-u 管理员] [-w 密码] [-d 仅更新] [-b 从源码构建]"; exit 1 ;;
   esac
 done
 
@@ -170,27 +172,33 @@ sed_inplace "s|^CORS_ORIGINS=.*|CORS_ORIGINS=http://localhost,http://127.0.0.1,h
 
 success ".env 配置完成"
 
-# ---------- 构建并启动 ----------
-info "构建镜像并启动服务（首次约需 3-5 分钟）..."
-docker compose pull --quiet 2>/dev/null || true
-docker compose build --quiet
-docker compose up -d --remove-orphans
+# ---------- 启动 ----------
+COMPOSE_FILE="docker-compose.prod.yml"
+if $SOURCE_BUILD || [[ ! -f "$COMPOSE_FILE" ]]; then
+  COMPOSE_FILE="docker-compose.yml"
+  info "从源码构建镜像并启动（首次约需 3-5 分钟）..."
+  docker compose -f "$COMPOSE_FILE" build --quiet
+else
+  info "拉取预构建镜像并启动（通常 < 1 分钟）..."
+  docker compose -f "$COMPOSE_FILE" pull --quiet
+fi
+docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
 
 # ---------- 等待健康检查 ----------
 info "等待服务就绪..."
 MAX_WAIT=120
 ELAPSED=0
-until docker compose ps backend | grep -q "healthy" || [[ $ELAPSED -ge $MAX_WAIT ]]; do
+until docker compose -f "$COMPOSE_FILE" ps backend | grep -q "healthy" || [[ $ELAPSED -ge $MAX_WAIT ]]; do
   sleep 3
   ELAPSED=$((ELAPSED + 3))
   printf "."
 done
 echo ""
 
-if docker compose ps backend | grep -q "healthy"; then
+if docker compose -f "$COMPOSE_FILE" ps backend | grep -q "healthy"; then
   success "后端服务已就绪"
 else
-  warn "后端启动超时，查看日志：docker compose logs backend"
+  warn "后端启动超时，查看日志：docker compose -f ${COMPOSE_FILE} logs backend"
 fi
 
 # ---------- 部署完成 ----------
@@ -207,7 +215,7 @@ echo "  默认账号：${ADMIN_USER}"
 echo "  默认密码：${ADMIN_PASS}  （首次登录后请立即修改）"
 echo ""
 echo "  常用命令："
-echo "    查看日志：  docker compose -f $INSTALL_DIR/docker-compose.yml logs -f"
-echo "    停止服务：  docker compose -f $INSTALL_DIR/docker-compose.yml down"
-echo "    更新应用：  bash $INSTALL_DIR/scripts/deploy.sh -d"
+echo "    查看日志：  docker compose -f $INSTALL_DIR/${COMPOSE_FILE} logs -f"
+echo "    停止服务：  docker compose -f $INSTALL_DIR/${COMPOSE_FILE} down"
+echo "    更新应用：  bash $INSTALL_DIR/scripts/update.sh"
 echo ""

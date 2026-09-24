@@ -7,11 +7,18 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 def _read_git_version(fallback: str = "0.1.0") -> str:
     """
-    从 git commit 数量生成版本号 0.1.<count>。
-    优先读取 Docker 挂载的宿主机项目目录 /host-project，
-    降级到当前工作目录。服务启动时执行一次，结果由 lru_cache 缓存。
+    版本号优先级：
+    1. 环境变量 HOME_LIBRARY_APP_VERSION（CI 构建时由 --build-arg 写入）
+    2. git rev-list --count HEAD（本地开发 / 挂载宿主机目录时）
+    3. fallback 兜底
     """
+    import os
     import subprocess
+
+    env_ver = os.environ.get("HOME_LIBRARY_APP_VERSION", "").strip()
+    if env_ver:
+        return env_ver
+
     candidates = ["/host-project", "."]
     for workdir in candidates:
         try:
