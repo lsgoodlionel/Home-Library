@@ -270,6 +270,9 @@ async def _check_ollama(
             # Retrieve both the group error and every child's final result,
             # including exceptions raised while cancellation cleanup runs.
             await asyncio.gather(probe_group, *probe_tasks, return_exceptions=True)
+            # Completed tasks can retain cancellation tracebacks containing
+            # client credentials. Drop every probe handle before raising.
+            del probes, probe_tasks, probe_group, task
     except OllamaClientError as exc:
         api_error = _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
         status = AIHealthResponse(

@@ -6,7 +6,7 @@ import math
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
-from types import FrameType, SimpleNamespace, TracebackType
+from types import CoroutineType, FrameType, SimpleNamespace, TracebackType
 from typing import Any
 
 import httpx
@@ -135,6 +135,18 @@ def _assert_route_exception_graph_excludes(exc: ApiError, *markers: str) -> None
             continue
         if isinstance(value, (list, tuple, set, frozenset)):
             pending.extend(value)
+            continue
+        if isinstance(value, asyncio.Future):
+            if value.done():
+                try:
+                    pending.append(value.result())
+                except BaseException as task_error:
+                    pending.append(task_error)
+            if isinstance(value, asyncio.Task):
+                pending.append(value.get_coro())
+            continue
+        if isinstance(value, CoroutineType):
+            pending.extend([value.cr_frame, value.cr_await])
             continue
         if isinstance(value, BaseException):
             pending.extend(value.args)
@@ -575,6 +587,90 @@ def test_health_probe_failure_or_cancellation_drains_all_tasks(
             loop.set_exception_handler(previous_handler)
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("generate", "failed_path"),
+    [(False, path) for path in ("/api/version", "/api/tags", "/api/ps")]
+    + [(True, path) for path in ("/api/version", "/api/tags", "/api/ps", "/api/generate")],
+)
+@pytest.mark.parametrize("via_route", [False, True])
+def test_health_api_error_graph_drops_completed_probe_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    generate: bool,
+    failed_path: str,
+    via_route: bool,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url="https://ollama.example.test",
+        trusted_base_url="https://ollama.example.test",
+        default_model="qwen3:8b",
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_client_id="health-client-id-marker",
+        access_client_secret="health-access-secret-marker",
+    )
+    safe_runtime = OllamaRuntimeStatus(
+        enabled=True,
+        base_url=runtime.base_url,
+        default_model=runtime.default_model,
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_configured=True,
+        uses_access=True,
+    )
+
+    async def exercise() -> ApiError:
+        started: set[str] = set()
+        finished: set[str] = set()
+        all_started = asyncio.Event()
+        blocked = asyncio.Event()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            started.add(path)
+            if len(started) == (4 if generate else 3):
+                all_started.set()
+            try:
+                await all_started.wait()
+                if path == failed_path:
+                    return httpx.Response(503, text="health-response-body-marker")
+                await blocked.wait()
+                raise AssertionError("blocked probe unexpectedly completed")
+            finally:
+                finished.add(path)
+
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(
+            ai_routes, "OllamaClient", lambda config: OllamaClient(config, transport=transport)
+        )
+        monkeypatch.setattr(ai_routes, "_load_health_context", lambda *args: (runtime, safe_runtime))
+        db, user = object(), SimpleNamespace(id=11)
+        if via_route and generate:
+            check = ai_routes.test_ai_connection(
+                ai_routes.AIConnectionTestRequest(generate=True), db, user
+            )
+        elif via_route:
+            check = ai_routes.get_ai_health(db, user, refresh=True)
+        else:
+            check = ai_routes._check_ollama(db, user, generate=generate)
+        with pytest.raises(ApiError) as caught:
+            await asyncio.wait_for(check, timeout=1)
+        assert finished == started
+        return caught.value
+
+    error = asyncio.run(exercise())
+    _assert_route_exception_graph_excludes(
+        error,
+        "health-client-id-marker",
+        "health-access-secret-marker",
+        "health-response-body-marker",
+    )
 
 
 def test_health_cache_operations_hold_lock_during_mutation_and_iteration(
