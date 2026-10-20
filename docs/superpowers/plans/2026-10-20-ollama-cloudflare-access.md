@@ -322,6 +322,7 @@ git commit -m "feat: add Ollama connection status and admin tests"
 ### Task 6: Deployment Mapping, Documentation, and End-to-End Verification
 
 **Files:**
+- Modify: `.github/workflows/release.yml`
 - Modify: `.env.example`
 - Modify: `docker-compose.yml`
 - Modify: `docker-compose.prod.yml`
@@ -337,6 +338,7 @@ git commit -m "feat: add Ollama connection status and admin tests"
 **Interfaces:**
 - Consumes: Tasks 1-5 environment names, endpoints, and UI behavior.
 - Produces: development and production Compose mappings plus a read-only smoke script for `/api/version`, `/api/tags`, and `/api/ps`.
+- Produces: GitHub tag-release automation that gates on backend tests and frontend tests/build, then publishes both multi-architecture GHCR images and creates the GitHub Release with deployment assets.
 
 - [ ] **Step 1: Add environment and Compose mappings**
 
@@ -350,7 +352,11 @@ Adapt the verified handoff script so it reads credentials from environment, neve
 
 Replace local-only wording with local-or-remote behavior, list new variables and endpoints, document Chinese error categories and core-feature degradation, and state that `ollama.lsgood.cn` is not the current default. Add the spec and plan to `DOCS_INDEX.md`; do not create another top-level status document.
 
-- [ ] **Step 4: Validate shell and Compose files**
+- [ ] **Step 4: Gate GitHub Release image generation on backend and frontend validation**
+
+Extend the existing `.github/workflows/release.yml` instead of creating another workflow. For `v*` tags, require successful backend pytest plus frontend Vitest and production build before publishing both `home-library-backend` and `home-library-frontend` multi-architecture GHCR images. Create the GitHub Release only after both images succeed, retaining generated release notes and the existing production Compose, environment template, deploy script, and update script assets. Main-branch image publishing may remain for `latest`, but a failed validation must block image publication.
+
+- [ ] **Step 5: Validate shell, Compose, and workflow files**
 
 Run: `bash -n scripts/ollama-cloudflare-smoke-test.sh`
 
@@ -360,7 +366,7 @@ Run: `docker compose -f docker-compose.prod.yml config --quiet`
 
 Expected: all commands exit 0 and rendered Compose contains no non-empty credential value from tracked files.
 
-- [ ] **Step 5: Run complete backend and frontend verification**
+- [ ] **Step 6: Run complete backend and frontend verification**
 
 Run: `cd backend && pytest -v`
 
@@ -372,29 +378,29 @@ Run: `cd frontend && npm run build`
 
 Expected: all commands exit 0 with zero failed tests.
 
-- [ ] **Step 6: Run Docker application verification**
+- [ ] **Step 7: Run Docker application verification**
 
 Run: `docker compose up -d --build`
 
 Verify `/api/health`, login, non-AI book listing, AI config sanitization, disabled/no-credential degradation, and the health/test authorization behavior through the running stack. Do not display credentials in command output.
 
-- [ ] **Step 7: Run the real remote smoke test when credentials are present**
+- [ ] **Step 8: Run the real remote smoke test when credentials are present**
 
 First check only whether both credential environment variables are present, without printing values. If present, run `scripts/ollama-cloudflare-smoke-test.sh` and require HTTP 200 for version/tags/ps. If absent, record that authenticated real-interface verification was not executable; an unauthenticated 401/403 check may confirm Access protection but does not count as success.
 
-- [ ] **Step 8: Review the complete diff for secret leakage and scope**
+- [ ] **Step 9: Review the complete diff for secret leakage and scope**
 
 Run: `git diff --check`
 
 Run a secret-name and suspicious-value scan across tracked changes, report only filenames/findings, and confirm no unrelated files are staged.
 
-- [ ] **Step 9: Commit deployment and documentation**
+- [ ] **Step 10: Commit deployment, release automation, and documentation**
 
 ```bash
-git add .env.example docker-compose.yml docker-compose.prod.yml scripts/ollama-cloudflare-smoke-test.sh README.md backend/README.md docs
-git commit -m "docs: document secure remote Ollama deployment"
+git add .github/workflows/release.yml .env.example docker-compose.yml docker-compose.prod.yml scripts/ollama-cloudflare-smoke-test.sh README.md backend/README.md docs
+git commit -m "ci: gate Ollama release images and document deployment"
 ```
 
-- [ ] **Step 10: Final review, repository sync, and project record**
+- [ ] **Step 11: Final review, repository sync, and project record**
 
 Use `superpowers:requesting-code-review` for a fresh whole-branch review, then rerun any verification affected by fixes. Before push, re-read `~/.codex/memories/claude-code-migration/github-repositories.md`; push only if Home-Library is registered and the branch can be updated by ordinary push. After push, update the existing Obsidian Home-Library project overview with date, branch, commits, test evidence, completed scope, remaining real-credential validation, and GitHub traceability.
