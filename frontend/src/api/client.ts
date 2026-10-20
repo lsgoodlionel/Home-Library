@@ -5,8 +5,8 @@ export const AUTH_TOKEN_STORAGE_KEY = 'home_library_token';
 export const API_TIMEOUTS = {
   default: 15000,
   search: 45000,
-  aiHealth: 90000,
-  aiGeneration: 300000,
+  aiHealth: 240000,
+  aiGeneration: 240000,
 };
 
 export const apiClient = axios.create({

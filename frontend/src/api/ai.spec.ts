@@ -50,7 +50,8 @@ describe('AI business request contracts', () => {
     );
   });
 
-  it('allows five minutes for end-to-end generation', () => {
-    expect(API_TIMEOUTS.aiGeneration).toBe(300_000);
+  it('keeps frontend AI timeouts below the proxy budget', () => {
+    expect(API_TIMEOUTS.aiHealth).toBe(240_000);
+    expect(API_TIMEOUTS.aiGeneration).toBe(240_000);
   });
 });

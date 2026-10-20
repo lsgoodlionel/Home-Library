@@ -55,6 +55,8 @@ Cloudflare Access Service Token 的 Client ID 和 Client Secret 只允许通过�
 
 - 使用 `httpx.AsyncClient`。
 - 分别设置 connect、read、write 和 pool timeout；读取超时使用 `OLLAMA_READ_TIMEOUT_SECONDS`。
+- 健康检查的 version、installed models、running models 独立探针并发执行；显式生成测试也与这些探针并发，端点预算不随探针数量顺序累加。
+- 默认超时严格保持后端读取 `180s` < 前端健康/生成 `240s` < Nginx AI send/read `300s`。
 - 为可信 Origin 自动添加 `CF-Access-Client-Id` 和 `CF-Access-Client-Secret`。
 - 提供 `version()`、`list_models()`、`running_models()`、`generate_json()` 和非流式 `chat()` 方法。
 - `/api/generate` 和 `/api/chat` 默认发送 `stream: false`。
@@ -130,6 +132,7 @@ AI 请求失败继续写入现有 AI 任务审计记录，但只保存清理后�
 - 可信 Origin 请求携带 Access headers，其他 Origin 不携带。
 - API 和日志中不暴露凭据。
 - connect/read timeout 分离并映射到不同错误码。
+- delivery 契约同时解析后端默认值、前端健康/生成值和 Nginx send/read 值，并验证严格大小关系。
 - Access 401/403、Tunnel 502/503/1033、模型 4xx/5xx和非法 JSON 的分类。
 - 停用 AI 时的安全降级。
 - 健康检查结果结构与管理员测试权限。

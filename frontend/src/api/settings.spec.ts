@@ -74,6 +74,8 @@ describe('AI settings API normalization', () => {
   });
 
   it('separates active checks, ordinary tests, and explicit generation timeouts', async () => {
+    expect(API_TIMEOUTS.aiHealth).toBe(240_000);
+    expect(API_TIMEOUTS.aiGeneration).toBe(240_000);
     const payload = {
       status: 'healthy',
       message: 'AI 服务连接正常',

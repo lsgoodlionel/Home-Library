@@ -260,11 +260,11 @@ npm run test:e2e
 
 | 检查项 | 结果 |
 |---|---|
-| 后端全量测试 | `285 passed, 0 failed` |
+| 后端全量测试 | `311 passed, 0 failed` |
 | 前端类型检查 | 通过 |
 | 前端构建 | 通过，仅 Vite chunk size warning |
-| Vitest | `7 files / 39 tests passed` |
-| 发布脚本测试 | smoke Origin 安全矩阵和 SemVer tag 解析通过 |
+| Vitest | `8 files / 42 tests passed` |
+| 发布脚本测试 | AI 超时层级、smoke Origin 安全矩阵和 SemVer tag 解析通过 |
 | Compose 配置 | 开发、生产配置均以临时 `.env` 普通展开通过 |
 | Docker 隔离流程 | 健康、登录、图书列表、AI 配置脱敏、权限和 AI 关闭降级通过 |
 

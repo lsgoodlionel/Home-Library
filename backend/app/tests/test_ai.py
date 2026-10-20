@@ -1,18 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
+from types import FrameType, SimpleNamespace, TracebackType
+from typing import Any
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.core.errors import ApiError
 from app.core.config import Settings, get_settings
 from app.models import AITask, Book
 from app.models.user import User
+from app.schemas.ai import (
+    ClassifyBookRequest,
+    DetectDuplicateRequest,
+    GenerateTagsRequest,
+    NaturalSearchRequest,
+    RecommendBookContentRequest,
+    SummarizeBookRequest,
+)
+from app.schemas.ai_setting import OllamaRuntimeStatus
 from app.services.ai_setting_service import (
     OllamaRuntimeConfig,
     get_effective_ai_settings,
@@ -92,7 +106,52 @@ def enabled_ollama_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 def reset_ai_health_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api.routes import ai as ai_routes
 
-    ai_routes._health_cache.clear()
+    with ai_routes._health_cache_lock:
+        ai_routes._health_cache.clear()
+
+
+def _assert_route_exception_graph_excludes(exc: ApiError, *markers: str) -> None:
+    assert exc.__cause__ is None
+    assert exc.__context__ is None
+
+    pending: list[Any] = [exc]
+    seen: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if value is None or id(value) in seen:
+            continue
+        seen.add(id(value))
+
+        if isinstance(value, bytes):
+            text = value.decode("utf-8", errors="replace")
+            assert all(marker not in text for marker in markers)
+            continue
+        if isinstance(value, str):
+            assert all(marker not in value for marker in markers)
+            continue
+        if isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+            continue
+        if isinstance(value, (list, tuple, set, frozenset)):
+            pending.extend(value)
+            continue
+        if isinstance(value, BaseException):
+            pending.extend(value.args)
+            pending.extend([value.__cause__, value.__context__, value.__traceback__])
+        if isinstance(value, TracebackType):
+            pending.extend([value.tb_frame, value.tb_next])
+            continue
+        if isinstance(value, FrameType):
+            filename = value.f_code.co_filename
+            if "/app/" in filename and "/app/tests/" not in filename:
+                pending.append(value.f_locals)
+            continue
+        if not isinstance(value, type):
+            try:
+                pending.append(vars(value))
+            except TypeError:
+                pass
 
 
 def _generate_response(payload: dict) -> dict:
@@ -226,6 +285,236 @@ def test_ai_business_routes_require_login(
     response = client.request(method, path, json=payload)
 
     assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("route_name", "payload", "template"),
+    [
+        (
+            "classify_book",
+            ClassifyBookRequest(title="payload-sensitive-marker"),
+            "prompt-sensitive-marker {title} {author} {publisher} {summary} {categories}",
+        ),
+        (
+            "generate_tags",
+            GenerateTagsRequest(title="payload-sensitive-marker"),
+            (
+                "prompt-sensitive-marker {title} {author} {publisher} {category_name} "
+                "{summary} {existing_tags}"
+            ),
+        ),
+        (
+            "recommend_book_content",
+            RecommendBookContentRequest(
+                current={"title": "payload-sensitive-marker"},
+                candidates=[],
+                missing_fields=[],
+            ),
+            "prompt-sensitive-marker {current} {candidates} {missing_fields}",
+        ),
+        (
+            "summarize_book",
+            SummarizeBookRequest(title="payload-sensitive-marker"),
+            "prompt-sensitive-marker {title} {author} {publisher} {raw_summary} {raw_author_intro}",
+        ),
+        (
+            "detect_duplicate",
+            DetectDuplicateRequest(
+                first={"title": "payload-sensitive-marker"},
+                second={"title": "other"},
+            ),
+            "prompt-sensitive-marker {first} {second}",
+        ),
+        (
+            "natural_search",
+            NaturalSearchRequest(query="payload-sensitive-marker"),
+            "prompt-sensitive-marker {query}",
+        ),
+    ],
+)
+def test_business_route_api_error_traceback_drops_sensitive_locals(
+    monkeypatch: pytest.MonkeyPatch,
+    route_name: str,
+    payload: Any,
+    template: str,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url="https://ollama.example.test",
+        trusted_base_url="https://ollama.example.test",
+        default_model="qwen3:8b",
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_client_id="client-id",
+        access_client_secret="access-secret-marker",
+    )
+
+    class FailingClient:
+        def __init__(self, configured_runtime: OllamaRuntimeConfig) -> None:
+            self.runtime = configured_runtime
+
+        async def generate_json(self, **kwargs: Any) -> None:
+            raise OllamaUpstreamError("safe upstream failure")
+
+    monkeypatch.setattr(ai_routes, "OllamaClient", FailingClient)
+    monkeypatch.setattr(ai_routes, "_record_failure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ai_routes,
+        "_prepare_runtime_and_template",
+        lambda *args: (runtime, template),
+    )
+    monkeypatch.setattr(
+        ai_routes,
+        "_prepare_classify_context",
+        lambda *args: (runtime, "categories", template),
+    )
+
+    route = getattr(ai_routes, route_name)
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(route(payload, object(), SimpleNamespace(id=7)))
+
+    _assert_route_exception_graph_excludes(
+        caught.value,
+        "access-secret-marker",
+        "prompt-sensitive-marker",
+        "payload-sensitive-marker",
+    )
+
+
+@pytest.mark.parametrize(("generate", "probe_count"), [(False, 3), (True, 4)])
+def test_health_probes_run_concurrently_within_one_backend_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    generate: bool,
+    probe_count: int,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url="https://ollama.example.test",
+        trusted_base_url="https://ollama.example.test",
+        default_model="qwen3:8b",
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_client_id="",
+        access_client_secret="",
+    )
+    safe_runtime = OllamaRuntimeStatus(
+        enabled=True,
+        base_url=runtime.base_url,
+        default_model=runtime.default_model,
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_configured=False,
+        uses_access=False,
+    )
+    started: set[str] = set()
+    all_started = asyncio.Event()
+
+    async def probe(name: str, result: Any) -> Any:
+        started.add(name)
+        if len(started) == probe_count:
+            all_started.set()
+        await asyncio.wait_for(all_started.wait(), timeout=0.2)
+        return result
+
+    class ConcurrentProbeClient:
+        def __init__(self, configured_runtime: OllamaRuntimeConfig) -> None:
+            del configured_runtime
+
+        async def version(self) -> Any:
+            return await probe("version", SimpleNamespace(version="0.6.2"))
+
+        async def list_models(self) -> Any:
+            return await probe("models", SimpleNamespace(models=[]))
+
+        async def running_models(self) -> Any:
+            return await probe("running", SimpleNamespace(models=[]))
+
+        async def generate_text(self, **kwargs: Any) -> str:
+            return await probe("generate", "OK")
+
+    monkeypatch.setattr(ai_routes, "OllamaClient", ConcurrentProbeClient)
+    monkeypatch.setattr(
+        ai_routes,
+        "_load_health_context",
+        lambda *args: (runtime, safe_runtime),
+    )
+
+    response = asyncio.run(
+        asyncio.wait_for(
+            ai_routes._check_ollama(object(), SimpleNamespace(id=11), generate=generate),
+            timeout=0.5,
+        )
+    )
+
+    assert response.status == "healthy"
+    assert len(started) == probe_count
+
+
+def test_health_cache_operations_hold_lock_during_mutation_and_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    class TrackingLock:
+        held = False
+        entries = 0
+
+        def __enter__(self) -> None:
+            assert not self.held
+            self.held = True
+            self.entries += 1
+
+        def __exit__(self, *args: Any) -> None:
+            self.held = False
+
+    lock = TrackingLock()
+
+    class GuardedCache(OrderedDict):
+        def _assert_locked(self) -> None:
+            assert lock.held
+
+        def __setitem__(self, key: Any, value: Any) -> None:
+            self._assert_locked()
+            super().__setitem__(key, value)
+
+        def get(self, key: Any, default: Any = None) -> Any:
+            self._assert_locked()
+            return super().get(key, default)
+
+        def __iter__(self):
+            self._assert_locked()
+            return super().__iter__()
+
+        def __delitem__(self, key: Any) -> None:
+            self._assert_locked()
+            super().__delitem__(key)
+
+        def move_to_end(self, key: Any, last: bool = True) -> None:
+            self._assert_locked()
+            super().move_to_end(key, last)
+
+        def popitem(self, last: bool = True) -> tuple[Any, Any]:
+            self._assert_locked()
+            return super().popitem(last)
+
+    monkeypatch.setattr(ai_routes, "_health_cache_lock", lock)
+    monkeypatch.setattr(ai_routes, "_health_cache", GuardedCache())
+    monkeypatch.setattr(ai_routes, "_MAX_HEALTH_CACHE_ENTRIES", 1)
+    status = ai_routes.AIHealthResponse(status="healthy")
+
+    ai_routes._cache_health_status((1, "one"), status)
+    ai_routes._cache_health_status((1, "two"), status)
+    assert ai_routes._get_cached_health_status((1, "two")) is status
+    ai_routes._invalidate_user_health_cache(1)
+
+    assert lock.entries == 4
 
 
 def test_ai_health_cache_isolated_by_account(
@@ -462,6 +751,12 @@ def test_admin_connection_failure_updates_health_cache(
         async def version(self):
             raise OllamaTunnelError("safe", status_code=503)
 
+        async def list_models(self):
+            return SimpleNamespace(models=[])
+
+        async def running_models(self):
+            return SimpleNamespace(models=[])
+
     monkeypatch.setattr(
         "app.api.routes.ai.OllamaClient",
         lambda runtime: FailingOllamaClient(),
@@ -562,6 +857,12 @@ def test_health_failure_returns_chinese_classified_error_without_secret(
     class FailingOllamaClient:
         async def version(self):
             raise error
+
+        async def list_models(self):
+            return SimpleNamespace(models=[])
+
+        async def running_models(self):
+            return SimpleNamespace(models=[])
 
     monkeypatch.setattr(
         "app.api.routes.ai.OllamaClient",
@@ -769,7 +1070,9 @@ def test_ai_config_is_persisted_per_account(client: TestClient, admin_headers: d
         "http:///missing-host",
         "https://ollama.example.com@evil.example",
         "https://ollama.example.com/path?token=secret",
+        "https://ollama.example.com/path?",
         "https://ollama.example.com/path#fragment",
+        "https://ollama.example.com/path#",
     ],
 )
 def test_ai_config_rejects_invalid_or_unsupported_base_url(

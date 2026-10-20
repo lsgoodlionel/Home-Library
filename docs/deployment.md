@@ -272,14 +272,15 @@ CORS_ORIGINS=http://localhost,http://你的域名
 
 ### Ollama 超时
 
-AI 生成请求的浏览器与 Nginx 上限均为 300 秒。后端
-`OLLAMA_READ_TIMEOUT_SECONDS` 必须小于 300 秒，以便后端先返回稳定的
-`AI_RESPONSE_TIMEOUT` 错误，避免被代理提前中断；默认值 180 秒满足此约束。
-需要调整时应保持该关系，例如：
+健康检查的三个探针会并发执行；显式生成测试也会与这些探针并发，因此端点总预算接近单次后端读取超时。默认超时层级为：后端读取 180 秒、前端健康/生成请求 240 秒、Nginx 发送/读取 300 秒。
+`OLLAMA_READ_TIMEOUT_SECONDS` 必须严格小于前端 `aiHealth` 和 `aiGeneration`
+上限，而前端上限必须严格小于 Nginx `proxy_send_timeout` 和
+`proxy_read_timeout`，以便后端先返回稳定的 `AI_RESPONSE_TIMEOUT` 错误。
+需要调整时必须保持这一严格大小关系，例如：
 
 ```env
 OLLAMA_CONNECT_TIMEOUT_SECONDS=20
-OLLAMA_READ_TIMEOUT_SECONDS=240
+OLLAMA_READ_TIMEOUT_SECONDS=180
 ```
 
 并确认模型已下载：

@@ -281,7 +281,7 @@ Expected: FAIL because helpers and normalized health types do not exist.
 
 - [ ] **Step 3: Implement frontend types, API methods, and Chinese error mapping**
 
-Map snake_case API fields to camelCase. Use `API_TIMEOUTS.aiGeneration` for explicit generation tests and a timeout greater than the backend connect timeout for health/model calls. Never define Client ID or Secret fields in frontend types.
+Map snake_case API fields to camelCase. Use `API_TIMEOUTS.aiGeneration` for explicit generation tests. Keep both `aiHealth` and `aiGeneration` at 240 seconds so the backend 180-second read timeout expires first and the Nginx 300-second proxy timeout remains the outer limit. Never define Client ID or Secret fields in frontend types.
 
 - [ ] **Step 4: Write failing status-component tests**
 

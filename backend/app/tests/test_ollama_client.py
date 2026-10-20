@@ -263,12 +263,22 @@ def test_userinfo_subdomain_and_query_cannot_spoof_trusted_origin(base_url: str)
     _run(client.version())
 
 
-def test_query_base_url_is_rejected_before_sending_access_headers() -> None:
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://evil.example?next=https://ollama.example.com",
+        "https://ollama.example.com/path?",
+        "https://ollama.example.com/path#",
+    ],
+)
+def test_query_or_fragment_base_url_is_rejected_before_sending_access_headers(
+    base_url: str,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("query-bearing URL sent an upstream request")
+        raise AssertionError("query/fragment-bearing URL sent an upstream request")
 
     client = OllamaClient(
-        _runtime(base_url="https://evil.example?next=https://ollama.example.com"),
+        _runtime(base_url=base_url),
         transport=httpx.MockTransport(handler),
     )
 

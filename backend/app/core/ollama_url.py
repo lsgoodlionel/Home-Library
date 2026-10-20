@@ -14,6 +14,8 @@ def normalize_ollama_base_url(value: str) -> str:
         raise InvalidOllamaBaseURL("Ollama base URL is invalid")
     if any(_is_forbidden_url_character(character) for character in value):
         raise InvalidOllamaBaseURL("Ollama base URL is invalid")
+    if "?" in value or "#" in value:
+        raise InvalidOllamaBaseURL("Ollama base URL is invalid")
 
     parsed: httpx.URL | None = None
     try:

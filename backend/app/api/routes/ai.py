@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+from threading import Lock
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
@@ -59,8 +62,14 @@ from app.services.ollama_service import load_prompt_template
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 _health_cache: OrderedDict[tuple[int, str], AIHealthResponse] = OrderedDict()
+_health_cache_lock = Lock()
 _MAX_HEALTH_CACHE_ENTRIES = 128
 _MAX_STATUS_TEXT_LENGTH = 256
+
+
+@dataclass(frozen=True, slots=True)
+class _SafeApiFailure:
+    error: ApiError
 
 
 def _model_name(requested_model: str | None, default_model: str) -> str:
@@ -193,15 +202,22 @@ def _health_cache_key(user: User, runtime: OllamaRuntimeConfig) -> tuple[int, st
 
 
 def _cache_health_status(key: tuple[int, str], status: AIHealthResponse) -> None:
-    _health_cache[key] = status
-    _health_cache.move_to_end(key)
-    while len(_health_cache) > _MAX_HEALTH_CACHE_ENTRIES:
-        _health_cache.popitem(last=False)
+    with _health_cache_lock:
+        _health_cache[key] = status
+        _health_cache.move_to_end(key)
+        while len(_health_cache) > _MAX_HEALTH_CACHE_ENTRIES:
+            _health_cache.popitem(last=False)
+
+
+def _get_cached_health_status(key: tuple[int, str]) -> AIHealthResponse:
+    with _health_cache_lock:
+        return _health_cache.get(key, AIHealthResponse())
 
 
 def _invalidate_user_health_cache(user_id: int) -> None:
-    for key in [key for key in _health_cache if key[0] == user_id]:
-        del _health_cache[key]
+    with _health_cache_lock:
+        for key in [key for key in _health_cache if key[0] == user_id]:
+            del _health_cache[key]
 
 
 def _prepare_runtime_and_template(
@@ -234,11 +250,14 @@ async def _check_ollama(
     client = OllamaClient(runtime)
     api_error: ApiError | None = None
     try:
-        version = await client.version()
-        models = await client.list_models()
-        running_models = await client.running_models()
+        probes = [
+            client.version(),
+            client.list_models(),
+            client.running_models(),
+        ]
         if generate:
-            await client.generate_text(prompt="请回复 OK", keep_alive=0)
+            probes.append(client.generate_text(prompt="请回复 OK", keep_alive=0))
+        version, models, running_models, *_ = await asyncio.gather(*probes)
     except OllamaClientError as exc:
         api_error = _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
         status = AIHealthResponse(
@@ -300,7 +319,7 @@ async def _run_json_task(
     response_model: type[BaseModel],
     runtime: OllamaRuntimeConfig,
     created_by: int | None = None,
-) -> BaseModel:
+) -> BaseModel | _SafeApiFailure:
     client = OllamaClient(runtime)
     api_error: ApiError | None = None
     try:
@@ -322,7 +341,7 @@ async def _run_json_task(
 
     if api_error is not None:
         del client, db, input_data, prompt, response_model, runtime
-        _raise_api_error(api_error)
+        return _SafeApiFailure(api_error)
 
     output_data = result.model_dump(mode="json")
     await run_in_threadpool(
@@ -346,7 +365,7 @@ async def get_ai_health(
 ) -> AIHealthResponse:
     if not refresh:
         runtime = await run_in_threadpool(get_ollama_runtime_config, db, current_user)
-        return _health_cache.get(_health_cache_key(current_user, runtime), AIHealthResponse())
+        return _get_cached_health_status(_health_cache_key(current_user, runtime))
     return await _check_ollama(db, current_user, generate=False)
 
 
@@ -441,7 +460,7 @@ async def classify_book(
         summary=_clean_text(payload.summary),
         categories=categories_text,
     )
-    return await _run_json_task(
+    outcome = await _run_json_task(
         db,
         task_type="classify_book",
         model=model,
@@ -451,6 +470,10 @@ async def classify_book(
         runtime=runtime,
         created_by=current_user.id,
     )
+    if isinstance(outcome, _SafeApiFailure):
+        del payload, db, current_user, runtime, categories_text, template, model, input_data, prompt
+        _raise_api_error(outcome.error)
+    return outcome
 
 
 @router.post("/generate-tags", response_model=GenerateTagsResponse)
@@ -475,7 +498,7 @@ async def generate_tags(
         summary=_clean_text(payload.summary),
         existing_tags=", ".join(payload.existing_tags),
     )
-    return await _run_json_task(
+    outcome = await _run_json_task(
         db,
         task_type="generate_tags",
         model=model,
@@ -485,6 +508,10 @@ async def generate_tags(
         runtime=runtime,
         created_by=current_user.id,
     )
+    if isinstance(outcome, _SafeApiFailure):
+        del payload, db, current_user, runtime, template, model, input_data, prompt
+        _raise_api_error(outcome.error)
+    return outcome
 
 
 @router.post("/recommend-book-content", response_model=RecommendBookContentResponse)
@@ -506,7 +533,7 @@ async def recommend_book_content(
         candidates=_dump(payload.candidates),
         missing_fields=", ".join(payload.missing_fields),
     )
-    return await _run_json_task(
+    outcome = await _run_json_task(
         db,
         task_type="recommend_book_content",
         model=model,
@@ -516,6 +543,10 @@ async def recommend_book_content(
         runtime=runtime,
         created_by=current_user.id,
     )
+    if isinstance(outcome, _SafeApiFailure):
+        del payload, db, current_user, runtime, template, model, input_data, prompt
+        _raise_api_error(outcome.error)
+    return outcome
 
 
 @router.post("/summarize-book", response_model=SummarizeBookResponse)
@@ -539,7 +570,7 @@ async def summarize_book(
         raw_summary=_clean_text(payload.raw_summary),
         raw_author_intro=_clean_text(payload.raw_author_intro),
     )
-    return await _run_json_task(
+    outcome = await _run_json_task(
         db,
         task_type="summarize_book",
         model=model,
@@ -549,6 +580,10 @@ async def summarize_book(
         runtime=runtime,
         created_by=current_user.id,
     )
+    if isinstance(outcome, _SafeApiFailure):
+        del payload, db, current_user, runtime, template, model, input_data, prompt
+        _raise_api_error(outcome.error)
+    return outcome
 
 
 @router.post("/detect-duplicate", response_model=DetectDuplicateResponse)
@@ -569,7 +604,7 @@ async def detect_duplicate(
         first=_dump(payload.first),
         second=_dump(payload.second),
     )
-    return await _run_json_task(
+    outcome = await _run_json_task(
         db,
         task_type="detect_duplicate",
         model=model,
@@ -579,6 +614,10 @@ async def detect_duplicate(
         runtime=runtime,
         created_by=current_user.id,
     )
+    if isinstance(outcome, _SafeApiFailure):
+        del payload, db, current_user, runtime, template, model, input_data, prompt
+        _raise_api_error(outcome.error)
+    return outcome
 
 
 @router.post("/natural-search", response_model=NaturalSearchResponse)
@@ -596,7 +635,7 @@ async def natural_search(
     model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
     prompt = template.format(query=payload.query)
-    return await _run_json_task(
+    outcome = await _run_json_task(
         db,
         task_type="natural_search",
         model=model,
@@ -606,3 +645,7 @@ async def natural_search(
         runtime=runtime,
         created_by=current_user.id,
     )
+    if isinstance(outcome, _SafeApiFailure):
+        del payload, db, current_user, runtime, template, model, input_data, prompt
+        _raise_api_error(outcome.error)
+    return outcome
