@@ -14,12 +14,41 @@ class AIBaseRequest(BaseModel):
 
 class OllamaModel(BaseModel):
     name: str
+    model: str | None = None
     modified_at: str | None = None
     size: int | None = None
+    digest: str | None = None
+    details: dict[str, Any] | None = None
 
 
 class OllamaModelsResponse(BaseModel):
     models: list[OllamaModel] = Field(default_factory=list)
+
+
+class OllamaVersionResponse(BaseModel):
+    version: str
+
+
+class OllamaRunningModel(OllamaModel):
+    expires_at: str | None = None
+    size_vram: int | None = None
+
+
+class OllamaRunningModelsResponse(BaseModel):
+    models: list[OllamaRunningModel] = Field(default_factory=list)
+
+
+class OllamaGenerateResponse(BaseModel):
+    response: str
+
+
+class OllamaChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class OllamaChatResponse(BaseModel):
+    message: OllamaChatMessage
 
 
 class ClassifyBookRequest(AIBaseRequest):

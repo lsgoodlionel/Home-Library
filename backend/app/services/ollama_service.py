@@ -114,7 +114,7 @@ class OllamaService:
         raise httpx.ConnectError("No Ollama base URL configured")
 
 
-def _parse_model_json(content: str) -> dict[str, Any]:
+def parse_model_json(content: str) -> dict[str, Any]:
     cleaned = content.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`")
@@ -124,11 +124,18 @@ def _parse_model_json(content: str) -> dict[str, Any]:
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        raise OllamaInvalidJSONError("模型输出不是合法 JSON") from exc
+        raise ValueError("模型输出不是合法 JSON") from exc
 
     if not isinstance(data, dict):
-        raise OllamaInvalidJSONError("模型输出 JSON 必须是对象")
+        raise ValueError("模型输出 JSON 必须是对象")
     return data
+
+
+def _parse_model_json(content: str) -> dict[str, Any]:
+    try:
+        return parse_model_json(content)
+    except ValueError as exc:
+        raise OllamaInvalidJSONError(str(exc)) from exc
 
 
 def _candidate_base_urls(base_url: str) -> list[str]:

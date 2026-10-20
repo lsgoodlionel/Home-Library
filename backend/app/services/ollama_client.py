@@ -1,0 +1,255 @@
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, TypeVar
+from urllib.parse import urlsplit
+
+import httpx
+from pydantic import BaseModel, ValidationError
+
+from app.schemas.ai import (
+    OllamaChatResponse,
+    OllamaGenerateResponse,
+    OllamaModelsResponse,
+    OllamaRunningModelsResponse,
+    OllamaVersionResponse,
+)
+from app.services.ai_setting_service import OllamaRuntimeConfig
+from app.services.ollama_service import parse_model_json
+
+T = TypeVar("T", bound=BaseModel)
+
+MAX_PROMPT_CHARS = 100_000
+MAX_RESPONSE_BYTES = 1_048_576
+CF_ERROR_PREFIX_BYTES = 8 * 1024
+_CF_1033_PATTERN = re.compile(rb"(?<!\d)1033(?!\d)")
+
+
+class OllamaClientError(Exception):
+    category = "ollama_error"
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class OllamaConnectTimeoutError(OllamaClientError):
+    category = "connect_timeout"
+
+
+class OllamaReadTimeoutError(OllamaClientError):
+    category = "read_timeout"
+
+
+class OllamaDisabledError(OllamaClientError):
+    category = "disabled"
+
+
+class OllamaAccessDeniedError(OllamaClientError):
+    category = "access_denied"
+
+
+class OllamaTunnelError(OllamaClientError):
+    category = "tunnel"
+
+
+class OllamaModelError(OllamaClientError):
+    category = "model"
+
+
+class OllamaUpstreamError(OllamaClientError):
+    category = "upstream"
+
+
+class OllamaResponseInvalidError(OllamaClientError):
+    category = "response_invalid"
+
+
+def _normalized_origin(url: str) -> tuple[str, str, int | None] | None:
+    try:
+        parsed = urlsplit(url)
+        if not parsed.scheme or not parsed.hostname:
+            return None
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        port = parsed.port
+    except ValueError:
+        return None
+
+    scheme = parsed.scheme.lower()
+    if port is None:
+        port = {"http": 80, "https": 443}.get(scheme)
+    return scheme, parsed.hostname.lower(), port
+
+
+class OllamaClient:
+    def __init__(
+        self,
+        runtime: OllamaRuntimeConfig,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.runtime = runtime
+        self._transport = transport
+        self._timeout = httpx.Timeout(
+            connect=runtime.connect_timeout_seconds,
+            read=runtime.read_timeout_seconds,
+            write=runtime.read_timeout_seconds,
+            pool=runtime.connect_timeout_seconds,
+        )
+        self._headers: dict[str, str] = {}
+        credentials_complete = bool(runtime.access_client_id and runtime.access_client_secret)
+        if (
+            credentials_complete
+            and _normalized_origin(runtime.base_url) is not None
+            and _normalized_origin(runtime.base_url) == _normalized_origin(runtime.trusted_base_url)
+        ):
+            self._headers = {
+                "CF-Access-Client-Id": runtime.access_client_id,
+                "CF-Access-Client-Secret": runtime.access_client_secret,
+            }
+
+    async def version(self) -> OllamaVersionResponse:
+        response = await self._request("GET", "/api/version")
+        return self._validate_response(response, OllamaVersionResponse)
+
+    async def list_models(self) -> OllamaModelsResponse:
+        response = await self._request("GET", "/api/tags")
+        return self._validate_response(response, OllamaModelsResponse)
+
+    async def running_models(self) -> OllamaRunningModelsResponse:
+        response = await self._request("GET", "/api/ps")
+        return self._validate_response(response, OllamaRunningModelsResponse)
+
+    async def generate_json(
+        self,
+        *,
+        prompt: str,
+        response_model: type[T],
+        model: str | None = None,
+    ) -> T:
+        self._validate_prompt_length(prompt)
+        selected_model = model or self.runtime.default_model
+        response = await self._request(
+            "POST",
+            "/api/generate",
+            json={
+                "model": selected_model,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+            },
+        )
+        envelope = self._validate_response(response, OllamaGenerateResponse)
+        try:
+            data = parse_model_json(envelope.response)
+            data.setdefault("model", selected_model)
+            return response_model.model_validate(data)
+        except (ValueError, ValidationError) as exc:
+            raise OllamaResponseInvalidError("Ollama generated an invalid response") from exc
+
+    async def chat(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        model: str | None = None,
+    ) -> str:
+        serialized_messages = json.dumps(messages, ensure_ascii=False)
+        self._validate_prompt_length(serialized_messages)
+        response = await self._request(
+            "POST",
+            "/api/chat",
+            json={
+                "model": model or self.runtime.default_model,
+                "messages": messages,
+                "stream": False,
+            },
+        )
+        envelope = self._validate_response(response, OllamaChatResponse)
+        return envelope.message.content
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        if not self.runtime.enabled:
+            raise OllamaDisabledError("Ollama is disabled")
+
+        async with httpx.AsyncClient(
+            base_url=self.runtime.base_url.rstrip("/"),
+            headers=self._headers,
+            timeout=self._timeout,
+            verify=self.runtime.verify_tls,
+            transport=self._transport,
+        ) as client:
+            connect_attempts = 0
+            while True:
+                response_received = False
+                try:
+                    async with client.stream(method, path, **kwargs) as response:
+                        response_received = True
+                        if response.is_error:
+                            prefix = await _read_prefix(response, CF_ERROR_PREFIX_BYTES)
+                            self._raise_for_status(response.status_code, prefix)
+                        content = await _read_bounded(response, MAX_RESPONSE_BYTES)
+                        return httpx.Response(
+                            response.status_code,
+                            headers=response.headers,
+                            content=content,
+                            request=response.request,
+                        )
+                except httpx.ConnectTimeout as exc:
+                    raise OllamaConnectTimeoutError("Ollama connection timed out") from exc
+                except httpx.ReadTimeout as exc:
+                    raise OllamaReadTimeoutError("Ollama response timed out") from exc
+                except httpx.ConnectError as exc:
+                    if not response_received and connect_attempts == 0:
+                        connect_attempts += 1
+                        continue
+                    raise OllamaUpstreamError("Ollama connection failed") from exc
+                except httpx.RequestError as exc:
+                    raise OllamaUpstreamError("Ollama request failed") from exc
+
+    @staticmethod
+    def _validate_response(response: httpx.Response, model: type[T]) -> T:
+        try:
+            return model.model_validate(response.json())
+        except (ValueError, ValidationError) as exc:
+            raise OllamaResponseInvalidError("Ollama returned an invalid response") from exc
+
+    @staticmethod
+    def _validate_prompt_length(prompt: str) -> None:
+        if len(prompt) > MAX_PROMPT_CHARS:
+            raise OllamaModelError("Ollama prompt exceeds the maximum length")
+
+    @staticmethod
+    def _raise_for_status(status_code: int, prefix: bytes) -> None:
+        if status_code in {401, 403}:
+            raise OllamaAccessDeniedError("Ollama access was denied", status_code=status_code)
+        if status_code in {502, 503}:
+            raise OllamaTunnelError("Ollama tunnel is unavailable", status_code=status_code)
+        if 500 <= status_code < 600 and _CF_1033_PATTERN.search(prefix):
+            raise OllamaTunnelError("Ollama tunnel is unavailable", status_code=status_code)
+        if 400 <= status_code < 500:
+            raise OllamaModelError("Ollama rejected the request", status_code=status_code)
+        if 500 <= status_code < 600:
+            raise OllamaUpstreamError("Ollama upstream failed", status_code=status_code)
+        raise OllamaUpstreamError("Ollama returned an unexpected status", status_code=status_code)
+
+
+async def _read_prefix(response: httpx.Response, limit: int) -> bytes:
+    prefix = bytearray()
+    async for chunk in response.aiter_bytes():
+        remaining = limit - len(prefix)
+        if remaining <= 0:
+            break
+        prefix.extend(chunk[:remaining])
+        if len(prefix) >= limit:
+            break
+    return bytes(prefix)
+
+
+async def _read_bounded(response: httpx.Response, limit: int) -> bytes:
+    content = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(content) + len(chunk) > limit:
+            raise OllamaResponseInvalidError("Ollama response exceeds the maximum length")
+        content.extend(chunk)
+    return bytes(content)
