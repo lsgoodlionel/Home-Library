@@ -28,6 +28,47 @@ export interface OllamaRuntimeStatus {
   usesAccess: boolean;
 }
 
+export type SystemAIConfigurationSource = 'database' | 'environment' | 'default';
+
+export interface SystemAICredentialState {
+  accessClientIdConfigured: boolean;
+  accessClientSecretConfigured: boolean;
+  credentialsUsable: boolean;
+  source: SystemAIConfigurationSource;
+}
+
+export interface SystemAIConfig {
+  enabled: boolean;
+  defaultBaseUrl: string;
+  trustedBaseUrl: string;
+  defaultModel: string;
+  connectTimeoutSeconds: number;
+  readTimeoutSeconds: number;
+  verifyTls: boolean;
+  credentialState: SystemAICredentialState;
+  configurationSource: SystemAIConfigurationSource;
+  configVersion: number;
+}
+
+export interface SystemAIAuth {
+  adminPassword: string;
+  upgradePassword: string;
+}
+
+export interface SystemAIConfigUpdate extends SystemAIAuth {
+  enabled: boolean;
+  defaultBaseUrl: string;
+  trustedBaseUrl: string;
+  defaultModel: string;
+  connectTimeoutSeconds: number;
+  readTimeoutSeconds: number;
+  verifyTls: boolean;
+  accessClientId?: string;
+  accessClientSecret?: string;
+  clearAccessCredentials: boolean;
+  confirmInsecureTls: boolean;
+}
+
 export interface AIModelSettings {
   activeProvider: AIProviderKey;
   defaultModel: string;

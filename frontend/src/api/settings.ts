@@ -1,6 +1,6 @@
 import { getAIModels } from './ai';
-import { apiClient } from './client';
-import type { AIModel } from '@/types/ai';
+import { API_TIMEOUTS, apiClient } from './client';
+import type { AIHealthStatus, AIModel } from '@/types/ai';
 import type {
   AIModelSettings,
   AIProviderConfig,
@@ -12,6 +12,10 @@ import type {
   ExternalSearchProviderKey,
   ExternalSearchSettings,
   OllamaRuntimeStatus,
+  SystemAIAuth,
+  SystemAIConfig,
+  SystemAIConfigUpdate,
+  SystemAIConfigurationSource,
   UpgradeStartResult,
   UpgradeTaskStatus,
 } from '@/types/settings';
@@ -118,6 +122,37 @@ interface ApiOllamaRuntimeStatus {
   uses_access: boolean;
 }
 
+interface ApiSystemAICredentialState {
+  access_client_id_configured: boolean;
+  access_client_secret_configured: boolean;
+  credentials_usable: boolean;
+  source: SystemAIConfigurationSource;
+}
+
+interface ApiSystemAIConfigResponse {
+  enabled: boolean;
+  default_base_url: string;
+  trusted_base_url: string;
+  default_model: string;
+  connect_timeout_seconds: number;
+  read_timeout_seconds: number;
+  verify_tls: boolean;
+  credential_state: ApiSystemAICredentialState;
+  configuration_source: SystemAIConfigurationSource;
+  config_version: number;
+}
+
+interface ApiAIHealthResponse {
+  status: AIHealthStatus['status'];
+  message: string;
+  checked_at?: string | null;
+  version?: string | null;
+  installed_model_count: number;
+  running_model_count: number;
+  generated: boolean;
+  ollama_runtime?: ApiOllamaRuntimeStatus | null;
+}
+
 interface ApiExternalSearchProviderConfig {
   provider: ExternalSearchProviderKey;
   enabled: boolean;
@@ -177,6 +212,88 @@ function normalizeOllamaRuntime(config: ApiOllamaRuntimeStatus): OllamaRuntimeSt
     accessConfigured: config.access_configured,
     usesAccess: config.uses_access,
   };
+}
+
+function normalizeSystemAIConfig(data: ApiSystemAIConfigResponse): SystemAIConfig {
+  return {
+    enabled: data.enabled,
+    defaultBaseUrl: data.default_base_url,
+    trustedBaseUrl: data.trusted_base_url,
+    defaultModel: data.default_model,
+    connectTimeoutSeconds: data.connect_timeout_seconds,
+    readTimeoutSeconds: data.read_timeout_seconds,
+    verifyTls: data.verify_tls,
+    credentialState: {
+      accessClientIdConfigured: data.credential_state.access_client_id_configured,
+      accessClientSecretConfigured: data.credential_state.access_client_secret_configured,
+      credentialsUsable: data.credential_state.credentials_usable,
+      source: data.credential_state.source,
+    },
+    configurationSource: data.configuration_source,
+    configVersion: data.config_version,
+  };
+}
+
+function normalizeSystemAIHealth(data: ApiAIHealthResponse): AIHealthStatus {
+  return {
+    status: data.status,
+    message: data.message,
+    checkedAt: data.checked_at || null,
+    version: data.version || null,
+    installedModelCount: data.installed_model_count,
+    runningModelCount: data.running_model_count,
+    generated: data.generated,
+    ollamaRuntime: data.ollama_runtime ? normalizeOllamaRuntime(data.ollama_runtime) : null,
+  };
+}
+
+export async function fetchSystemAIConfig(): Promise<SystemAIConfig> {
+  const { data } = await apiClient.get<ApiSystemAIConfigResponse>('/system/ai-config');
+  return normalizeSystemAIConfig(data);
+}
+
+export async function saveSystemAIConfig(input: SystemAIConfigUpdate): Promise<SystemAIConfig> {
+  const body: Record<string, unknown> = {
+    enabled: input.enabled,
+    default_base_url: input.defaultBaseUrl,
+    trusted_base_url: input.trustedBaseUrl,
+    default_model: input.defaultModel,
+    connect_timeout_seconds: input.connectTimeoutSeconds,
+    read_timeout_seconds: input.readTimeoutSeconds,
+    verify_tls: input.verifyTls,
+    admin_password: input.adminPassword,
+    upgrade_password: input.upgradePassword,
+    clear_access_credentials: input.clearAccessCredentials,
+    confirm_insecure_tls: input.confirmInsecureTls,
+  };
+  if (input.accessClientId) {
+    body.access_client_id = input.accessClientId;
+  }
+  if (input.accessClientSecret) {
+    body.access_client_secret = input.accessClientSecret;
+  }
+  const { data } = await apiClient.put<ApiSystemAIConfigResponse>('/system/ai-config', body);
+  return normalizeSystemAIConfig(data);
+}
+
+export async function resetSystemAIConfig(auth: SystemAIAuth): Promise<SystemAIConfig> {
+  const { data } = await apiClient.delete<ApiSystemAIConfigResponse>('/system/ai-config', {
+    data: {
+      admin_password: auth.adminPassword,
+      upgrade_password: auth.upgradePassword,
+      confirm_reset: true,
+    },
+  });
+  return normalizeSystemAIConfig(data);
+}
+
+export async function testSystemAIConfig(): Promise<AIHealthStatus> {
+  const { data } = await apiClient.post<ApiAIHealthResponse>(
+    '/system/ai-config/test',
+    {},
+    { timeout: API_TIMEOUTS.aiHealth },
+  );
+  return normalizeSystemAIHealth(data);
 }
 
 function normalizeAISettings(data: ApiAISettingsResponse): AIModelSettings {
