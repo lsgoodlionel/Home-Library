@@ -15,6 +15,7 @@ from app.core.ollama_url import InvalidOllamaBaseURL, normalize_ollama_base_url
 from app.models.user import User
 from app.models.user_ai_setting import UserAISetting
 from app.schemas.ai_setting import AIProviderConfig, AISettingsResponse, AISettingsUpdate, OllamaRuntimeStatus
+from app.services.system_ai_setting_service import _get_effective_server_ai_state
 
 
 @dataclass(frozen=True)
@@ -176,19 +177,33 @@ def update_user_ai_settings(db: Session, user: User, payload: AISettingsUpdate) 
 
 
 def get_ollama_runtime_config(db: Session, user: User | None) -> OllamaRuntimeConfig:
-    effective = get_effective_ai_settings(db, user)
-    runtime = effective.ollama_runtime
-    settings = get_settings()
+    server_state = _get_effective_server_ai_state(db)
+    server = server_state.config
+    base_url = server.default_base_url
+    default_model = server.default_model
+    if user is not None:
+        setting = get_or_create_user_ai_setting(db, user)
+        configs = _decode_configs(setting.provider_configs)
+        if setting.active_provider == "ollama":
+            ollama = configs.get("ollama", {})
+            base_url = str(ollama.get("base_url") or server.default_base_url)
+            default_model = (
+                setting.default_model
+                or str(ollama.get("default_model") or "")
+                or server.default_model
+            )
+        else:
+            default_model = setting.default_model or server.default_model
     return OllamaRuntimeConfig(
-        enabled=runtime.enabled,
-        base_url=runtime.base_url,
-        trusted_base_url=settings.ollama_trusted_base_url,
-        default_model=runtime.default_model,
-        connect_timeout_seconds=runtime.connect_timeout_seconds,
-        read_timeout_seconds=runtime.read_timeout_seconds,
-        verify_tls=runtime.verify_tls,
-        access_client_id=settings.ollama_cf_access_client_id,
-        access_client_secret=settings.ollama_cf_access_client_secret,
+        enabled=server.enabled,
+        base_url=base_url,
+        trusted_base_url=server.trusted_base_url,
+        default_model=default_model,
+        connect_timeout_seconds=server.connect_timeout_seconds,
+        read_timeout_seconds=server.read_timeout_seconds,
+        verify_tls=server.verify_tls,
+        access_client_id=server_state.client_id,
+        access_client_secret=server_state.client_secret,
     )
 
 
