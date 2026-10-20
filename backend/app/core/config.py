@@ -85,12 +85,50 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("HOME_LIBRARY_ACCESS_TOKEN_EXPIRE_SECONDS", "APP_ACCESS_TOKEN_EXPIRE_SECONDS"),
     )
     ollama_base_url: str = Field(
-        default="http://127.0.0.1:11434",
+        default="https://openclaw.lsgood.cn",
         validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_BASE_URL", "OLLAMA_BASE_URL"),
     )
     ollama_default_model: str = Field(
-        default="qwen2.5",
+        default="qwen3.5:4b",
         validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_DEFAULT_MODEL", "OLLAMA_DEFAULT_MODEL"),
+    )
+    ollama_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_ENABLED", "OLLAMA_ENABLED"),
+    )
+    ollama_connect_timeout_seconds: float = Field(
+        default=20.0,
+        validation_alias=AliasChoices(
+            "HOME_LIBRARY_OLLAMA_CONNECT_TIMEOUT_SECONDS",
+            "OLLAMA_CONNECT_TIMEOUT_SECONDS",
+        ),
+    )
+    ollama_read_timeout_seconds: float = Field(
+        default=180.0,
+        validation_alias=AliasChoices(
+            "HOME_LIBRARY_OLLAMA_READ_TIMEOUT_SECONDS",
+            "OLLAMA_READ_TIMEOUT_SECONDS",
+            "HOME_LIBRARY_OLLAMA_TIMEOUT_SECONDS",
+            "OLLAMA_TIMEOUT_SECONDS",
+        ),
+    )
+    ollama_verify_tls: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_VERIFY_TLS", "OLLAMA_VERIFY_TLS"),
+    )
+    ollama_cf_access_client_id: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "HOME_LIBRARY_OLLAMA_CF_ACCESS_CLIENT_ID",
+            "OLLAMA_CF_ACCESS_CLIENT_ID",
+        ),
+    )
+    ollama_cf_access_client_secret: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "HOME_LIBRARY_OLLAMA_CF_ACCESS_CLIENT_SECRET",
+            "OLLAMA_CF_ACCESS_CLIENT_SECRET",
+        ),
     )
     ollama_timeout_seconds: float = Field(
         default=120.0,

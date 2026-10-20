@@ -2,15 +2,34 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.models.user import User
 from app.models.user_ai_setting import UserAISetting
-from app.schemas.ai_setting import AIProviderConfig, AISettingsResponse, AISettingsUpdate
+from app.schemas.ai_setting import AIProviderConfig, AISettingsResponse, AISettingsUpdate, OllamaRuntimeStatus
+
+
+@dataclass(frozen=True)
+class OllamaRuntimeConfig:
+    enabled: bool
+    base_url: str
+    trusted_base_url: str
+    default_model: str
+    connect_timeout_seconds: float
+    read_timeout_seconds: float
+    verify_tls: bool
+    access_client_id: str
+    access_client_secret: str
+
+    def __iter__(self):
+        # Temporary compatibility for existing synchronous routes migrated in Task 2.
+        return iter((self.base_url, self.default_model))
 
 
 def _now() -> datetime:
@@ -159,15 +178,68 @@ def update_user_ai_settings(db: Session, user: User, payload: AISettingsUpdate) 
     return _to_response(setting.active_provider, setting.default_model, configs)
 
 
-def get_ollama_runtime_config(db: Session, user: User | None) -> tuple[str, str]:
-    settings = get_effective_ai_settings(db, user)
-    active = next((item for item in settings.providers if item.provider == settings.active_provider), None)
-    fallback = get_settings()
-    if active is None or active.provider != "ollama":
-        return fallback.ollama_base_url, settings.default_model or fallback.ollama_default_model
-    return (
-        active.base_url or fallback.ollama_base_url,
-        settings.default_model or active.default_model or fallback.ollama_default_model,
+def get_ollama_runtime_config(db: Session, user: User | None) -> OllamaRuntimeConfig:
+    effective = get_effective_ai_settings(db, user)
+    runtime = effective.ollama_runtime
+    settings = get_settings()
+    return OllamaRuntimeConfig(
+        enabled=runtime.enabled,
+        base_url=runtime.base_url,
+        trusted_base_url=settings.ollama_base_url,
+        default_model=runtime.default_model,
+        connect_timeout_seconds=runtime.connect_timeout_seconds,
+        read_timeout_seconds=runtime.read_timeout_seconds,
+        verify_tls=runtime.verify_tls,
+        access_client_id=settings.ollama_cf_access_client_id,
+        access_client_secret=settings.ollama_cf_access_client_secret,
+    )
+
+
+def _normalized_origin(url: str) -> tuple[str, str, int | None] | None:
+    try:
+        parsed = urlsplit(url)
+        if not parsed.scheme or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+            return None
+        port = parsed.port
+    except ValueError:
+        return None
+    if port is None:
+        port = {"http": 80, "https": 443}.get(parsed.scheme.lower())
+    return parsed.scheme.lower(), parsed.hostname.lower(), port
+
+
+def _runtime_status(
+    active_provider: str,
+    default_model: str,
+    configs: dict[str, dict[str, Any]],
+    settings: Settings,
+) -> OllamaRuntimeStatus:
+    active = configs.get(active_provider)
+    if active_provider != "ollama" or active is None:
+        base_url = settings.ollama_base_url
+        model = default_model or settings.ollama_default_model
+    else:
+        base_url = str(active.get("base_url") or settings.ollama_base_url)
+        model = default_model or str(active.get("default_model") or settings.ollama_default_model)
+
+    access_configured = bool(
+        settings.ollama_cf_access_client_id and settings.ollama_cf_access_client_secret
+    )
+    trusted_origin = _normalized_origin(settings.ollama_base_url)
+    uses_access = (
+        access_configured
+        and trusted_origin is not None
+        and _normalized_origin(base_url) == trusted_origin
+    )
+    return OllamaRuntimeStatus(
+        enabled=settings.ollama_enabled,
+        base_url=base_url,
+        default_model=model,
+        connect_timeout_seconds=settings.ollama_connect_timeout_seconds,
+        read_timeout_seconds=settings.ollama_read_timeout_seconds,
+        verify_tls=settings.ollama_verify_tls,
+        access_configured=access_configured,
+        uses_access=uses_access,
     )
 
 
@@ -176,6 +248,7 @@ def _to_response(
     default_model: str,
     configs: dict[str, dict[str, Any]],
 ) -> AISettingsResponse:
+    settings = get_settings()
     providers: list[AIProviderConfig] = []
     for key, config in configs.items():
         api_key = str(config.get("api_key") or "")
@@ -194,4 +267,5 @@ def _to_response(
         active_provider=active_provider,  # type: ignore[arg-type]
         default_model=default_model,
         providers=providers,
+        ollama_runtime=_runtime_status(active_provider, default_model, configs, settings),
     )

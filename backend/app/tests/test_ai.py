@@ -8,7 +8,38 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings, get_settings
 from app.models import AITask
+from app.models.user import User
+from app.services.ai_setting_service import get_effective_ai_settings, get_ollama_runtime_config
+
+
+OLLAMA_ENVIRONMENT_VARIABLES = (
+    "HOME_LIBRARY_OLLAMA_ENABLED",
+    "OLLAMA_ENABLED",
+    "HOME_LIBRARY_OLLAMA_BASE_URL",
+    "OLLAMA_BASE_URL",
+    "HOME_LIBRARY_OLLAMA_DEFAULT_MODEL",
+    "OLLAMA_DEFAULT_MODEL",
+    "HOME_LIBRARY_OLLAMA_CONNECT_TIMEOUT_SECONDS",
+    "OLLAMA_CONNECT_TIMEOUT_SECONDS",
+    "HOME_LIBRARY_OLLAMA_READ_TIMEOUT_SECONDS",
+    "OLLAMA_READ_TIMEOUT_SECONDS",
+    "HOME_LIBRARY_OLLAMA_TIMEOUT_SECONDS",
+    "OLLAMA_TIMEOUT_SECONDS",
+    "HOME_LIBRARY_OLLAMA_VERIFY_TLS",
+    "OLLAMA_VERIFY_TLS",
+    "HOME_LIBRARY_OLLAMA_CF_ACCESS_CLIENT_ID",
+    "OLLAMA_CF_ACCESS_CLIENT_ID",
+    "HOME_LIBRARY_OLLAMA_CF_ACCESS_CLIENT_SECRET",
+    "OLLAMA_CF_ACCESS_CLIENT_SECRET",
+)
+
+
+def _clear_ollama_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in OLLAMA_ENVIRONMENT_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    get_settings.cache_clear()
 
 
 def _mock_ollama(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], httpx.Response]) -> None:
@@ -34,6 +65,113 @@ def _classify_payload() -> dict:
         "summary": "社会学经典作品",
         "model": "qwen2.5",
     }
+
+
+def test_ollama_runtime_defaults_to_remote_disabled_configuration(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_ollama_environment(monkeypatch)
+
+    runtime = get_ollama_runtime_config(db, None)
+    get_settings.cache_clear()
+
+    assert runtime.enabled is False
+    assert runtime.base_url == "https://openclaw.lsgood.cn"
+    assert runtime.trusted_base_url == "https://openclaw.lsgood.cn"
+    assert runtime.default_model == "qwen3.5:4b"
+    assert runtime.connect_timeout_seconds == 20.0
+    assert runtime.read_timeout_seconds == 180.0
+    assert runtime.verify_tls is True
+    assert runtime.access_client_id == ""
+    assert runtime.access_client_secret == ""
+
+
+def test_ollama_runtime_uses_saved_account_url_without_access_headers(
+    client: TestClient,
+    db: Session,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_ollama_environment(monkeypatch)
+    monkeypatch.setenv("OLLAMA_ENABLED", "true")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_ID", "runtime-client-id")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_SECRET", "runtime-client-secret")
+
+    response = client.put(
+        "/api/ai/config",
+        headers=admin_headers,
+        json={
+            "active_provider": "ollama",
+            "default_model": "saved-model",
+            "providers": [
+                {
+                    "provider": "ollama",
+                    "enabled": True,
+                    "base_url": "http://remote-ollama.local:11434",
+                    "default_model": "saved-model",
+                    "note": "account ollama",
+                }
+            ],
+        },
+    )
+    user = db.query(User).one()
+    runtime = get_ollama_runtime_config(db, user)
+    get_settings.cache_clear()
+
+    assert response.status_code == 200
+    assert runtime.base_url == "http://remote-ollama.local:11434"
+    assert runtime.default_model == "saved-model"
+    assert response.json()["ollama_runtime"]["uses_access"] is False
+
+
+def test_ai_config_exposes_access_status_without_credentials(
+    client: TestClient,
+    db: Session,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_ollama_environment(monkeypatch)
+    monkeypatch.setenv("OLLAMA_ENABLED", "true")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_ID", "client-id-test-only")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_SECRET", "client-secret-test-only")
+
+    response = client.get("/api/ai/config", headers=admin_headers)
+    get_settings.cache_clear()
+
+    assert response.status_code == 200
+    runtime = response.json()["ollama_runtime"]
+    assert runtime == {
+        "enabled": True,
+        "base_url": "https://openclaw.lsgood.cn",
+        "default_model": "qwen3.5:4b",
+        "connect_timeout_seconds": 20.0,
+        "read_timeout_seconds": 180.0,
+        "verify_tls": True,
+        "access_configured": True,
+        "uses_access": True,
+    }
+    serialized = response.text
+    assert "access_client_id" not in serialized
+    assert "access_client_secret" not in serialized
+    assert "client-id-test-only" not in serialized
+    assert "client-secret-test-only" not in serialized
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "https://user@openclaw.lsgood.cn")
+    get_settings.cache_clear()
+    invalid_origin = get_effective_ai_settings(db, None)
+    get_settings.cache_clear()
+
+    assert invalid_origin.ollama_runtime.uses_access is False
+
+
+def test_legacy_timeout_is_read_timeout_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_ollama_environment(monkeypatch)
+    monkeypatch.setenv("OLLAMA_TIMEOUT_SECONDS", "75")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.ollama_read_timeout_seconds == 75.0
 
 
 def test_models_reads_ollama_tags(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

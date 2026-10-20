@@ -17,10 +17,22 @@ class AIProviderConfig(BaseModel):
     has_api_key: bool = False
 
 
+class OllamaRuntimeStatus(BaseModel):
+    enabled: bool
+    base_url: str
+    default_model: str
+    connect_timeout_seconds: float
+    read_timeout_seconds: float
+    verify_tls: bool
+    access_configured: bool
+    uses_access: bool
+
+
 class AISettingsResponse(BaseModel):
     active_provider: AIProvider = "ollama"
     default_model: str = ""
     providers: list[AIProviderConfig] = Field(default_factory=list)
+    ollama_runtime: OllamaRuntimeStatus
 
 
 class AIProviderConfigUpdate(BaseModel):
