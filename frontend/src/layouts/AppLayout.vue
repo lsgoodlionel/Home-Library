@@ -37,7 +37,7 @@ const navItems = [
   { label: '分类', path: '/categories', icon: Collection, adminOnly: true },
   { label: '位置', path: '/locations', icon: Location, adminOnly: true },
   { label: '用户', path: '/users', icon: User, adminOnly: true },
-  { label: '设置', path: '/settings', icon: Setting, adminOnly: true },
+  { label: '设置', path: '/settings', icon: Setting },
 ];
 
 const visibleNavItems = computed(() =>

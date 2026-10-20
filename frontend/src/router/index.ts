@@ -122,7 +122,7 @@ const router = createRouter({
           path: 'settings',
           name: 'settings',
           component: SettingsPage,
-          meta: { title: '系统设置', requiresAuth: true, adminOnly: true },
+          meta: { title: '系统设置', requiresAuth: true },
         },
       ],
     },

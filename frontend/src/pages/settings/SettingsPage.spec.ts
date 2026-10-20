@@ -3,9 +3,11 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AIHealthStatus } from '@/types/ai';
-import type { AIModelSettings, OllamaRuntimeStatus } from '@/types/settings';
+import ServerAISettingsPanel from '@/components/ai/ServerAISettingsPanel.vue';
+import type { AIModelSettings, OllamaRuntimeStatus, SystemAIConfig } from '@/types/settings';
 import SettingsPage from './SettingsPage.vue';
 
+const authState = vi.hoisted(() => ({ isAdmin: true }));
 const mocks = vi.hoisted(() => ({
   fetchAIHealth: vi.fn(),
   testAIConnection: vi.fn(),
@@ -16,6 +18,10 @@ const mocks = vi.hoisted(() => ({
   saveExternalSearchSettings: vi.fn(),
   saveLocalSettings: vi.fn(),
   fetchAppVersion: vi.fn(),
+  fetchSystemAIConfig: vi.fn(),
+  resetSystemAIConfig: vi.fn(),
+  saveSystemAIConfig: vi.fn(),
+  testSystemAIConfig: vi.fn(),
 }));
 
 vi.mock('@/api/ai', () => ({
@@ -37,6 +43,7 @@ vi.mock('@/api/settings', () => ({
   fetchExternalSearchSettings: mocks.fetchExternalSearchSettings,
   fetchAIModelSettings: mocks.fetchAIModelSettings,
   fetchAvailableModels: mocks.fetchAvailableModels,
+  fetchSystemAIConfig: mocks.fetchSystemAIConfig,
   loadLocalSettings: vi.fn(() => ({
     ollamaBaseUrl: 'http://localhost:11434',
     defaultModel: '',
@@ -46,6 +53,9 @@ vi.mock('@/api/settings', () => ({
   saveAIModelSettings: mocks.saveAIModelSettings,
   saveExternalSearchSettings: mocks.saveExternalSearchSettings,
   saveLocalSettings: mocks.saveLocalSettings,
+  resetSystemAIConfig: mocks.resetSystemAIConfig,
+  saveSystemAIConfig: mocks.saveSystemAIConfig,
+  testSystemAIConfig: mocks.testSystemAIConfig,
   validateExternalProvider: vi.fn(),
 }));
 
@@ -65,7 +75,7 @@ vi.mock('@/api/importExport', () => ({
 }));
 
 vi.mock('@/stores/auth', () => ({
-  useAuthStore: () => ({ isAdmin: true }),
+  useAuthStore: () => authState,
 }));
 
 const currentRuntime: OllamaRuntimeStatus = {
@@ -83,6 +93,24 @@ const staleRuntime: OllamaRuntimeStatus = {
   ...currentRuntime,
   baseUrl: 'https://other-account.example.com',
   defaultModel: 'other-model',
+};
+
+const systemConfig: SystemAIConfig = {
+  enabled: true,
+  defaultBaseUrl: currentRuntime.baseUrl,
+  trustedBaseUrl: currentRuntime.baseUrl,
+  defaultModel: currentRuntime.defaultModel,
+  connectTimeoutSeconds: currentRuntime.connectTimeoutSeconds,
+  readTimeoutSeconds: currentRuntime.readTimeoutSeconds,
+  verifyTls: currentRuntime.verifyTls,
+  credentialState: {
+    accessClientIdConfigured: true,
+    accessClientSecretConfigured: true,
+    credentialsUsable: true,
+    source: 'database',
+  },
+  configurationSource: 'database',
+  configVersion: 2,
 };
 
 function settings(runtime = currentRuntime): AIModelSettings {
@@ -142,6 +170,7 @@ function button(wrapper: VueWrapper, text: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  authState.isAdmin = true;
   mocks.fetchAppVersion.mockResolvedValue({ appName: 'Home Library', version: 'test', environment: 'test' });
   mocks.fetchExternalSearchSettings.mockResolvedValue({ providers: [] });
   mocks.saveExternalSearchSettings.mockResolvedValue({ providers: [] });
@@ -150,6 +179,10 @@ beforeEach(() => {
   mocks.fetchAIHealth.mockResolvedValue(health());
   mocks.testAIConnection.mockResolvedValue(health());
   mocks.fetchAvailableModels.mockResolvedValue([{ name: 'first-model' }]);
+  mocks.fetchSystemAIConfig.mockResolvedValue(systemConfig);
+  mocks.resetSystemAIConfig.mockResolvedValue(systemConfig);
+  mocks.saveSystemAIConfig.mockResolvedValue(systemConfig);
+  mocks.testSystemAIConfig.mockResolvedValue(health());
 });
 
 afterEach(() => {
@@ -157,6 +190,101 @@ afterEach(() => {
 });
 
 describe('SettingsPage AI status orchestration', () => {
+  it('separates_server_settings_runtime_status_and_account_preferences', async () => {
+    const wrapper = await mountPage();
+    const text = wrapper.text();
+    const serverIndex = text.indexOf('服务器 AI 配置');
+    const runtimeIndex = text.indexOf('当前运行状态');
+    const accountIndex = text.indexOf('当前账号 AI 偏好');
+
+    expect(serverIndex).toBeGreaterThan(-1);
+    expect(runtimeIndex).toBeGreaterThan(serverIndex);
+    expect(accountIndex).toBeGreaterThan(runtimeIndex);
+    expect(wrapper.find('.ai-settings-sections .el-card').exists()).toBe(false);
+    expect(wrapper.findAllComponents(ServerAISettingsPanel)).toHaveLength(1);
+  });
+
+  it('reloads_account_runtime_and_clears_stale_health_after_server_change', async () => {
+    const pendingSettings = deferred<AIModelSettings>();
+    const nextRuntime = { ...currentRuntime, baseUrl: 'https://reloaded.example.com' };
+    const callOrder: string[] = [];
+    mocks.fetchAIModelSettings.mockImplementationOnce(async () => settings());
+    mocks.fetchAIModelSettings.mockImplementationOnce(() => {
+      callOrder.push('settings');
+      return pendingSettings.promise;
+    });
+    mocks.fetchAIHealth.mockImplementation(async (refresh: boolean) => {
+      callOrder.push(`health:${refresh}`);
+      return health('healthy', refresh ? nextRuntime : currentRuntime);
+    });
+    const wrapper = await mountPage();
+    callOrder.length = 0;
+
+    wrapper.findComponent(ServerAISettingsPanel).vm.$emit('runtime-changed', systemConfig);
+    await flushPromises();
+
+    expect(callOrder).toEqual(['settings']);
+    expect(wrapper.text()).toContain('0.12.6');
+
+    pendingSettings.resolve(settings(nextRuntime));
+    await flushPromises();
+
+    expect(callOrder).toEqual(['settings', 'health:true']);
+    expect(mocks.fetchAIHealth).toHaveBeenLastCalledWith(true);
+    expect(wrapper.text()).toContain(nextRuntime.baseUrl);
+  });
+
+  it('shows_saved_but_connection_failed_without_reopening_sensitive_dialog', async () => {
+    const success = vi.spyOn(ElMessage, 'success');
+    const error = vi.spyOn(ElMessage, 'error');
+    const wrapper = await mountPage();
+    mocks.fetchAIHealth.mockRejectedValueOnce({
+      response: { data: { error: { code: 'AI_CONNECT_TIMEOUT' } } },
+    });
+    mocks.fetchAIHealth.mockRejectedValueOnce(new Error('health cache unavailable'));
+
+    await button(wrapper, '保存服务器配置').trigger('click');
+    await flushPromises();
+    await wrapper.get('input[data-testid="admin-password"]').setValue('synthetic-admin-password');
+    await wrapper.get('input[data-testid="upgrade-password"]').setValue('synthetic-upgrade-password');
+    await button(wrapper, '确认保存').trigger('click');
+    await flushPromises();
+
+    expect(success).toHaveBeenCalledWith('服务器 AI 配置已保存');
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('连接 AI 服务超时'));
+    expect(success.mock.invocationCallOrder[0]).toBeLessThan(error.mock.invocationCallOrder[0]);
+    expect(mocks.fetchAIModelSettings).toHaveBeenCalledTimes(2);
+    expect(mocks.fetchAIHealth.mock.calls.map(([refresh]) => refresh)).toEqual([false, true, false]);
+    expect(wrapper.text()).toContain('连接异常');
+    expect(wrapper.text()).toContain('连接 AI 服务超时');
+    expect(document.body.querySelector('[data-testid="auth-dialog"] .el-dialog')).toBeNull();
+    expect(JSON.stringify(error.mock.calls)).not.toContain('保存失败');
+  });
+
+  it('keeps_non_ai_settings_usable_when_server_config_load_fails', async () => {
+    mocks.fetchSystemAIConfig.mockRejectedValueOnce(new Error('server config unavailable'));
+    const wrapper = await mountPage();
+
+    expect(mocks.fetchSystemAIConfig).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain('外部检索');
+    expect(wrapper.text()).toContain('备份设置');
+    expect(button(wrapper, '保存设置').attributes('disabled')).toBeUndefined();
+    expect(mocks.fetchAIModelSettings).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchExternalSearchSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps_account_ai_preferences_available_without_server_controls_for_members', async () => {
+    authState.isAdmin = false;
+    const wrapper = await mountPage();
+
+    expect(wrapper.findComponent(ServerAISettingsPanel).exists()).toBe(false);
+    expect(wrapper.text()).not.toContain('保存服务器配置');
+    expect(wrapper.text()).toContain('当前运行状态');
+    expect(wrapper.text()).toContain('当前账号 AI 偏好');
+    expect(wrapper.text()).toContain('账号偏好仅调整服务商、Ollama 地址和默认模型；服务器 AI 总开关、可信地址、Access 凭据、TLS 和超时由管理员统一管理。');
+    expect(button(wrapper, '保存设置').attributes('disabled')).toBeUndefined();
+  });
+
   it('waits_for_ai_settings_before_reading_process_health', async () => {
     const pendingSettings = deferred<AIModelSettings>();
     mocks.fetchAIModelSettings.mockReturnValueOnce(pendingSettings.promise);

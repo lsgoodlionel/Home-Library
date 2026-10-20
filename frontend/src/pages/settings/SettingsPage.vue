@@ -27,6 +27,7 @@ import {
   type ImportPreviewResult,
 } from '@/api/importExport';
 import OllamaConnectionStatus from '@/components/ai/OllamaConnectionStatus.vue';
+import ServerAISettingsPanel from '@/components/ai/ServerAISettingsPanel.vue';
 import { useAuthStore } from '@/stores/auth';
 import type { AIHealthStatus, AIModel, ClassifyBookResponse } from '@/types/ai';
 import type { BookListItem, CategoryOption } from '@/types/book';
@@ -190,6 +191,14 @@ async function loadAISettings(): Promise<boolean> {
   } finally {
     loadingAISettings.value = false;
   }
+}
+
+async function handleServerAIRuntimeChanged() {
+  const aiSettingsLoaded = await loadAISettings();
+  if (!aiSettingsLoaded) return;
+
+  aiHealth.value = null;
+  await loadAIHealth(true);
 }
 
 async function loadExternalSettings() {
@@ -701,15 +710,27 @@ function getErrorMessage(err: unknown): string {
         <span>AI 模型配置</span>
       </template>
 
-      <el-form v-loading="loadingAISettings" label-width="140px">
-        <OllamaConnectionStatus
-          :status="ollamaConnectionStatus"
-          :is-admin="authStore.isAdmin"
-          :loading="loadingAIStatus"
-          @check="loadAIHealth(true)"
-          @test="handleAIConnectionTest(false)"
-          @test-generate="handleAIConnectionTest(true)"
-        />
+      <div class="ai-settings-sections" data-testid="ai-settings-sections">
+        <section v-if="authStore.isAdmin" class="ai-settings-section server-settings-section">
+          <ServerAISettingsPanel @runtime-changed="handleServerAIRuntimeChanged" />
+        </section>
+
+        <section class="ai-settings-section" aria-labelledby="runtime-status-heading">
+          <h3 id="runtime-status-heading" class="ai-section-title">当前运行状态</h3>
+          <OllamaConnectionStatus
+            :status="ollamaConnectionStatus"
+            :is-admin="authStore.isAdmin"
+            :loading="loadingAIStatus"
+            @check="loadAIHealth(true)"
+            @test="handleAIConnectionTest(false)"
+            @test-generate="handleAIConnectionTest(true)"
+          />
+        </section>
+
+        <section class="ai-settings-section" aria-labelledby="account-ai-heading">
+          <h3 id="account-ai-heading" class="ai-section-title">当前账号 AI 偏好</h3>
+          <p class="field-hint">账号偏好仅调整服务商、Ollama 地址和默认模型；服务器 AI 总开关、可信地址、Access 凭据、TLS 和超时由管理员统一管理。</p>
+          <el-form v-loading="loadingAISettings" label-width="140px">
 
         <el-form-item label="当前服务商">
           <el-select
@@ -804,7 +825,9 @@ function getErrorMessage(err: unknown): string {
             </el-form-item>
           </div>
         </div>
-      </el-form>
+          </el-form>
+        </section>
+      </div>
     </el-card>
 
     <el-card class="settings-card">
@@ -1047,6 +1070,29 @@ function getErrorMessage(err: unknown): string {
 
 .settings-card {
   margin-bottom: 16px;
+}
+
+.ai-settings-sections,
+.ai-settings-section {
+  width: 100%;
+  min-width: 0;
+}
+
+.ai-settings-section + .ai-settings-section {
+  padding-top: 22px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.server-settings-section {
+  padding-bottom: 22px;
+}
+
+.ai-section-title {
+  margin: 0 0 14px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0;
 }
 
 .version-panel {
