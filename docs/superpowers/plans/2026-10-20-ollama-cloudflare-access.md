@@ -403,6 +403,8 @@ git add .github/workflows/release.yml .env.example docker-compose.yml docker-com
 git commit -m "ci: gate Ollama release images and document deployment"
 ```
 
-- [ ] **Step 11: Final review, repository sync, and project record**
+- [x] **Step 11: Final review, repository sync, and project record**
+
+Fresh whole-branch review identified three Important findings; all were reproduced with focused failing tests, fixed, and covered by `361 passed` backend regression plus the rebuilt 12/12 Docker HTTP acceptance. Commit `33482fc` was pushed to `origin/main` by ordinary push, and the existing Obsidian Home-Library project overview records the delivery and remaining real-credential smoke requirement.
 
 Use `superpowers:requesting-code-review` for a fresh whole-branch review, then rerun any verification affected by fixes. Before push, re-read `~/.codex/memories/claude-code-migration/github-repositories.md`; push only if Home-Library is registered and the branch can be updated by ordinary push. After push, update the existing Obsidian Home-Library project overview with date, branch, commits, test evidence, completed scope, remaining real-credential validation, and GitHub traceability.
