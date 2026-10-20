@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 from collections.abc import Callable
 
@@ -18,7 +19,7 @@ from app.services.ai_setting_service import (
     get_effective_ai_settings,
     get_ollama_runtime_config,
 )
-from app.services.ai_task_service import sanitize_ai_task_input
+from app.services.ai_task_service import create_ai_task, sanitize_ai_task_input
 from app.services.ollama_client import (
     OllamaAccessDeniedError,
     OllamaClient,
@@ -616,6 +617,12 @@ def test_ai_config_is_persisted_per_account(client: TestClient, admin_headers: d
     "base_url",
     [
         "http://[",
+        "http://\nexample.com",
+        "http://\texample.com",
+        "http://\rexample.com",
+        "http://example.com\x85path",
+        " http://example.com",
+        "http://example.com ",
         "ftp://ollama.example.com",
         "localhost:11434",
         "http:///missing-host",
@@ -648,6 +655,42 @@ def test_ai_config_rejects_invalid_or_unsupported_base_url(
     saved = client.get("/api/ai/config", headers=admin_headers).json()
     ollama = next(item for item in saved["providers"] if item["provider"] == "ollama")
     assert ollama["base_url"] != base_url
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://localhost:11434",
+        "http://127.0.0.1:11434",
+        "http://[::1]:11434",
+        "https://ollama.example.com/ollama/api",
+    ],
+)
+def test_ai_config_accepts_safe_http_base_urls(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    base_url: str,
+) -> None:
+    response = client.put(
+        "/api/ai/config",
+        headers=admin_headers,
+        json={
+            "active_provider": "ollama",
+            "default_model": "qwen3:8b",
+            "providers": [
+                {
+                    "provider": "ollama",
+                    "enabled": True,
+                    "base_url": base_url,
+                    "default_model": "qwen3:8b",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    ollama = next(item for item in response.json()["providers"] if item["provider"] == "ollama")
+    assert ollama["base_url"] == base_url
 
 
 def test_models_use_account_ollama_base_url(
@@ -919,6 +962,143 @@ def test_sanitize_ai_task_input_bounds_cycles_depth_nodes_and_json_bytes() -> No
     assert depth <= 6
 
 
+def test_ai_task_persists_one_compact_bounded_json_document(db: Session) -> None:
+    # This shape previously measured at the compact limit and then exceeded it
+    # when create_ai_task serialized it again with spaced separators.
+    candidates = [
+        {
+            "title": f"候选-{index}",
+            "summary": "中" * 512,
+            "author_intro": "介" * 512,
+            "note": "注" * 512,
+        }
+        for index in range(20)
+    ]
+    cyclic: dict[str, object] = {"title": "循环保留"}
+    cyclic["current"] = cyclic
+    deep: dict[str, object] = {"title": "底层"}
+    for _ in range(20):
+        deep = {"title": "深层", "current": deep}
+
+    task = create_ai_task(
+        db,
+        task_type="review-boundary",
+        model="qwen3:8b",
+        input_data={
+            "title": "资本论",
+            "summary": "正常中文",
+            "pages": math.nan,
+            "publish_year": math.inf,
+            "note": "孤立代理:\ud800",
+            "current": cyclic,
+            "first": deep,
+            "candidates": candidates,
+        },
+        status="failed",
+        error_message="model",
+    )
+
+    persisted = db.query(AITask).filter(AITask.id == task.id).one().input_data
+    decoded = json.loads(persisted)
+
+    assert len(persisted.encode("utf-8")) <= 16_384
+    assert json.dumps(decoded, ensure_ascii=False, separators=(",", ":"), allow_nan=False) == persisted
+    assert decoded["title"] == "资本论"
+    assert decoded["summary"] == "正常中文"
+    assert "pages" not in decoded
+    assert "publish_year" not in decoded
+    assert "\ud800" not in persisted
+    assert decoded["current"]["title"] == "循环保留"
+
+
+def test_ai_task_persists_exact_16384_byte_compact_boundary(db: Session) -> None:
+    candidates = [{"summary": ""} for _ in range(19)] + [""]
+    candidates[0]["note"] = ""
+    payload = {"title": "", "candidates": candidates}
+    slots = [(payload, "title"), *[(item, "summary") for item in candidates[:-1]]]
+    slots.append((candidates[0], "note"))
+
+    empty_size = len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode(
+            "utf-8"
+        )
+    )
+    remaining = 16_384 - empty_size
+    for mapping, key in slots:
+        if remaining > 1_536:
+            mapping[key] = "中" * 512
+            remaining -= 1_536
+            continue
+        if remaining <= 512:
+            mapping[key] = "x" * remaining
+        else:
+            chinese_count = (remaining - 512 + 1) // 2
+            mapping[key] = ("中" * chinese_count) + ("x" * (remaining - 3 * chinese_count))
+        remaining = 0
+        break
+
+    compact = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    old_persisted = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    assert remaining == 0
+    assert len(compact.encode("utf-8")) == 16_384
+    assert len(old_persisted.encode("utf-8")) == 16_427
+
+    task = create_ai_task(
+        db,
+        task_type="review-exact-boundary",
+        model="qwen3:8b",
+        input_data=payload,
+        status="success",
+    )
+
+    persisted = db.query(AITask).filter(AITask.id == task.id).one().input_data
+    assert persisted == compact
+    assert len(persisted.encode("utf-8")) == 16_384
+    assert json.loads(persisted) == payload
+
+
+@pytest.mark.parametrize(
+    "invalid_base_url",
+    [
+        "http://[sensitive-invalid-url",
+        "http://\nsensitive.example",
+        "http://\tsensitive.example",
+        "http://\rsensitive.example",
+    ],
+)
+def test_invalid_runtime_is_audited_and_returns_stable_ai_error(
+    client: TestClient,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_base_url: str,
+) -> None:
+    invalid_runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url=invalid_base_url,
+        trusted_base_url="https://openclaw.lsgood.cn",
+        default_model="qwen3:8b",
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_client_id="",
+        access_client_secret="",
+    )
+    monkeypatch.setattr(
+        "app.api.routes.ai.get_ollama_runtime_config",
+        lambda db, user: invalid_runtime,
+    )
+
+    response = client.get("/api/ai/models")
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "AI_MODEL_ERROR"
+    assert "sensitive" not in response.text
+    task = db.query(AITask).one()
+    assert task.status == "failed"
+    assert task.error_message == "model"
+    assert json.loads(task.input_data) == {}
+
+
 def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -968,37 +1148,6 @@ def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
     assert event_loop_threads
     assert len(sync_threads) == 4
     assert all(thread_id != event_loop_threads[0] for thread_id in sync_threads)
-
-
-def test_invalid_runtime_is_audited_and_returns_stable_ai_error(
-    client: TestClient,
-    db: Session,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    invalid_runtime = OllamaRuntimeConfig(
-        enabled=True,
-        base_url="http://[sensitive-invalid-url",
-        trusted_base_url="https://openclaw.lsgood.cn",
-        default_model="qwen3:8b",
-        connect_timeout_seconds=20,
-        read_timeout_seconds=180,
-        verify_tls=True,
-        access_client_id="",
-        access_client_secret="",
-    )
-    monkeypatch.setattr(
-        "app.api.routes.ai.get_ollama_runtime_config",
-        lambda db, user: invalid_runtime,
-    )
-
-    response = client.get("/api/ai/models")
-
-    assert response.status_code == 502
-    assert response.json()["error"]["code"] == "AI_MODEL_ERROR"
-    assert "sensitive-invalid-url" not in response.text
-    task = db.query(AITask).one()
-    assert task.status == "failed"
-    assert task.error_message == "model"
 
 
 def test_ai_failure_does_not_modify_book_or_block_non_ai_health(

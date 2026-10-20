@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from pydantic import BaseModel, ValidationError
 
+from app.core.ollama_url import InvalidOllamaBaseURL, normalize_ollama_base_url
 from app.schemas.ai import (
     OllamaChatResponse,
     OllamaGenerateResponse,
@@ -185,13 +186,16 @@ class OllamaClient:
         base_urls = _candidate_base_urls(self.runtime.base_url)
         for base_url_index, base_url in enumerate(base_urls):
             headers = self._headers if base_url_index == 0 else {}
-            async with httpx.AsyncClient(
+            client = _build_async_client(
                 base_url=base_url,
                 headers=headers,
                 timeout=self._timeout,
-                verify=self.runtime.verify_tls,
+                verify_tls=self.runtime.verify_tls,
                 transport=self._transport,
-            ) as client:
+            )
+            if client is None:
+                raise OllamaModelError("Ollama base URL is invalid")
+            async with client:
                 connect_attempts = 0
                 while True:
                     response_received = False
@@ -225,6 +229,8 @@ class OllamaClient:
                             request_error = OllamaUpstreamError("Ollama connection failed")
                     except httpx.RequestError:
                         request_error = OllamaUpstreamError("Ollama request failed")
+                    except (httpx.InvalidURL, UnicodeError, ValueError):
+                        request_error = OllamaModelError("Ollama base URL is invalid")
 
                     if retry_connect:
                         continue
@@ -284,21 +290,13 @@ async def _read_bounded(response: httpx.Response, limit: int) -> bytes:
 
 
 def _candidate_base_urls(base_url: str) -> list[str]:
-    normalized = base_url.rstrip("/")
-    valid = False
-    parsed = None
     try:
+        normalized = normalize_ollama_base_url(base_url).rstrip("/")
         parsed = urlsplit(normalized)
-        valid = (
-            parsed.scheme.lower() in {"http", "https"}
-            and parsed.hostname is not None
-            and parsed.username is None
-            and parsed.password is None
-        )
         parsed.port
-    except ValueError:
-        valid = False
-    if not valid or parsed is None:
+    except (InvalidOllamaBaseURL, ValueError):
+        parsed = None
+    if parsed is None:
         raise OllamaModelError("Ollama base URL is invalid")
 
     candidates = [normalized]
@@ -309,3 +307,23 @@ def _candidate_base_urls(base_url: str) -> list[str]:
         docker_host_url = urlunsplit((parsed.scheme or "http", netloc, parsed.path, "", "")).rstrip("/")
         candidates.append(docker_host_url)
     return candidates
+
+
+def _build_async_client(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    timeout: httpx.Timeout,
+    verify_tls: bool,
+    transport: httpx.AsyncBaseTransport | None,
+) -> httpx.AsyncClient | None:
+    try:
+        return httpx.AsyncClient(
+            base_url=base_url,
+            headers=headers,
+            timeout=timeout,
+            verify=verify_tls,
+            transport=transport,
+        )
+    except (httpx.InvalidURL, UnicodeError, ValueError):
+        return None

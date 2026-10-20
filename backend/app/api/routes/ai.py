@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.core.errors import ApiError
+from app.core.ollama_url import InvalidOllamaBaseURL, normalize_ollama_base_url
 from app.core.security import get_current_user, get_optional_current_user, require_admin
 from app.db.session import get_db
 from app.models import Category
@@ -129,8 +130,8 @@ def _bounded_status_text(value: str | None) -> str | None:
 
 def _safe_hostname(url: str) -> str | None:
     try:
-        return urlsplit(url).hostname
-    except ValueError:
+        return urlsplit(normalize_ollama_base_url(url)).hostname
+    except (InvalidOllamaBaseURL, ValueError):
         return None
 
 

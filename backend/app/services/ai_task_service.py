@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -59,10 +60,13 @@ class _AuditSanitizeState:
 
 
 def sanitize_ai_task_input(input_data: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(serialize_ai_task_input(input_data))
+
+
+def serialize_ai_task_input(input_data: dict[str, Any]) -> str:
     sanitized = _sanitize_audit_value(input_data, _AuditSanitizeState(), depth=0)
     result = sanitized if isinstance(sanitized, dict) else {}
-    _bound_audit_json_size(result)
-    return result
+    return _bound_audit_json_size(result)
 
 
 def _sanitize_audit_value(
@@ -76,9 +80,13 @@ def _sanitize_audit_value(
     state.nodes += 1
 
     if isinstance(value, str):
-        return value[:_MAX_AUDIT_STRING_LENGTH]
-    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+        return _safe_audit_string(value)
+    if isinstance(value, bool) or value is None:
         return value
+    if isinstance(value, int):
+        return value if value.bit_length() <= 256 else None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if not isinstance(value, (dict, list)):
         return None
 
@@ -97,7 +105,7 @@ def _sanitize_audit_value(
 
         sanitized_dict: dict[str, Any] = {}
         for key, item in value.items():
-            if key not in _AUDIT_FIELD_ALLOWLIST:
+            if not isinstance(key, str) or key not in _AUDIT_FIELD_ALLOWLIST:
                 continue
             sanitized = _sanitize_audit_value(item, state, depth=depth + 1)
             if sanitized is not None:
@@ -107,9 +115,17 @@ def _sanitize_audit_value(
         state.active_container_ids.remove(container_id)
 
 
-def _bound_audit_json_size(value: dict[str, Any]) -> None:
-    while _audit_json_size(value) > _MAX_AUDIT_JSON_BYTES:
-        excess = _audit_json_size(value) - _MAX_AUDIT_JSON_BYTES
+def _safe_audit_string(value: str) -> str:
+    return value[:_MAX_AUDIT_STRING_LENGTH].encode("utf-8", errors="replace").decode("utf-8")
+
+
+def _bound_audit_json_size(value: dict[str, Any]) -> str:
+    while True:
+        serialized = _serialize_audit_json(value)
+        encoded_size = len(serialized.encode("utf-8"))
+        if encoded_size <= _MAX_AUDIT_JSON_BYTES:
+            return serialized
+        excess = encoded_size - _MAX_AUDIT_JSON_BYTES
         if _truncate_longest_string(value, excess):
             continue
         if _drop_largest_list_tail(value):
@@ -117,11 +133,20 @@ def _bound_audit_json_size(value: dict[str, Any]) -> None:
         if _drop_last_mapping_value(value, is_root=True):
             continue
         value.clear()
-        return
+        return _serialize_audit_json(value)
+
+
+def _serialize_audit_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def _audit_json_size(value: Any) -> int:
-    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    return len(_serialize_audit_json(value).encode("utf-8"))
 
 
 def _truncate_longest_string(value: Any, excess_bytes: int) -> bool:
@@ -206,7 +231,7 @@ def create_ai_task(
     task = AITask(
         task_type=task_type,
         model=model,
-        input_data=json.dumps(sanitize_ai_task_input(input_data), ensure_ascii=False),
+        input_data=serialize_ai_task_input(input_data),
         output_data=json.dumps(output_data, ensure_ascii=False, default=str) if output_data is not None else None,
         status=status,
         error_message=error_message,

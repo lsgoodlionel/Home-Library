@@ -124,6 +124,12 @@ def test_untrusted_origin_never_receives_access_headers() -> None:
     "base_url",
     [
         "http://[",
+        "http://\nexample.com",
+        "http://\texample.com",
+        "http://\rexample.com",
+        "http://example.com\x85path",
+        " http://example.com",
+        "http://example.com ",
         "ftp://ollama.example.com",
         "localhost:11434",
         "http:///missing-host",
@@ -145,6 +151,46 @@ def test_invalid_or_unsupported_base_url_maps_to_safe_model_error(base_url: str)
     assert caught.value.category == "model"
     assert str(caught.value) == "Ollama base URL is invalid"
     _assert_sensitive_exception_state_unreachable(caught.value, base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://localhost:11434",
+        "http://127.0.0.1:11434",
+        "http://[::1]:11434",
+        "https://ollama.example.com/ollama/api",
+    ],
+)
+def test_safe_http_base_urls_can_construct_requests(base_url: str) -> None:
+    requested_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        return httpx.Response(200, json={"version": "0.6.2"})
+
+    client = OllamaClient(_runtime(base_url=base_url), transport=httpx.MockTransport(handler))
+
+    response = _run(client.version())
+
+    assert response.version == "0.6.2"
+    assert requested_urls
+
+
+def test_async_client_invalid_url_is_defensively_mapped_to_model_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.ollama_client._candidate_base_urls",
+        lambda _: ["http://example.com\x85path"],
+    )
+    client = OllamaClient(_runtime())
+
+    with pytest.raises(OllamaModelError) as caught:
+        _run(client.version())
+
+    assert str(caught.value) == "Ollama base URL is invalid"
+    _assert_sensitive_exception_state_unreachable(caught.value, "example.com")
 
 
 @pytest.mark.parametrize(

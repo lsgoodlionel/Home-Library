@@ -5,11 +5,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlsplit
 
+import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.core.ollama_url import InvalidOllamaBaseURL, normalize_ollama_base_url
 from app.models.user import User
 from app.models.user_ai_setting import UserAISetting
 from app.schemas.ai_setting import AIProviderConfig, AISettingsResponse, AISettingsUpdate, OllamaRuntimeStatus
@@ -192,15 +193,11 @@ def get_ollama_runtime_config(db: Session, user: User | None) -> OllamaRuntimeCo
 
 def normalize_ollama_origin(url: str) -> tuple[str, str, int | None] | None:
     try:
-        parsed = urlsplit(url)
-        if not parsed.scheme or not parsed.hostname or parsed.username is not None or parsed.password is not None:
-            return None
-        port = parsed.port
-    except ValueError:
+        parsed = httpx.URL(normalize_ollama_base_url(url))
+    except (InvalidOllamaBaseURL, httpx.InvalidURL):
         return None
-    if port is None:
-        port = {"http": 80, "https": 443}.get(parsed.scheme.lower())
-    return parsed.scheme.lower(), parsed.hostname.lower(), port
+    port = parsed.port or {"http": 80, "https": 443}.get(parsed.scheme)
+    return parsed.scheme, parsed.host.lower(), port
 
 
 def _runtime_status(

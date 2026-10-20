@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from typing import Literal
-from urllib.parse import urlsplit
-
 from pydantic import BaseModel, Field, field_validator
+
+from app.core.ollama_url import InvalidOllamaBaseURL, normalize_ollama_base_url
 
 AIProvider = Literal["ollama", "openai", "gemini", "deepseek", "moonshot", "qwen", "custom"]
 
@@ -44,31 +44,25 @@ class AIProviderConfigUpdate(BaseModel):
     default_model: str = ""
     note: str = ""
 
-    @field_validator("base_url", "default_model", "note", mode="before")
+    @field_validator("default_model", "note", mode="before")
     @classmethod
     def clean_optional_text(cls, value: object) -> str:
         return value.strip() if isinstance(value, str) else ""
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def clean_base_url(cls, value: object) -> str:
+        return value if isinstance(value, str) else ""
 
     @field_validator("base_url")
     @classmethod
     def validate_base_url(cls, value: str) -> str:
         if not value:
             return value
-        valid = False
         try:
-            parsed = urlsplit(value)
-            valid = (
-                parsed.scheme.lower() in {"http", "https"}
-                and parsed.hostname is not None
-                and parsed.username is None
-                and parsed.password is None
-            )
-            parsed.port
-        except ValueError:
-            valid = False
-        if not valid:
+            return normalize_ollama_base_url(value)
+        except InvalidOllamaBaseURL:
             raise ValueError("服务地址必须是包含主机名的 HTTP 或 HTTPS URL")
-        return value
 
 
 class AISettingsUpdate(BaseModel):
