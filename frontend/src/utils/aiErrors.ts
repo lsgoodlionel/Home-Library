@@ -10,14 +10,24 @@ const AI_ERROR_MESSAGES: Record<string, string> = {
 };
 
 const GENERIC_AI_ERROR = 'AI 服务暂时不可用，请稍后重试；图书信息仍可手工填写和保存。';
+const ADMIN_PERMISSION_ERROR = '权限已变更，当前操作仅限管理员，请重新登录或联系管理员。';
 
 export function getAIErrorMessage(error: unknown): string {
   if (!error || typeof error !== 'object' || !('response' in error)) {
     return GENERIC_AI_ERROR;
   }
 
-  const response = (error as { response?: { data?: { error?: { code?: unknown } } } }).response;
+  const response = (error as {
+    response?: {
+      status?: unknown;
+      data?: { error?: { code?: unknown; status?: unknown; details?: { status?: unknown } } };
+    };
+  }).response;
   const code = response?.data?.error?.code;
+  const errorStatus = response?.data?.error?.status ?? response?.data?.error?.details?.status;
+  if (response?.status === 403 || (code === 'HTTP_ERROR' && errorStatus === 403)) {
+    return ADMIN_PERMISSION_ERROR;
+  }
   return typeof code === 'string' && AI_ERROR_MESSAGES[code]
     ? AI_ERROR_MESSAGES[code]
     : GENERIC_AI_ERROR;

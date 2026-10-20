@@ -93,16 +93,14 @@ const orderedProviders = computed(() =>
 const activeAIProvider = computed(() =>
   aiSettings.providers.find((provider) => provider.provider === aiSettings.activeProvider),
 );
-const ollamaConnectionStatus = computed<AIHealthStatus>(() => ({
-  status: aiHealth.value?.status || 'unchecked',
-  message: aiHealth.value?.message || '尚未检查',
-  checkedAt: aiHealth.value?.checkedAt || null,
-  version: aiHealth.value?.version || null,
-  installedModelCount: aiHealth.value?.installedModelCount || 0,
-  runningModelCount: aiHealth.value?.runningModelCount || 0,
-  generated: aiHealth.value?.generated || false,
-  ollamaRuntime: aiHealth.value?.ollamaRuntime || aiSettings.ollamaRuntime,
-}));
+const ollamaConnectionStatus = computed<AIHealthStatus>(() => {
+  const currentRuntime = aiSettings.ollamaRuntime;
+  const cached = aiHealth.value;
+  if (cached && ollamaRuntimesMatch(cached.ollamaRuntime, currentRuntime)) {
+    return { ...cached, ollamaRuntime: currentRuntime };
+  }
+  return createUncheckedAIHealth(currentRuntime);
+});
 const modelOptions = computed(() => {
   const names = models.value.map((model) => model.name).filter(Boolean);
   if (aiSettings.defaultModel && !names.includes(aiSettings.defaultModel)) {
@@ -143,6 +141,11 @@ async function loadAIHealth(refresh = false) {
     aiHealth.value = await fetchAIHealth(refresh);
     if (refresh) ElMessage.success(aiHealth.value.message);
   } catch (err: unknown) {
+    if (refresh) {
+      await syncAIHealthFailure(err);
+    } else {
+      aiHealth.value = createLocalAIHealthError(err);
+    }
     ElMessage.error(getAIErrorMessage(err));
   } finally {
     loadingAIStatus.value = false;
@@ -168,6 +171,7 @@ async function handleAIConnectionTest(generate: boolean) {
     aiHealth.value = await testAIConnection(generate);
     ElMessage.success(generate ? '生成测试成功' : '连接测试成功');
   } catch (err: unknown) {
+    await syncAIHealthFailure(err);
     ElMessage.error(getAIErrorMessage(err));
   } finally {
     loadingAIStatus.value = false;
@@ -221,6 +225,62 @@ function applyAISettings(data: AIModelSettings) {
   aiSettings.ollamaRuntime = { ...data.ollamaRuntime };
 }
 
+function ollamaRuntimesMatch(
+  cached: OllamaRuntimeStatus | null | undefined,
+  current: OllamaRuntimeStatus,
+): boolean {
+  return Boolean(
+    cached
+    && cached.baseUrl === current.baseUrl
+    && cached.defaultModel === current.defaultModel
+    && cached.enabled === current.enabled
+    && cached.connectTimeoutSeconds === current.connectTimeoutSeconds
+    && cached.readTimeoutSeconds === current.readTimeoutSeconds
+    && cached.verifyTls === current.verifyTls
+    && cached.accessConfigured === current.accessConfigured
+    && cached.usesAccess === current.usesAccess,
+  );
+}
+
+function createUncheckedAIHealth(runtime: OllamaRuntimeStatus): AIHealthStatus {
+  return {
+    status: 'unchecked',
+    message: '尚未检查',
+    checkedAt: null,
+    version: null,
+    installedModelCount: 0,
+    runningModelCount: 0,
+    generated: false,
+    ollamaRuntime: runtime,
+  };
+}
+
+function createLocalAIHealthError(error: unknown): AIHealthStatus {
+  return {
+    status: 'error',
+    message: getAIErrorMessage(error),
+    checkedAt: new Date().toISOString(),
+    version: null,
+    installedModelCount: 0,
+    runningModelCount: 0,
+    generated: false,
+    ollamaRuntime: { ...aiSettings.ollamaRuntime },
+  };
+}
+
+async function syncAIHealthFailure(error: unknown) {
+  try {
+    const latest = await fetchAIHealth(false);
+    if (latest.status === 'error' && ollamaRuntimesMatch(latest.ollamaRuntime, aiSettings.ollamaRuntime)) {
+      aiHealth.value = latest;
+      return;
+    }
+  } catch {
+    // Fall back to a local sanitized error below.
+  }
+  aiHealth.value = createLocalAIHealthError(error);
+}
+
 async function handleSave() {
   savingSettings.value = true;
   try {
@@ -234,6 +294,7 @@ async function handleSave() {
       saveExternalSearchSettings(externalSearchSettings),
     ]);
     applyAISettings(savedAI);
+    aiHealth.value = null;
     externalSearchSettings.providers = savedExternal.providers.map((provider) => ({ ...provider, apiKey: '', extra: '' }));
     saveLocalSettings({
       ollamaBaseUrl: getProvider('ollama')?.baseUrl || settings.ollamaBaseUrl,

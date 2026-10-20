@@ -16,6 +16,17 @@ describe('getAIErrorMessage', () => {
     expect(getAIErrorMessage({ response: { data: { error: { code } } } })).toBe(message);
   });
 
+  it.each([
+    [{ response: { status: 403, data: { detail: 'sensitive permission detail' } } }],
+    [{ response: { status: 500, data: { error: { code: 'HTTP_ERROR', details: { status: 403 }, message: 'secret' } } } }],
+  ])('maps administrator permission changes without exposing details', (error) => {
+    const message = getAIErrorMessage(error);
+
+    expect(message).toBe('权限已变更，当前操作仅限管理员，请重新登录或联系管理员。');
+    expect(message).not.toContain('sensitive');
+    expect(message).not.toContain('secret');
+  });
+
   it('uses a bounded generic fallback without exposing upstream details', () => {
     const marker = 'upstream-secret-response-marker';
     const message = getAIErrorMessage({

@@ -124,10 +124,17 @@ function formatCheckedAt(value: string | null | undefined): string {
   color: var(--el-text-color-secondary);
   font-size: 12px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .status-details {
   width: 100%;
+}
+
+.status-details :deep(.el-descriptions__content) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .access-warning,
@@ -139,5 +146,32 @@ function formatCheckedAt(value: string | null | undefined): string {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.status-actions :deep(.el-button) {
+  min-height: 32px;
+  height: auto;
+  white-space: normal;
+  line-height: 1.4;
+}
+
+@media (max-width: 640px) {
+  .status-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .status-details :deep(.el-descriptions__table),
+  .status-details :deep(tbody),
+  .status-details :deep(tr),
+  .status-details :deep(td) {
+    display: block;
+    width: 100%;
+  }
+
+  .status-actions :deep(.el-button) {
+    flex: 1 1 120px;
+    margin-left: 0;
+  }
 }
 </style>
