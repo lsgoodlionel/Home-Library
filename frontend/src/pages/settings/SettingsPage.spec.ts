@@ -224,7 +224,8 @@ describe('SettingsPage AI status orchestration', () => {
     await flushPromises();
 
     expect(callOrder).toEqual(['settings']);
-    expect(wrapper.text()).toContain('0.12.6');
+    expect(wrapper.text()).toContain('正在同步运行配置，尚未检查连接');
+    expect(wrapper.find('.ollama-status').exists()).toBe(false);
 
     pendingSettings.resolve(settings(nextRuntime));
     await flushPromises();
@@ -232,6 +233,49 @@ describe('SettingsPage AI status orchestration', () => {
     expect(callOrder).toEqual(['settings', 'health:true']);
     expect(mocks.fetchAIHealth).toHaveBeenLastCalledWith(true);
     expect(wrapper.text()).toContain(nextRuntime.baseUrl);
+  });
+
+  it('invalidates_stale_runtime_when_saved_server_settings_cannot_reload_and_allows_sync_retry', async () => {
+    const success = vi.spyOn(ElMessage, 'success');
+    const error = vi.spyOn(ElMessage, 'error');
+    const nextRuntime = { ...currentRuntime, baseUrl: 'https://new-server.example.com', defaultModel: 'new-server-model' };
+    const wrapper = await mountPage();
+    const runtimeSection = () => wrapper.get('section[aria-labelledby="runtime-status-heading"]');
+    expect(runtimeSection().text()).toContain('连接正常');
+    expect(runtimeSection().text()).toContain(currentRuntime.baseUrl);
+    mocks.fetchAIModelSettings.mockRejectedValueOnce(new Error('account runtime reload unavailable'));
+    mocks.saveSystemAIConfig.mockResolvedValueOnce({ ...systemConfig, defaultBaseUrl: nextRuntime.baseUrl, defaultModel: nextRuntime.defaultModel });
+
+    await button(wrapper, '保存服务器配置').trigger('click');
+    await flushPromises();
+    await wrapper.get('input[data-testid="admin-password"]').setValue('synthetic-admin-password');
+    await wrapper.get('input[data-testid="upgrade-password"]').setValue('synthetic-upgrade-password');
+    await button(wrapper, '确认保存').trigger('click');
+    await flushPromises();
+
+    expect(success).toHaveBeenCalledWith('服务器 AI 配置已保存');
+    expect(runtimeSection().text()).toContain('运行配置未同步，尚未检查连接');
+    expect(runtimeSection().find('.ollama-status').exists()).toBe(false);
+    expect(runtimeSection().text()).not.toContain(currentRuntime.baseUrl);
+    expect(runtimeSection().text()).not.toContain('连接正常');
+    expect(mocks.fetchAIHealth.mock.calls.map(([refresh]) => refresh)).toEqual([false]);
+    expect(JSON.stringify(error.mock.calls)).not.toContain('保存失败');
+
+    const retrySettings = deferred<AIModelSettings>();
+    mocks.fetchAIModelSettings.mockReturnValueOnce(retrySettings.promise);
+    mocks.fetchAIHealth.mockResolvedValueOnce(health('healthy', nextRuntime));
+    await button(wrapper, '重新同步运行配置').trigger('click');
+    await flushPromises();
+    expect(runtimeSection().find('.ollama-status').exists()).toBe(false);
+    expect(mocks.fetchAIHealth.mock.calls.map(([refresh]) => refresh)).toEqual([false]);
+
+    retrySettings.resolve(settings(nextRuntime));
+    await flushPromises();
+    expect(runtimeSection().text()).toContain(nextRuntime.baseUrl);
+    expect(runtimeSection().text()).toContain('连接正常');
+    expect(runtimeSection().text()).not.toContain('运行配置未同步');
+    expect(mocks.fetchAIHealth.mock.calls.map(([refresh]) => refresh)).toEqual([false, true]);
+    expect(mocks.saveSystemAIConfig).toHaveBeenCalledTimes(1);
   });
 
   it('shows_saved_but_connection_failed_without_reopening_sensitive_dialog', async () => {

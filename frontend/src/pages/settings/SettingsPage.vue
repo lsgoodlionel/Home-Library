@@ -64,6 +64,7 @@ const stopAutoClassifyRequested = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const versionInfo = ref<AppVersionInfo | null>(null);
 const aiHealth = ref<AIHealthStatus | null>(null);
+const runtimeNeedsSync = ref(false);
 
 const emptyOllamaRuntime: OllamaRuntimeStatus = {
   enabled: false,
@@ -194,10 +195,12 @@ async function loadAISettings(): Promise<boolean> {
 }
 
 async function handleServerAIRuntimeChanged() {
+  runtimeNeedsSync.value = true;
   const aiSettingsLoaded = await loadAISettings();
+  aiHealth.value = null;
   if (!aiSettingsLoaded) return;
 
-  aiHealth.value = null;
+  runtimeNeedsSync.value = false;
   await loadAIHealth(true);
 }
 
@@ -717,7 +720,20 @@ function getErrorMessage(err: unknown): string {
 
         <section class="ai-settings-section" aria-labelledby="runtime-status-heading">
           <h3 id="runtime-status-heading" class="ai-section-title">当前运行状态</h3>
+          <div v-if="runtimeNeedsSync" class="runtime-sync-warning">
+            <el-alert
+              :title="loadingAISettings ? '正在同步运行配置，尚未检查连接' : '运行配置未同步，尚未检查连接'"
+              type="warning"
+              :closable="false"
+              show-icon
+              description="服务器保存结果不受影响。同步成功后才能展示当前有效参数和连接状态。"
+            />
+            <el-button :loading="loadingAISettings" @click="handleServerAIRuntimeChanged">
+              重新同步运行配置
+            </el-button>
+          </div>
           <OllamaConnectionStatus
+            v-else
             :status="ollamaConnectionStatus"
             :is-admin="authStore.isAdmin"
             :loading="loadingAIStatus"
@@ -1093,6 +1109,13 @@ function getErrorMessage(err: unknown): string {
   font-weight: 600;
   line-height: 1.4;
   letter-spacing: 0;
+}
+
+.runtime-sync-warning {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+  margin-bottom: 18px;
 }
 
 .version-panel {
