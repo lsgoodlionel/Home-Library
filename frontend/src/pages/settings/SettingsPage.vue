@@ -302,6 +302,10 @@ async function handleSave() {
       });
       applyAISettings(savedAI);
       aiHealth.value = null;
+      settings.ollamaBaseUrl = getProvider('ollama')?.baseUrl
+        || savedAI.ollamaRuntime.baseUrl
+        || settings.ollamaBaseUrl;
+      settings.defaultModel = savedAI.defaultModel;
       aiSaved = true;
     })();
     const externalSave = (async () => {
@@ -315,12 +319,17 @@ async function handleSave() {
     })();
 
     await Promise.allSettled([aiSave, externalSave]);
-    saveLocalSettings({
-      ollamaBaseUrl: getProvider('ollama')?.baseUrl || settings.ollamaBaseUrl,
-      defaultModel: aiSettings.defaultModel,
-      externalSearchEnabled: settings.externalSearchEnabled,
-      externalProviderOrder: [...settings.externalProviderOrder],
-    });
+    let localPreferencesSaved = true;
+    try {
+      saveLocalSettings({
+        ollamaBaseUrl: settings.ollamaBaseUrl,
+        defaultModel: settings.defaultModel,
+        externalSearchEnabled: settings.externalSearchEnabled,
+        externalProviderOrder: [...settings.externalProviderOrder],
+      });
+    } catch {
+      localPreferencesSaved = false;
+    }
 
     if (aiSaved && externalSaved) {
       ElMessage.success('设置已保存到当前账号');
@@ -330,6 +339,9 @@ async function handleSave() {
       ElMessage.warning('外部检索设置已保存，AI 配置保存失败');
     } else {
       ElMessage.error('AI 配置和外部检索设置均保存失败');
+    }
+    if (!localPreferencesSaved) {
+      ElMessage.warning('服务器设置已处理，但本地偏好保存失败');
     }
   } finally {
     savingSettings.value = false;

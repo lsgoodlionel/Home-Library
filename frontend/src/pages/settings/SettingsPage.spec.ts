@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   saveAIModelSettings: vi.fn(),
   fetchExternalSearchSettings: vi.fn(),
   saveExternalSearchSettings: vi.fn(),
+  saveLocalSettings: vi.fn(),
   fetchAppVersion: vi.fn(),
 }));
 
@@ -44,7 +45,7 @@ vi.mock('@/api/settings', () => ({
   })),
   saveAIModelSettings: mocks.saveAIModelSettings,
   saveExternalSearchSettings: mocks.saveExternalSearchSettings,
-  saveLocalSettings: vi.fn(),
+  saveLocalSettings: mocks.saveLocalSettings,
   validateExternalProvider: vi.fn(),
 }));
 
@@ -297,6 +298,10 @@ describe('SettingsPage AI status orchestration', () => {
     expect(wrapper.text()).toContain(nextRuntime.baseUrl);
     expect(wrapper.text()).toContain('尚未检查');
     expect(wrapper.text()).not.toContain('0.12.6');
+    expect(mocks.saveLocalSettings).toHaveBeenCalledWith(expect.objectContaining({
+      ollamaBaseUrl: nextRuntime.baseUrl,
+      defaultModel: nextRuntime.defaultModel,
+    }));
   });
 
   it('applies_ai_save_immediately_when_external_save_later_fails', async () => {
@@ -360,6 +365,30 @@ describe('SettingsPage AI status orchestration', () => {
     expect(wrapper.text()).toContain(currentRuntime.baseUrl);
     expect(wrapper.text()).toContain('0.12.6');
     expect(warning).toHaveBeenCalledWith('外部检索设置已保存，AI 配置保存失败');
+    expect(mocks.saveLocalSettings).toHaveBeenCalledWith(expect.objectContaining({
+      ollamaBaseUrl: 'http://localhost:11434',
+      defaultModel: '',
+    }));
+    expect(mocks.saveLocalSettings).not.toHaveBeenCalledWith(expect.objectContaining({
+      ollamaBaseUrl: currentRuntime.baseUrl,
+      defaultModel: currentRuntime.defaultModel,
+    }));
+  });
+
+  it('keeps_backend_result_messages_when_local_preferences_fail_to_save', async () => {
+    mocks.saveLocalSettings.mockImplementationOnce(() => {
+      throw new Error('sensitive local storage detail');
+    });
+    const success = vi.spyOn(ElMessage, 'success');
+    const warning = vi.spyOn(ElMessage, 'warning');
+    const wrapper = await mountPage();
+
+    await button(wrapper, '保存设置').trigger('click');
+    await flushPromises();
+
+    expect(success).toHaveBeenCalledWith('设置已保存到当前账号');
+    expect(warning).toHaveBeenCalledWith('服务器设置已处理，但本地偏好保存失败');
+    expect(JSON.stringify(warning.mock.calls)).not.toContain('sensitive local storage detail');
   });
 
   it('refreshing_models_does_not_replace_the_saved_default_model', async () => {
