@@ -144,7 +144,7 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_DEFAULT_MODEL=qwen3.5:4b
 ```
 
-远程模式当前使用 `https://openclaw.lsgood.cn`，`ollama.lsgood.cn` 不是当前默认地址。Access Client ID/Secret 只能通过后端环境注入，前端不能读取。已安全设置凭据后，可运行 `bash scripts/ollama-cloudflare-smoke-test.sh` 检查 `/api/version`、`/api/tags`、`/api/ps`。
+远程模式当前使用 `https://openclaw.lsgood.cn`，`ollama.lsgood.cn` 不是当前默认地址。Access Client ID/Secret 只能通过后端环境注入，前端不能读取。运行只读 smoke 前还需设置 `OLLAMA_TRUSTED_BASE_URL`；脚本仅在其规范化 Origin 与 `OLLAMA_BASE_URL` 完全一致时携带凭据。可用 `bash scripts/tests/test-ollama-cloudflare-smoke-test.sh` 运行第三方地址、端口、协议、默认端口、IPv6、用户信息和控制字符安全矩阵。
 
 ## 同时运行前后端
 

@@ -63,6 +63,7 @@ DATABASE_URL=sqlite:////data/home_library.sqlite3
 | `INITIAL_ADMIN_PASSWORD` | `change-me` | 首次初始化管理员密码 |
 | `OLLAMA_ENABLED` | `false` | AI 总开关，关闭时不发出 Ollama 请求 |
 | `OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | 后端直接运行时的本地或远程地址 |
+| `OLLAMA_TRUSTED_BASE_URL` | `https://openclaw.lsgood.cn` | smoke 脚本允许携带 Access 凭据的严格 Origin |
 | `DOCKER_OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | Compose 后端容器实际使用的地址 |
 | `OLLAMA_DEFAULT_MODEL` | `qwen3.5:4b` | 默认模型 |
 | `OLLAMA_CONNECT_TIMEOUT_SECONDS` | `20` | 建立连接超时秒数 |
@@ -143,6 +144,8 @@ docker compose up -d
 
 ```env
 OLLAMA_ENABLED=true
+OLLAMA_BASE_URL=https://openclaw.lsgood.cn
+OLLAMA_TRUSTED_BASE_URL=https://openclaw.lsgood.cn
 DOCKER_OLLAMA_BASE_URL=https://openclaw.lsgood.cn
 OLLAMA_DEFAULT_MODEL=qwen3.5:4b
 OLLAMA_CONNECT_TIMEOUT_SECONDS=20
@@ -152,13 +155,17 @@ OLLAMA_CF_ACCESS_CLIENT_ID=
 OLLAMA_CF_ACCESS_CLIENT_SECRET=
 ```
 
-两项 Access 凭据必须同时由服务器秘密管理填入，不得写入仓库、前端 `VITE_*`、镜像 build args 或运维日志。后端只在请求 origin 与服务器受信任 URL 完全一致时附加 Access headers。
+两项 Access 凭据必须同时由服务器秘密管理填入，不得写入仓库、前端 `VITE_*`、镜像 build args 或运维日志。后端只在请求 origin 与服务器受信任 URL 完全一致时附加 Access headers。smoke 脚本独立比较 `OLLAMA_BASE_URL` 与 `OLLAMA_TRUSTED_BASE_URL`：协议、主机和有效端口必须一致，HTTP 80/HTTPS 443 的显式端口与默认端口等价，路径可不同；用户信息、控制字符、非 HTTP(S) 或第三方 Origin 会在调用 curl 前被拒绝。
 
 确认环境中已经安全注入两项凭据后，可执行只读 smoke；脚本不会调用生成接口，也不会打印凭据或响应正文：
 
 ```bash
 bash scripts/ollama-cloudflare-smoke-test.sh
 ```
+
+发布 workflow 只接受 `vMAJOR.MINOR.PATCH` 或带合法 prerelease 的 tag，例如
+`v1.2.3`、`v1.2.3-rc.1`。该 tag 同时作为应用版本和两个 GHCR 镜像 tag，非法
+`v*` tag 会在构建镜像前失败。
 
 管理员还可以在“设置 > AI 模型配置”执行连接测试。普通测试只读；生成测试需要前端二次确认。AI 故障只影响 AI 推荐，核心图书功能继续可用。
 

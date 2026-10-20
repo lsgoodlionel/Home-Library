@@ -1001,7 +1001,7 @@ nginx
 - 多模型配置
 - 日志查看
 - 数据迁移工具
-- GitHub Release 在后端 pytest、前端测试/类型检查/构建全部通过后自动生成前后端 multi-arch 镜像和部署资产
+- GitHub Release 在后端 pytest、前端测试/类型检查/构建、交付脚本安全测试和 Compose 配置展开全部通过后自动生成前后端 multi-arch 镜像和部署资产；只接受严格 SemVer `v*` tag，并为同一 ref 取消旧 run
 
 ## 14. MVP 范围建议
 

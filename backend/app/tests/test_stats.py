@@ -161,6 +161,50 @@ def test_category_distribution_does_not_roll_child_counts_to_parent(
     assert sum(items.values()) == 2
 
 
+def test_category_distribution_counts_each_level_directly_and_sorts_stably(
+    client: TestClient, db: Session
+) -> None:
+    parent, _location = _seed_refs(db)
+    child = Category(
+        code="I2475",
+        name="小说",
+        parent_id=parent.id,
+        sort_order=2,
+        is_system=True,
+        created_at=_dt(2026, 1),
+        updated_at=_dt(2026, 1),
+    )
+    grandchild = Category(
+        code="I24757",
+        name="小说",
+        parent=child,
+        sort_order=1,
+        is_system=True,
+        created_at=_dt(2026, 1),
+        updated_at=_dt(2026, 1),
+    )
+    db.add_all([child, grandchild])
+    db.commit()
+    db.refresh(child)
+    db.refresh(grandchild)
+
+    _book(db, "父类图书", category_id=parent.id)
+    _book(db, "子类图书 A", category_id=child.id)
+    _book(db, "子类图书 B", category_id=child.id)
+    _book(db, "孙类图书", category_id=grandchild.id)
+    _book(db, "未分类图书")
+
+    response = client.get("/api/stats/categories")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"id": child.id, "code": "I2475", "name": "小说", "count": 2},
+        {"id": parent.id, "code": "I247", "name": "中国小说", "count": 1},
+        {"id": grandchild.id, "code": "I24757", "name": "小说", "count": 1},
+        {"id": None, "code": None, "name": "未分类", "count": 1},
+    ]
+
+
 def test_location_distribution_includes_unspecified(client: TestClient, db: Session) -> None:
     _category, location = _seed_refs(db)
     _book(db, "有位置", location_id=location.id)

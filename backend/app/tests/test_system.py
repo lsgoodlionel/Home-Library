@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 from types import SimpleNamespace
 
 from app.main import app
+from app.core.config import get_settings
 
 client = TestClient(app)
 
@@ -17,11 +18,13 @@ def test_version() -> None:
     response = client.get("/api/version")
 
     assert response.status_code == 200
+    settings = get_settings()
     assert response.json() == {
         "app_name": "Home Library",
-        "version": "0.1.0",
+        "version": settings.app_version,
         "environment": "development",
     }
+    assert response.json()["version"].strip()
 
 
 def test_upgrade_requires_admin(client: TestClient, member_headers: dict[str, str]) -> None:

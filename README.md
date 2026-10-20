@@ -232,13 +232,15 @@ ollama pull qwen3.5:4b
 
 远程模式当前默认地址为 `https://openclaw.lsgood.cn`。Cloudflare Access 的 Client ID/Secret 只允许写入服务器环境变量，禁止放入 `VITE_*`、前端设置或仓库；`ollama.lsgood.cn` 当前不可作为默认地址。管理员可在“设置 > AI 模型配置”检查连接，生成测试需要再次确认。
 
-只读远程连通性验证（仅访问 version/tags/ps，不触发生成）：
+只读远程连通性验证（仅访问 version/tags/ps，不触发生成）。脚本只在
+`OLLAMA_BASE_URL` 与 `OLLAMA_TRUSTED_BASE_URL` 的规范化 Origin 完全一致时发送
+Access headers：
 
 ```bash
 bash scripts/ollama-cloudflare-smoke-test.sh
 ```
 
-GitHub 的 `Build & Release` workflow 会先运行后端 pytest、前端 Vitest、类型检查和生产构建；全部通过后才构建并推送前后端 multi-arch GHCR 镜像，`v*` 标签还会在两个镜像成功后创建带部署资产的 Release。
+GitHub 的 `Build & Release` workflow 会先运行后端 pytest、前端 Vitest、类型检查、生产构建、脚本安全测试和普通 Compose 配置展开；全部通过后才构建并推送前后端 multi-arch GHCR 镜像。Release tag 必须是 `vMAJOR.MINOR.PATCH`，可带合法 prerelease；两个镜像成功后才创建带部署资产的 Release。同一分支或 tag 的旧 run 会自动取消，不同 tag 互不影响。
 
 ## 测试与质量
 
@@ -258,13 +260,15 @@ npm run test:e2e
 
 | 检查项 | 结果 |
 |---|---|
-| 后端全量测试 | `281 passed, 3 failed`；3 项为既有借阅固定日期、分类汇总语义和动态版本断言，当前会阻止 Release |
+| 后端全量测试 | `285 passed, 0 failed` |
 | 前端类型检查 | 通过 |
 | 前端构建 | 通过，仅 Vite chunk size warning |
 | Vitest | `5 files / 37 tests passed` |
+| 发布脚本测试 | smoke Origin 安全矩阵和 SemVer tag 解析通过 |
+| Compose 配置 | 开发、生产配置均以临时 `.env` 普通展开通过 |
 | Docker 隔离流程 | 健康、登录、图书列表、AI 配置脱敏、权限和 AI 关闭降级通过 |
 
-Release workflow 不会忽略上述后端失败；修复这 3 项基线后，main/tag 才能自动发布镜像，`v*` 标签才会创建 Release。
+Release workflow 不跳过测试或放宽业务断言。借阅测试使用相对日期，分类统计按图书直接所属分类精确计数，版本接口测试跟随动态应用版本，因此当前完整后端门禁为零失败。
 
 ## 环境变量
 

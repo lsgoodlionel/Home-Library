@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -22,12 +22,13 @@ def _book(db: Session, title: str = "乡土中国") -> Book:
 
 
 def _payload(book_id: int, borrower_name: str = "张三") -> dict:
+    borrowed_at = date.today()
     return {
         "book_id": book_id,
         "borrower_name": borrower_name,
         "borrower_contact": "13800000000",
-        "borrowed_at": "2026-05-01",
-        "due_at": "2026-06-01",
+        "borrowed_at": borrowed_at.isoformat(),
+        "due_at": (borrowed_at + timedelta(days=30)).isoformat(),
         "note": "线下借出",
     }
 
@@ -70,7 +71,7 @@ def test_return_borrow_marks_book_available(client: TestClient, db: Session, mem
 
     response = client.post(
         f"/api/borrow/{created['id']}/return",
-        json={"returned_at": "2026-05-10", "note": "已归还"},
+        json={"returned_at": date.today().isoformat(), "note": "已归还"},
         headers=member_headers,
     )
 
@@ -83,7 +84,7 @@ def test_return_borrow_marks_book_available(client: TestClient, db: Session, mem
 def test_return_borrow_twice_returns_conflict(client: TestClient, db: Session, member_headers: dict[str, str]) -> None:
     book = _book(db)
     created = client.post("/api/borrow", json=_payload(book.id), headers=member_headers).json()
-    return_payload = {"returned_at": "2026-05-10", "note": "已归还"}
+    return_payload = {"returned_at": date.today().isoformat(), "note": "已归还"}
 
     first = client.post(f"/api/borrow/{created['id']}/return", json=return_payload, headers=member_headers)
     second = client.post(f"/api/borrow/{created['id']}/return", json=return_payload, headers=member_headers)
@@ -121,8 +122,8 @@ def test_delete_returned_borrow(client: TestClient, db: Session, member_headers:
     record = BorrowRecord(
         book_id=book.id,
         borrower_name="张三",
-        borrowed_at=date(2026, 5, 1),
-        returned_at=date(2026, 5, 2),
+        borrowed_at=date.today() - timedelta(days=1),
+        returned_at=date.today(),
         status="returned",
         created_at=_now(),
         updated_at=_now(),

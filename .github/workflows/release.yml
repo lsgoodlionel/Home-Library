@@ -5,6 +5,10 @@ on:
     branches: [main]
     tags: ['v*']
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/home-library-backend
   FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/home-library-frontend
@@ -51,8 +55,43 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+  delivery-validation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate delivery scripts
+        run: |
+          bash -n scripts/ollama-cloudflare-smoke-test.sh
+          bash -n scripts/resolve-release-version.sh
+          bash scripts/tests/test-ollama-cloudflare-smoke-test.sh
+          bash scripts/tests/test-resolve-release-version.sh
+      - name: Validate Compose configuration
+        run: |
+          cp .env.example .env
+          trap 'rm -f .env' EXIT
+          docker compose config --quiet
+          docker compose -f docker-compose.prod.yml config --quiet
+
+  prepare:
+    needs: [backend-validation, frontend-validation, delivery-validation]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate tag and resolve release version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(bash scripts/resolve-release-version.sh "$GITHUB_REF_TYPE" "$GITHUB_REF_NAME" "$GITHUB_RUN_NUMBER")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
   build-backend:
-    needs: [backend-validation, frontend-validation]
+    needs: [prepare]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -61,16 +100,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Compute version
-        id: ver
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="0.1.$(git rev-list --count HEAD)"
-          fi
-          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
@@ -85,9 +114,8 @@ jobs:
         with:
           images: ${{ env.BACKEND_IMAGE }}
           tags: |
-            type=raw,value=${{ steps.ver.outputs.VERSION }}
+            type=raw,value=${{ needs.prepare.outputs.version }}
             type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
       - name: Build and push backend
         uses: docker/build-push-action@v6
         with:
@@ -97,12 +125,12 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
-          build-args: APP_VERSION=${{ steps.ver.outputs.VERSION }}
+          build-args: APP_VERSION=${{ needs.prepare.outputs.version }}
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
 
   build-frontend:
-    needs: [backend-validation, frontend-validation]
+    needs: [prepare]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -111,16 +139,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Compute version
-        id: ver
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="0.1.$(git rev-list --count HEAD)"
-          fi
-          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
@@ -135,9 +153,8 @@ jobs:
         with:
           images: ${{ env.FRONTEND_IMAGE }}
           tags: |
-            type=raw,value=${{ steps.ver.outputs.VERSION }}
+            type=raw,value=${{ needs.prepare.outputs.version }}
             type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
       - name: Build and push frontend
         uses: docker/build-push-action@v6
         with:

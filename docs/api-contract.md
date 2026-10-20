@@ -647,7 +647,7 @@ AI 错误使用上表稳定代码和中文消息，不返回 Prompt、图书全�
 
 ### GET /api/stats/categories
 
-分类分布。
+分类分布。按图书直接所属分类精确计数，不把子类图书汇总到父类；返回所有有书的层级分类及未分类数量。每项包含 `id`、`code`、`name`、`count`，同名分类仍通过 `id` 和 `code` 区分，结果按数量及分类稳定顺序排列。
 
 ### GET /api/stats/locations
 
