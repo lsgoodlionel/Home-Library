@@ -28,7 +28,9 @@ cp .env.example .env
 |---|---|---|
 | `APP_SECRET_KEY` | `change-this-secret` | 必须修改，用于 JWT 签名 |
 | `DATABASE_URL` | `sqlite:///./home_library.sqlite3` | SQLite 路径，开发时无需修改 |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | 如不使用 Ollama 可忽略 |
+| `OLLAMA_ENABLED` | `false` | AI 开关；如不使用 Ollama 保持关闭 |
+| `OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | 本地或远程 Ollama 地址 |
+| `OLLAMA_DEFAULT_MODEL` | `qwen3.5:4b` | 默认模型 |
 | `VITE_API_BASE_URL` | `http://127.0.0.1:8000/api` | 前端请求后端的地址 |
 
 ## 后端开发
@@ -118,7 +120,7 @@ npm run test:e2e             # Playwright E2E 冒烟测试
 
 ## Ollama（可选）
 
-AI 功能（分类推荐、标签生成等）依赖本地 Ollama 服务。`.env` 中 `OLLAMA_OPTIONAL=true` 时，Ollama 不可用系统仍可正常运行，AI 接口会返回服务不可用的错误信息。
+AI 功能（分类推荐、标签生成等）可使用本地或 Cloudflare Access 保护的远程 Ollama。默认 `OLLAMA_ENABLED=false`；Ollama 不可用时系统仍可正常运行，AI 接口返回稳定中文错误，登录、藏书、借阅、统计和备份不受影响。
 
 ```bash
 # 安装 Ollama（macOS）
@@ -128,11 +130,21 @@ brew install ollama
 ollama serve
 
 # 拉取推荐模型（中文书籍分类）
-ollama pull qwen2.5
+ollama pull qwen3.5:4b
 
 # 验证
 curl http://localhost:11434/api/tags
 ```
+
+本地运行后端时设置：
+
+```env
+OLLAMA_ENABLED=true
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_DEFAULT_MODEL=qwen3.5:4b
+```
+
+远程模式当前使用 `https://openclaw.lsgood.cn`，`ollama.lsgood.cn` 不是当前默认地址。Access Client ID/Secret 只能通过后端环境注入，前端不能读取。已安全设置凭据后，可运行 `bash scripts/ollama-cloudflare-smoke-test.sh` 检查 `/api/version`、`/api/tags`、`/api/ps`。
 
 ## 同时运行前后端
 
@@ -175,7 +187,7 @@ A: 确认已激活虚拟环境（`source .venv/bin/activate`）且已运行 `pip
 A: 检查 `.env` 中 `CORS_ORIGINS` 是否包含前端地址，以及 `VITE_API_BASE_URL` 是否正确。
 
 **Q: Ollama 调用超时**
-A: 增大 `OLLAMA_TIMEOUT_SECONDS`，或先用 `ollama run qwen2.5` 手动测试模型是否正常。
+A: 连接失败调整 `OLLAMA_CONNECT_TIMEOUT_SECONDS`，模型生成慢调整 `OLLAMA_READ_TIMEOUT_SECONDS`；本地模型可先用 `ollama run qwen3.5:4b` 验证。
 
 **Q: SQLite 数据库路径错误**
 A: `DATABASE_URL` 的相对路径相对于后端工作目录（`backend/`），建议使用绝对路径或在 `backend/` 目录下启动服务。

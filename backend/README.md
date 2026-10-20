@@ -57,10 +57,17 @@ cp ../.env.example ../.env
 | `DATABASE_URL` | `sqlite:///./home_library.db` | 数据库连接字符串 |
 | `INITIAL_ADMIN_USERNAME` | `admin` | 初始管理员用户名 |
 | `INITIAL_ADMIN_PASSWORD` | `change-me` | 初始管理员密码 |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | 本地 Ollama 服务地址 |
-| `OLLAMA_DEFAULT_MODEL` | `qwen2.5` | AI 接口默认使用的模型 |
-| `OLLAMA_TIMEOUT_SECONDS` | `30` | Ollama 请求超时时间 |
+| `OLLAMA_ENABLED` | `false` | AI 总开关；关闭时不会请求 Ollama |
+| `OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | 本地或远程 Ollama 地址 |
+| `OLLAMA_DEFAULT_MODEL` | `qwen3.5:4b` | AI 接口默认使用的模型 |
+| `OLLAMA_CONNECT_TIMEOUT_SECONDS` | `20` | 建立连接超时（秒） |
+| `OLLAMA_READ_TIMEOUT_SECONDS` | `180` | 模型读取/生成超时（秒） |
+| `OLLAMA_VERIFY_TLS` | `true` | 是否验证 HTTPS 证书 |
+| `OLLAMA_CF_ACCESS_CLIENT_ID` | 空 | Cloudflare Access Client ID，仅服务器环境 |
+| `OLLAMA_CF_ACCESS_CLIENT_SECRET` | 空 | Cloudflare Access Secret，仅服务器环境 |
 | `OLLAMA_OPTIONAL` | `true` | Ollama 不可用时系统仍可启动，AI 接口返回清晰错误 |
+
+Access 凭据只有在账号有效 Ollama URL 与服务器受信任 URL 的 origin 完全一致时才会发送，不会通过 API、日志或审计记录返回。AI 请求失败不会影响 `/api/health` 或非 AI 图书功能。
 
 ## 安装与启动
 
@@ -120,6 +127,13 @@ pytest app/tests/test_users.py   # 仅用户管理测试
 |---|---|---|---|
 | GET | `/api/health` | 公开 | 健康检查 |
 | GET | `/api/version` | 公开 | 版本信息 |
+
+### AI 运维
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| GET | `/api/ai/health?refresh=false` | 登录用户 | 读取最近一次脱敏状态；`refresh=true` 主动检查 |
+| POST | `/api/ai/test-connection` | 管理员 | 普通连接测试；仅显式传入 `{"generate": true}` 才执行最小生成 |
 
 ### 认证
 

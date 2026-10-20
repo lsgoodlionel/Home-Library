@@ -4,7 +4,7 @@
 
 系统名称暂定为 **Home Library / 家藏书库**。
 
-项目目标是开发一套面向家庭场景的轻量级藏书管理系统，用来记录家庭藏书的分类、名称、作者、ISBN、出版社、购买信息、阅读状态、借阅状态和实际摆放位置。系统参考《中国图书馆分类法》建立简化分类体系，并结合网络检索与本地 Ollama 模型完成图书信息补全、分类推荐、标签生成和自然语言查询。
+项目目标是开发一套面向家庭场景的轻量级藏书管理系统，用来记录家庭藏书的分类、名称、作者、ISBN、出版社、购买信息、阅读状态、借阅状态和实际摆放位置。系统参考《中国图书馆分类法》建立简化分类体系，并结合网络检索与本地或远程 Ollama 模型完成图书信息补全、分类推荐、标签生成和自然语言查询。
 
 系统定位不是大型公共图书馆系统，而是家庭版图书馆管理工具，设计重点是：
 
@@ -23,7 +23,7 @@
 3. 精确记录书籍所在房间、书架、层数和具体位置。
 4. 支持用户登录、角色和基础权限控制。
 5. 支持 ISBN、书名、书名加作者联网检索书籍信息。
-6. 支持调用本地 Ollama 模型辅助生成分类、标签、摘要和重复判断。
+6. 支持调用本地或 Cloudflare Access 保护的远程 Ollama 模型辅助生成分类、标签、摘要和重复判断。
 7. 支持借阅、归还、阅读记录和笔记。
 8. 支持导入、导出、备份和恢复。
 9. 支持后续扩展移动端、扫码、二维码标签和自然语言搜索。
@@ -382,19 +382,19 @@ CSV 示例：
 - 简介摘要
 - 数据来源
 
-### 5.7 Ollama 本地模型集成
+### 5.7 Ollama 本地或远程模型集成
 
-后端通过 HTTP 调用本地 Ollama：
+后端通过统一异步客户端调用本地或远程 Ollama；Cloudflare Access 凭据仅保存在服务器环境，并且只向严格同源的受信任地址发送：
 
 ```text
-POST http://localhost:11434/api/chat
-POST http://localhost:11434/api/generate
-GET  http://localhost:11434/api/tags
+POST {OLLAMA_BASE_URL}/api/chat
+POST {OLLAMA_BASE_URL}/api/generate
+GET  {OLLAMA_BASE_URL}/api/tags
 ```
 
 推荐模型：
 
-- `qwen2.5`
+- `qwen3.5:4b`
 - `qwen3`
 - `llama3.1`
 - `gemma`
@@ -402,6 +402,8 @@ GET  http://localhost:11434/api/tags
 - `mistral`
 
 中文书籍分类优先推荐 Qwen 系列。
+
+默认关闭 AI，当前远程默认地址为 `https://openclaw.lsgood.cn`；`ollama.lsgood.cn` 不是当前默认地址。连接、读取超时分别为 20 秒和 180 秒，TLS 校验默认开启。设置页显示脱敏运行状态，管理员可执行普通连接测试，生成测试必须二次确认。Access、Tunnel、超时、模型和响应格式错误使用稳定中文分类；所有 AI 故障均不得阻断非 AI 核心功能。
 
 Ollama 任务：
 
@@ -812,6 +814,8 @@ POST /api/search/import-result
 ### AI
 
 ```text
+GET  /api/ai/health?refresh=false
+POST /api/ai/test-connection
 POST /api/ai/classify-book
 POST /api/ai/generate-tags
 POST /api/ai/summarize-book
@@ -912,7 +916,7 @@ title, author, publisher, category, tags, location, read_status, status, publish
 前端：Vite build 后静态文件
 后端：FastAPI
 数据库：SQLite
-Ollama：本机运行
+Ollama：本机、局域网或远程服务
 ```
 
 ### 家庭 NAS 部署
@@ -922,7 +926,7 @@ Docker Compose
 Nginx
 FastAPI
 PostgreSQL
-Ollama，可单独部署
+Ollama，可单独部署或通过 Cloudflare Access 安全访问
 ```
 
 建议 Docker Compose 服务：
@@ -997,6 +1001,7 @@ nginx
 - 多模型配置
 - 日志查看
 - 数据迁移工具
+- GitHub Release 在后端 pytest、前端测试/类型检查/构建全部通过后自动生成前后端 multi-arch 镜像和部署资产
 
 ## 14. MVP 范围建议
 

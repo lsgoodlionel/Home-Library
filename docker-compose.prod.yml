@@ -30,7 +30,14 @@ services:
       DATABASE_URL: sqlite:////data/home_library.sqlite3
       UPLOAD_DIR: /uploads
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
-      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_ENABLED: ${OLLAMA_ENABLED:-false}
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-https://openclaw.lsgood.cn}
+      OLLAMA_DEFAULT_MODEL: ${OLLAMA_DEFAULT_MODEL:-qwen3.5:4b}
+      OLLAMA_CONNECT_TIMEOUT_SECONDS: ${OLLAMA_CONNECT_TIMEOUT_SECONDS:-20}
+      OLLAMA_READ_TIMEOUT_SECONDS: ${OLLAMA_READ_TIMEOUT_SECONDS:-180}
+      OLLAMA_VERIFY_TLS: ${OLLAMA_VERIFY_TLS:-true}
+      OLLAMA_CF_ACCESS_CLIENT_ID: ${OLLAMA_CF_ACCESS_CLIENT_ID:-}
+      OLLAMA_CF_ACCESS_CLIENT_SECRET: ${OLLAMA_CF_ACCESS_CLIENT_SECRET:-}
     volumes:
       - db_data:/data
       - uploads:/uploads

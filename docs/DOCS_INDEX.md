@@ -5,6 +5,8 @@
 | 文档 | 说明 |
 |---|---|
 | [home-library-web-app-plan.md](home-library-web-app-plan.md) | 完整产品方案：功能模块、角色权限、数据库设计、API 设计、Ollama Prompt、部署方案、开发阶段 |
+| [Ollama Cloudflare Access 设计](superpowers/specs/2026-10-20-ollama-cloudflare-access-design.md) | 本地/远程 Ollama、安全边界、错误分类、健康检查和降级设计 |
+| [Ollama Cloudflare Access 实施计划](superpowers/plans/2026-10-20-ollama-cloudflare-access.md) | 后端、前端、部署和 GitHub Release 自动化的分阶段实施与验证计划 |
 
 ## 开发规范与契约
 

@@ -50,7 +50,14 @@
 | `NOT_FOUND` | 资源不存在 |
 | `CONFLICT` | 资源冲突 |
 | `EXTERNAL_SERVICE_ERROR` | 外部服务错误 |
-| `AI_SERVICE_UNAVAILABLE` | Ollama 不可用 |
+| `AI_SERVICE_DISABLED` | AI 服务未启用 |
+| `AI_ACCESS_DENIED` | Cloudflare Access 凭据缺失、无效或策略拒绝 |
+| `AI_TUNNEL_UNAVAILABLE` | Cloudflare Tunnel 或远程 Origin 不可用 |
+| `AI_CONNECT_TIMEOUT` | 连接 AI 服务超时 |
+| `AI_RESPONSE_TIMEOUT` | 模型启动或生成超时 |
+| `AI_MODEL_ERROR` | 模型配置或请求参数错误 |
+| `AI_UPSTREAM_ERROR` | 上游 AI 服务异常 |
+| `AI_RESPONSE_INVALID` | 模型响应无法安全解析 |
 | `INTERNAL_ERROR` | 服务内部错误 |
 
 ## 3. 数据字典
@@ -493,6 +500,24 @@ import
 
 返回 Ollama 可用模型列表。
 
+### GET /api/ai/health
+
+权限：登录用户。默认 `refresh=false` 只读取进程内最近一次脱敏状态；`refresh=true` 会依次检查 Ollama `version`、已安装模型和运行中模型。响应只包含状态、中文消息、检查时间、版本、模型数量和脱敏 runtime，不包含 Access 凭据。
+
+### POST /api/ai/test-connection
+
+权限：管理员。
+
+```json
+{
+  "generate": false
+}
+```
+
+默认只检查只读端点。只有严格 JSON 布尔值 `true` 才执行最小生成测试，并使用 `keep_alive=0`；前端操作前需要二次确认。
+
+AI 错误使用上表稳定代码和中文消息，不返回 Prompt、图书全文、请求头、上游响应正文或凭据。AI 服务关闭、Access/Tunnel 故障或超时时，登录、藏书、检索、借阅、阅读、统计和备份接口仍保持可用。
+
 ### POST /api/ai/classify-book
 
 请求：
@@ -503,7 +528,7 @@ import
   "author": "费孝通",
   "publisher": "三联书店",
   "summary": "",
-  "model": "qwen2.5"
+  "model": "qwen3.5:4b"
 }
 ```
 
@@ -516,7 +541,7 @@ import
   "confidence": 0.86,
   "tags": ["社会学", "中国乡村", "经典著作"],
   "reason": "该书主要讨论乡村社会结构与社会关系。",
-  "model": "qwen2.5"
+  "model": "qwen3.5:4b"
 }
 ```
 

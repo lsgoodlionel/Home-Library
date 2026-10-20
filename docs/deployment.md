@@ -8,7 +8,7 @@
 
 - Docker Engine 24+
 - Docker Compose v2
-- 可选：本机或容器内 Ollama
+- 可选：本机、容器内或 Cloudflare Access 保护的远程 Ollama
 
 ```bash
 cp .env.example .env
@@ -61,10 +61,15 @@ DATABASE_URL=sqlite:////data/home_library.sqlite3
 | `CORS_ORIGINS` | `http://localhost` | 允许访问的前端地址 |
 | `INITIAL_ADMIN_USERNAME` | `admin` | 首次初始化管理员 |
 | `INITIAL_ADMIN_PASSWORD` | `change-me` | 首次初始化管理员密码 |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | 本地开发 Ollama 地址 |
-| `DOCKER_OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Docker Compose 中后端容器访问 Ollama 的地址 |
-| `OLLAMA_DEFAULT_MODEL` | `qwen2.5` | 默认模型 |
-| `OLLAMA_TIMEOUT_SECONDS` | `60` | AI 请求超时秒数 |
+| `OLLAMA_ENABLED` | `false` | AI 总开关，关闭时不发出 Ollama 请求 |
+| `OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | 后端直接运行时的本地或远程地址 |
+| `DOCKER_OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | Compose 后端容器实际使用的地址 |
+| `OLLAMA_DEFAULT_MODEL` | `qwen3.5:4b` | 默认模型 |
+| `OLLAMA_CONNECT_TIMEOUT_SECONDS` | `20` | 建立连接超时秒数 |
+| `OLLAMA_READ_TIMEOUT_SECONDS` | `180` | 模型读取/生成超时秒数 |
+| `OLLAMA_VERIFY_TLS` | `true` | 验证 HTTPS 证书 |
+| `OLLAMA_CF_ACCESS_CLIENT_ID` | 空 | Access 服务令牌 ID，仅服务器环境 |
+| `OLLAMA_CF_ACCESS_CLIENT_SECRET` | 空 | Access 服务令牌 Secret，仅服务器环境 |
 | `OLLAMA_OPTIONAL` | `true` | Ollama 不可用时是否降级 |
 | `POSTGRES_DB` | `home_library` | PostgreSQL 可选 profile 数据库名 |
 | `POSTGRES_USER` | `home_library` | PostgreSQL 用户 |
@@ -132,6 +137,31 @@ docker compose up -d
 
 ## Ollama
 
+### 使用 Cloudflare Access 远程 Ollama
+
+当前默认远程地址是 `https://openclaw.lsgood.cn`，`ollama.lsgood.cn` 当前会被 Access 拒绝，不能作为默认地址。生产服务器 `.env` 示例：
+
+```env
+OLLAMA_ENABLED=true
+DOCKER_OLLAMA_BASE_URL=https://openclaw.lsgood.cn
+OLLAMA_DEFAULT_MODEL=qwen3.5:4b
+OLLAMA_CONNECT_TIMEOUT_SECONDS=20
+OLLAMA_READ_TIMEOUT_SECONDS=180
+OLLAMA_VERIFY_TLS=true
+OLLAMA_CF_ACCESS_CLIENT_ID=
+OLLAMA_CF_ACCESS_CLIENT_SECRET=
+```
+
+两项 Access 凭据必须同时由服务器秘密管理填入，不得写入仓库、前端 `VITE_*`、镜像 build args 或运维日志。后端只在请求 origin 与服务器受信任 URL 完全一致时附加 Access headers。
+
+确认环境中已经安全注入两项凭据后，可执行只读 smoke；脚本不会调用生成接口，也不会打印凭据或响应正文：
+
+```bash
+bash scripts/ollama-cloudflare-smoke-test.sh
+```
+
+管理员还可以在“设置 > AI 模型配置”执行连接测试。普通测试只读；生成测试需要前端二次确认。AI 故障只影响 AI 推荐，核心图书功能继续可用。
+
 ### 使用宿主机 Ollama
 
 macOS / Windows Docker Desktop 可使用：
@@ -146,13 +176,14 @@ Linux 服务器可改为宿主机网关 IP，或使用 Compose 内置 profile。
 
 ```bash
 docker compose --profile ollama up -d
-docker compose exec ollama ollama pull qwen2.5
+docker compose exec ollama ollama pull qwen3.5:4b
 ```
 
 同时将 `.env` 调整为：
 
 ```env
 DOCKER_OLLAMA_BASE_URL=http://ollama:11434
+OLLAMA_ENABLED=true
 ```
 
 ### GPU 加速
@@ -234,7 +265,8 @@ CORS_ORIGINS=http://localhost,http://你的域名
 AI 接口在 Nginx 中已设置 120 秒超时。仍超时时可调大：
 
 ```env
-OLLAMA_TIMEOUT_SECONDS=120
+OLLAMA_CONNECT_TIMEOUT_SECONDS=20
+OLLAMA_READ_TIMEOUT_SECONDS=240
 ```
 
 并确认模型已下载：

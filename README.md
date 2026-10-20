@@ -1,6 +1,6 @@
 # Home Library — 家藏书库
 
-面向家庭场景的轻量级藏书管理系统。记录藏书信息、精确定位书架位置、支持网络检索补全、通过本地 Ollama 模型辅助分类与标签生成。
+面向家庭场景的轻量级藏书管理系统。记录藏书信息、精确定位书架位置、支持网络检索补全，并通过本地或远程 Ollama 模型辅助分类与标签生成。
 
 ## 功能概览
 
@@ -9,7 +9,7 @@
 - ✅ 四层位置管理：房间 / 书架 / 层数 / 具体位置
 - ✅ 用户登录与角色权限（管理员 / 普通用户 / 访客）
 - ✅ 接入 Open Library、Google Books 等外部数据源
-- ✅ 调用本地 Ollama 模型完成分类推荐、标签生成、摘要整理、重复检测、自然语言解析
+- ✅ 调用本地或 Cloudflare Access 保护的远程 Ollama 完成分类推荐、标签生成、摘要整理、重复检测、自然语言解析
 - ✅ 借阅管理、归还记录、阅读状态与阅读笔记
 - ✅ CSV / Excel / JSON 导入导出，含导入预览、字段映射和错误报告
 - ✅ 首页仪表盘、统计分析页和轻量图表
@@ -23,7 +23,7 @@
 | 后端 | FastAPI + SQLAlchemy + Pydantic |
 | 数据库 | SQLite（MVP），可切换 PostgreSQL |
 | 认证 | JWT Bearer Token |
-| AI | Ollama HTTP API（本地模型） |
+| AI | Ollama HTTP API（本地或远程模型，支持 Cloudflare Access） |
 | 搜索 | SQLite FTS5，后续可扩展向量检索 |
 | 部署 | Docker Compose |
 
@@ -219,12 +219,26 @@ npm run dev
 
 默认访问 `http://localhost:5173`
 
-### 4. 启动 Ollama（可选）
+### 4. 配置 Ollama（可选）
+
+默认 AI 开关关闭，不影响登录、藏书、借阅、统计、备份等核心功能。本地开发可启动 Ollama：
 
 ```bash
 ollama serve
-ollama pull qwen2.5   # 推荐中文模型
+ollama pull qwen3.5:4b
 ```
+
+然后在 `.env` 设置 `OLLAMA_ENABLED=true` 和 `OLLAMA_BASE_URL=http://127.0.0.1:11434`。Docker 访问宿主机或 Compose profile 时改用 `DOCKER_OLLAMA_BASE_URL`。
+
+远程模式当前默认地址为 `https://openclaw.lsgood.cn`。Cloudflare Access 的 Client ID/Secret 只允许写入服务器环境变量，禁止放入 `VITE_*`、前端设置或仓库；`ollama.lsgood.cn` 当前不可作为默认地址。管理员可在“设置 > AI 模型配置”检查连接，生成测试需要再次确认。
+
+只读远程连通性验证（仅访问 version/tags/ps，不触发生成）：
+
+```bash
+bash scripts/ollama-cloudflare-smoke-test.sh
+```
+
+GitHub 的 `Build & Release` workflow 会先运行后端 pytest、前端 Vitest、类型检查和生产构建；全部通过后才构建并推送前后端 multi-arch GHCR 镜像，`v*` 标签还会在两个镜像成功后创建带部署资产的 Release。
 
 ## 测试与质量
 
@@ -240,15 +254,17 @@ npm run test
 npm run test:e2e
 ```
 
-当前收尾验证结果：
+当前分支验证结果：
 
 | 检查项 | 结果 |
 |---|---|
-| 后端全量测试 | `145 passed, 1 warning` |
+| 后端全量测试 | `281 passed, 3 failed`；3 项为既有借阅固定日期、分类汇总语义和动态版本断言，当前会阻止 Release |
 | 前端类型检查 | 通过 |
 | 前端构建 | 通过，仅 Vite chunk size warning |
-| Vitest | `1 passed / 3 tests passed` |
-| Playwright E2E | `3 passed` |
+| Vitest | `5 files / 37 tests passed` |
+| Docker 隔离流程 | 健康、登录、图书列表、AI 配置脱敏、权限和 AI 关闭降级通过 |
+
+Release workflow 不会忽略上述后端失败；修复这 3 项基线后，main/tag 才能自动发布镜像，`v*` 标签才会创建 Release。
 
 ## 环境变量
 
