@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.models import AITask, Book
 from app.models.user import User
-from app.schemas.ai import AIHealthResponse
 from app.services.ai_setting_service import (
     OllamaRuntimeConfig,
     get_effective_ai_settings,
@@ -91,10 +90,9 @@ def enabled_ollama_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def reset_ai_health_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "app.api.routes.ai._last_health_status",
-        AIHealthResponse(),
-    )
+    from app.api.routes import ai as ai_routes
+
+    ai_routes._health_cache.clear()
 
 
 def _generate_response(payload: dict) -> dict:
@@ -197,6 +195,145 @@ def test_ai_health_requires_login(client: TestClient) -> None:
     response = client.get("/api/ai/health")
 
     assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("get", "/api/ai/models", None),
+        ("post", "/api/ai/classify-book", {"title": "乡土中国"}),
+        ("post", "/api/ai/generate-tags", {"title": "乡土中国"}),
+        (
+            "post",
+            "/api/ai/recommend-book-content",
+            {"current": {"title": "乡土中国"}, "candidates": [], "missing_fields": []},
+        ),
+        ("post", "/api/ai/summarize-book", {"title": "乡土中国"}),
+        (
+            "post",
+            "/api/ai/detect-duplicate",
+            {"first": {"title": "乡土中国"}, "second": {"title": "乡土中国"}},
+        ),
+        ("post", "/api/ai/natural-search", {"query": "乡土社会"}),
+    ],
+)
+def test_ai_business_routes_require_login(
+    client: TestClient,
+    method: str,
+    path: str,
+    payload: dict | None,
+) -> None:
+    response = client.request(method, path, json=payload)
+
+    assert response.status_code == 401
+
+
+def test_ai_health_cache_isolated_by_account(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    member_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    enabled_ollama_runtime: None,
+) -> None:
+    del enabled_ollama_runtime
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "0.6.2"})
+        return httpx.Response(200, json={"models": []})
+
+    _mock_async_ollama(monkeypatch, handler)
+
+    refreshed = client.get("/api/ai/health?refresh=true", headers=admin_headers)
+    other_account = client.get("/api/ai/health", headers=member_headers)
+
+    assert refreshed.status_code == 200
+    assert refreshed.json()["status"] == "healthy"
+    assert other_account.status_code == 200
+    assert other_account.json()["status"] == "unchecked"
+
+
+def test_ai_health_cache_matches_runtime_with_base_path(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    enabled_ollama_runtime: None,
+) -> None:
+    del enabled_ollama_runtime
+    configured = client.put(
+        "/api/ai/config",
+        headers=admin_headers,
+        json={
+            "active_provider": "ollama",
+            "default_model": "path-model",
+            "providers": [
+                {
+                    "provider": "ollama",
+                    "enabled": True,
+                    "base_url": "https://ollama.example.test/team-a/ollama",
+                    "default_model": "path-model",
+                }
+            ],
+        },
+    )
+    assert configured.status_code == 200
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path.endswith("/api/version"):
+            return httpx.Response(200, json={"version": "0.6.2"})
+        return httpx.Response(200, json={"models": []})
+
+    _mock_async_ollama(monkeypatch, handler)
+
+    refreshed = client.get("/api/ai/health?refresh=true", headers=admin_headers)
+    cached = client.get("/api/ai/health", headers=admin_headers)
+
+    assert refreshed.status_code == 200
+    assert refreshed.json()["ollama_runtime"]["base_url"] == (
+        "https://ollama.example.test/team-a/ollama"
+    )
+    assert cached.json() == refreshed.json()
+    assert requested_paths == [
+        "/team-a/ollama/api/version",
+        "/team-a/ollama/api/tags",
+        "/team-a/ollama/api/ps",
+    ]
+
+
+def test_ai_settings_save_invalidates_current_user_health_cache(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    enabled_ollama_runtime: None,
+) -> None:
+    del enabled_ollama_runtime
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "0.6.2"})
+        return httpx.Response(200, json={"models": []})
+
+    _mock_async_ollama(monkeypatch, handler)
+    refreshed = client.get("/api/ai/health?refresh=true", headers=admin_headers)
+    assert refreshed.status_code == 200
+
+    current = client.get("/api/ai/config", headers=admin_headers).json()
+    saved = client.put(
+        "/api/ai/config",
+        headers=admin_headers,
+        json={
+            "active_provider": current["active_provider"],
+            "default_model": current["default_model"],
+            "providers": current["providers"],
+        },
+    )
+    cached = client.get("/api/ai/health", headers=admin_headers)
+
+    assert saved.status_code == 200
+    assert cached.status_code == 200
+    assert cached.json()["status"] == "unchecked"
 
 
 def test_member_cannot_run_ai_connection_test(
@@ -417,7 +554,7 @@ def test_health_failure_returns_chinese_classified_error_without_secret(
     secret_marker = "access-secret-route-marker"
     _clear_ollama_environment(monkeypatch)
     monkeypatch.setenv("OLLAMA_ENABLED", "true")
-    monkeypatch.setenv("OLLAMA_BASE_URL", f"https://ollama.example.test/path?token={secret_marker}")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "https://ollama.example.test/path")
     monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_ID", "client-id-route-marker")
     monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_SECRET", secret_marker)
     get_settings.cache_clear()
@@ -556,14 +693,18 @@ def test_legacy_timeout_is_read_timeout_fallback(monkeypatch: pytest.MonkeyPatch
     assert settings.ollama_read_timeout_seconds == 75.0
 
 
-def test_models_reads_ollama_tags(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_models_reads_ollama_tags(
+    client: TestClient,
+    member_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/tags"
         return httpx.Response(200, json={"models": [{"name": "qwen2.5", "size": 123}]})
 
     _mock_ollama(monkeypatch, handler)
 
-    response = client.get("/api/ai/models")
+    response = client.get("/api/ai/models", headers=member_headers)
 
     assert response.status_code == 200
     assert response.json()["models"][0]["name"] == "qwen2.5"
@@ -627,6 +768,8 @@ def test_ai_config_is_persisted_per_account(client: TestClient, admin_headers: d
         "localhost:11434",
         "http:///missing-host",
         "https://ollama.example.com@evil.example",
+        "https://ollama.example.com/path?token=secret",
+        "https://ollama.example.com/path#fragment",
     ],
 )
 def test_ai_config_rejects_invalid_or_unsupported_base_url(
@@ -878,6 +1021,7 @@ def test_ai_business_routes_use_account_runtime_and_default_model(
 def test_ai_task_input_truncates_long_summary_and_never_stores_headers(
     client: TestClient,
     db: Session,
+    member_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
@@ -897,6 +1041,7 @@ def test_ai_task_input_truncates_long_summary_and_never_stores_headers(
     secret = "must-never-be-audited"
     response = client.post(
         "/api/ai/recommend-book-content",
+        headers=member_headers,
         json={
             "current": {"title": "资本论", "summary": "长" * 5000},
             "candidates": [
@@ -1057,6 +1202,36 @@ def test_ai_task_persists_exact_16384_byte_compact_boundary(db: Session) -> None
     assert json.loads(persisted) == payload
 
 
+def test_success_ai_task_output_is_strict_json_bounded_to_64_kib(db: Session) -> None:
+    task = create_ai_task(
+        db,
+        task_type="bounded-output",
+        model="qwen3:8b",
+        input_data={"title": "资本论"},
+        output_data={
+            "summary": "中" * 100_000,
+            "confidence": math.nan,
+            "reason": "孤立代理:\ud800",
+        },
+        status="success",
+    )
+
+    persisted = db.query(AITask).filter(AITask.id == task.id).one().output_data
+    assert persisted is not None
+    assert len(persisted.encode("utf-8")) <= 65_536
+    decoded = json.loads(
+        persisted,
+        parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+    )
+    assert json.dumps(
+        decoded,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ) == persisted
+    assert "\ud800" not in persisted
+
+
 @pytest.mark.parametrize(
     "invalid_base_url",
     [
@@ -1069,6 +1244,7 @@ def test_ai_task_persists_exact_16384_byte_compact_boundary(db: Session) -> None
 def test_invalid_runtime_is_audited_and_returns_stable_ai_error(
     client: TestClient,
     db: Session,
+    member_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
     invalid_base_url: str,
 ) -> None:
@@ -1088,7 +1264,7 @@ def test_invalid_runtime_is_audited_and_returns_stable_ai_error(
         lambda db, user: invalid_runtime,
     )
 
-    response = client.get("/api/ai/models")
+    response = client.get("/api/ai/models", headers=member_headers)
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "AI_MODEL_ERROR"
@@ -1101,6 +1277,7 @@ def test_invalid_runtime_is_audited_and_returns_stable_ai_error(
 
 def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
     client: TestClient,
+    member_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.api.routes import ai as ai_routes
@@ -1142,7 +1319,11 @@ def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
     monkeypatch.setattr(ai_routes, "create_ai_task", track_sync(original_create_task))
     monkeypatch.setattr(ai_routes, "OllamaClient", ThreadTrackingClient)
 
-    response = client.post("/api/ai/classify-book", json={"title": "乡土中国"})
+    response = client.post(
+        "/api/ai/classify-book",
+        headers=member_headers,
+        json={"title": "乡土中国"},
+    )
 
     assert response.status_code == 200
     assert event_loop_threads
@@ -1153,6 +1334,7 @@ def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
 def test_ai_failure_does_not_modify_book_or_block_non_ai_health(
     client: TestClient,
     db: Session,
+    member_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     book = Book(title="资本论", author="马克思", summary="原始简介")
@@ -1167,6 +1349,7 @@ def test_ai_failure_does_not_modify_book_or_block_non_ai_health(
     _mock_ollama(monkeypatch, handler)
     response = client.post(
         "/api/ai/classify-book",
+        headers=member_headers,
         json={"title": book.title, "author": book.author, "summary": book.summary},
     )
 
@@ -1183,6 +1366,7 @@ def test_ai_failure_does_not_modify_book_or_block_non_ai_health(
 def test_classify_book_accepts_valid_model_json(
     client: TestClient,
     db: Session,
+    member_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1202,7 +1386,11 @@ def test_classify_book_accepts_valid_model_json(
 
     _mock_ollama(monkeypatch, handler)
 
-    response = client.post("/api/ai/classify-book", json=_classify_payload())
+    response = client.post(
+        "/api/ai/classify-book",
+        headers=member_headers,
+        json=_classify_payload(),
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -1218,6 +1406,7 @@ def test_classify_book_accepts_valid_model_json(
 def test_classify_book_rejects_invalid_model_json(
     client: TestClient,
     db: Session,
+    member_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
@@ -1225,7 +1414,11 @@ def test_classify_book_rejects_invalid_model_json(
 
     _mock_ollama(monkeypatch, handler)
 
-    response = client.post("/api/ai/classify-book", json=_classify_payload())
+    response = client.post(
+        "/api/ai/classify-book",
+        headers=member_headers,
+        json=_classify_payload(),
+    )
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "AI_RESPONSE_INVALID"
@@ -1238,6 +1431,7 @@ def test_classify_book_rejects_invalid_model_json(
 def test_ollama_unavailable_returns_clear_error(
     client: TestClient,
     db: Session,
+    member_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1245,7 +1439,7 @@ def test_ollama_unavailable_returns_clear_error(
 
     _mock_ollama(monkeypatch, handler)
 
-    response = client.get("/api/ai/models")
+    response = client.get("/api/ai/models", headers=member_headers)
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "AI_UPSTREAM_ERROR"
@@ -1255,7 +1449,12 @@ def test_ollama_unavailable_returns_clear_error(
     assert task.status == "failed"
 
 
-def test_generate_tags_records_success(client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generate_tags_records_success(
+    client: TestClient,
+    db: Session,
+    member_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -1266,6 +1465,7 @@ def test_generate_tags_records_success(client: TestClient, db: Session, monkeypa
 
     response = client.post(
         "/api/ai/generate-tags",
+        headers=member_headers,
         json={"title": "乡土中国", "summary": "社会学经典", "model": "qwen2.5"},
     )
 
@@ -1277,6 +1477,7 @@ def test_generate_tags_records_success(client: TestClient, db: Session, monkeypa
 def test_recommend_book_content_records_success(
     client: TestClient,
     db: Session,
+    member_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
@@ -1300,6 +1501,7 @@ def test_recommend_book_content_records_success(
 
     response = client.post(
         "/api/ai/recommend-book-content",
+        headers=member_headers,
         json={
             "current": {"title": "资本论", "author": "马克思"},
             "candidates": [
@@ -1328,6 +1530,7 @@ def test_recommend_book_content_records_success(
 def test_natural_search_records_failure_on_schema_error(
     client: TestClient,
     db: Session,
+    member_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
@@ -1335,7 +1538,11 @@ def test_natural_search_records_failure_on_schema_error(
 
     _mock_ollama(monkeypatch, handler)
 
-    response = client.post("/api/ai/natural-search", json={"query": "找 2010 年前后的书"})
+    response = client.post(
+        "/api/ai/natural-search",
+        headers=member_headers,
+        json={"query": "找 2010 年前后的书"},
+    )
 
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "AI_RESPONSE_INVALID"

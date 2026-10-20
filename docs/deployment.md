@@ -272,7 +272,10 @@ CORS_ORIGINS=http://localhost,http://你的域名
 
 ### Ollama 超时
 
-AI 接口在 Nginx 中已设置 120 秒超时。仍超时时可调大：
+AI 生成请求的浏览器与 Nginx 上限均为 300 秒。后端
+`OLLAMA_READ_TIMEOUT_SECONDS` 必须小于 300 秒，以便后端先返回稳定的
+`AI_RESPONSE_TIMEOUT` 错误，避免被代理提前中断；默认值 180 秒满足此约束。
+需要调整时应保持该关系，例如：
 
 ```env
 OLLAMA_CONNECT_TIMEOUT_SECONDS=20

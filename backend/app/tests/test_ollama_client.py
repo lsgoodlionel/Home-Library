@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import FrameType, TracebackType
 from typing import Any
 
 import httpx
@@ -76,11 +77,24 @@ def _assert_sensitive_exception_state_unreachable(
 
         if isinstance(value, BaseException):
             pending.extend(value.args)
-            pending.extend([value.__cause__, value.__context__])
+            pending.extend([value.__cause__, value.__context__, value.__traceback__])
+        if isinstance(value, TracebackType):
+            pending.extend([value.tb_frame, value.tb_next])
+            continue
+        if isinstance(value, FrameType):
+            if "/app/services/" in value.f_code.co_filename:
+                pending.append(value.f_locals)
+            continue
         if isinstance(value, httpx.Request):
             pending.extend([str(value.url), dict(value.headers), value.content])
         if isinstance(value, httpx.Response):
             pending.extend([value.request, dict(value.headers), value.content])
+
+        if not isinstance(value, (type, FrameType, TracebackType)):
+            try:
+                pending.append(vars(value))
+            except TypeError:
+                pass
 
         for attribute in ("request", "response", "input", "doc"):
             try:
@@ -236,7 +250,6 @@ def test_async_client_invalid_url_is_defensively_mapped_to_model_error(
     "base_url",
     [
         "https://sub.ollama.example.com",
-        "https://evil.example?next=https://ollama.example.com",
     ],
 )
 def test_userinfo_subdomain_and_query_cannot_spoof_trusted_origin(base_url: str) -> None:
@@ -248,6 +261,19 @@ def test_userinfo_subdomain_and_query_cannot_spoof_trusted_origin(base_url: str)
     client = OllamaClient(_runtime(base_url=base_url), transport=httpx.MockTransport(handler))
 
     _run(client.version())
+
+
+def test_query_base_url_is_rejected_before_sending_access_headers() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("query-bearing URL sent an upstream request")
+
+    client = OllamaClient(
+        _runtime(base_url="https://evil.example?next=https://ollama.example.com"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(OllamaModelError):
+        _run(client.version())
 
 
 @pytest.mark.parametrize(
@@ -592,7 +618,7 @@ def test_propagated_ollama_errors_drop_sensitive_exception_state() -> None:
         raise httpx.ConnectError("connection failed", request=request)
 
     connect_client = OllamaClient(runtime, transport=httpx.MockTransport(connect_failure))
-    with pytest.raises(OllamaUpstreamError) as connect_caught:
+    with pytest.raises(OllamaModelError) as connect_caught:
         _run(
             connect_client.generate_json(
                 prompt=prompt_marker,
@@ -614,6 +640,17 @@ def test_propagated_ollama_errors_drop_sensitive_exception_state() -> None:
             {"response": json.dumps({"unexpected": response_marker})}
         ).encode(),
     ]
+    response_runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url="https://ollama.example.com",
+        trusted_base_url="https://ollama.example.com",
+        default_model="qwen3:8b",
+        connect_timeout_seconds=2.5,
+        read_timeout_seconds=30.0,
+        verify_tls=True,
+        access_client_id="client-id",
+        access_client_secret=secret_marker,
+    )
     for response_body in invalid_responses:
         def invalid_response(
             request: httpx.Request,
@@ -622,7 +659,7 @@ def test_propagated_ollama_errors_drop_sensitive_exception_state() -> None:
             return httpx.Response(200, content=body)
 
         response_client = OllamaClient(
-            runtime,
+            response_runtime,
             transport=httpx.MockTransport(invalid_response),
         )
         with pytest.raises(OllamaResponseInvalidError) as response_caught:

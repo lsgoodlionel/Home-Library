@@ -496,13 +496,22 @@ import
 
 ## 10. AI 接口
 
+除管理员专用的连接测试外，本节所有 AI 接口均要求登录；匿名请求统一返回
+HTTP 401。AI 任务审计按当前账号记录，成功输出使用严格标准 JSON，并限制为
+UTF-8 编码最大 64 KiB。
+
 ### GET /api/ai/models
 
 返回 Ollama 可用模型列表。
 
 ### GET /api/ai/health
 
-权限：登录用户。默认 `refresh=false` 只读取进程内最近一次脱敏状态；`refresh=true` 会依次检查 Ollama `version`、已安装模型和运行中模型。响应只包含状态、中文消息、检查时间、版本、模型数量和脱敏 runtime，不包含 Access 凭据。
+权限：登录用户。默认 `refresh=false` 只读取当前账号且 runtime fingerprint
+一致的进程内脱敏状态；没有匹配缓存时返回“尚未检查”。`refresh=true` 会依次检查
+Ollama `version`、已安装模型和运行中模型。保存该账号的 AI 设置会立即失效其健康
+缓存。响应只包含状态、中文消息、检查时间、版本、模型数量和脱敏 runtime，不包含
+Access 凭据。带 path 的 Ollama Base URL 会原样参与请求与缓存匹配；Base URL 不接受
+query 或 fragment。
 
 ### POST /api/ai/test-connection
 

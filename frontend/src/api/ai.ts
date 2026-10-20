@@ -257,7 +257,7 @@ export async function summarizeBook(req: SummarizeBookRequest): Promise<Summariz
     title: req.title,
     author: req.author,
     publisher: req.publisher,
-    summary: req.summary,
+    raw_summary: req.summary,
     model: req.model,
   }, {
     timeout: API_TIMEOUTS.aiGeneration,
@@ -267,8 +267,8 @@ export async function summarizeBook(req: SummarizeBookRequest): Promise<Summariz
 
 export async function detectDuplicate(req: DetectDuplicateRequest): Promise<DetectDuplicateResponse> {
   const { data } = await apiClient.post<ApiDetectDuplicateResponse>('/ai/detect-duplicate', {
-    book_a: req.bookA,
-    book_b: req.bookB,
+    first: req.bookA,
+    second: req.bookB,
     model: req.model,
   }, {
     timeout: API_TIMEOUTS.aiGeneration,

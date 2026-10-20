@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
@@ -12,7 +14,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.errors import ApiError
 from app.core.ollama_url import InvalidOllamaBaseURL, normalize_ollama_base_url
-from app.core.security import get_current_user, get_optional_current_user, require_admin
+from app.core.security import get_current_user, require_admin
 from app.db.session import get_db
 from app.models import Category
 from app.models.user import User
@@ -56,7 +58,8 @@ from app.services.ollama_client import (
 from app.services.ollama_service import load_prompt_template
 
 router = APIRouter(prefix="/ai", tags=["ai"])
-_last_health_status = AIHealthResponse()
+_health_cache: OrderedDict[tuple[int, str], AIHealthResponse] = OrderedDict()
+_MAX_HEALTH_CACHE_ENTRIES = 128
 _MAX_STATUS_TEXT_LENGTH = 256
 
 
@@ -124,6 +127,10 @@ def _ai_error_from_ollama(
     return ApiError("EXTERNAL_SERVICE_ERROR", "AI 服务调用失败", status_code=502)
 
 
+def _raise_api_error(error: ApiError) -> None:
+    raise error from None
+
+
 def _bounded_status_text(value: str | None) -> str | None:
     return value[:_MAX_STATUS_TEXT_LENGTH] if value else None
 
@@ -137,15 +144,11 @@ def _safe_hostname(url: str) -> str | None:
 
 def _safe_runtime_status(db: Session, user: User) -> Any:
     runtime = get_effective_ai_settings(db, user).ollama_runtime
-    hostname = _safe_hostname(runtime.base_url)
     safe_base_url = ""
-    if hostname:
-        try:
-            parsed = urlsplit(runtime.base_url)
-            port = f":{parsed.port}" if parsed.port is not None else ""
-            safe_base_url = f"{parsed.scheme}://{hostname}{port}"
-        except ValueError:
-            safe_base_url = ""
+    try:
+        safe_base_url = normalize_ollama_base_url(runtime.base_url).rstrip("/")
+    except (InvalidOllamaBaseURL, ValueError):
+        safe_base_url = ""
     return runtime.model_copy(
         update={
             "base_url": _bounded_status_text(safe_base_url) or "",
@@ -159,6 +162,46 @@ def _load_health_context(
     user: User,
 ) -> tuple[OllamaRuntimeConfig, Any]:
     return get_ollama_runtime_config(db, user), _safe_runtime_status(db, user)
+
+
+def _runtime_fingerprint(runtime: OllamaRuntimeConfig) -> str:
+    try:
+        base_url = normalize_ollama_base_url(runtime.base_url).rstrip("/")
+    except (InvalidOllamaBaseURL, ValueError):
+        base_url = "invalid"
+    payload = json.dumps(
+        {
+            "enabled": runtime.enabled,
+            "base_url": base_url,
+            "trusted_base_url": runtime.trusted_base_url,
+            "default_model": runtime.default_model,
+            "connect_timeout_seconds": runtime.connect_timeout_seconds,
+            "read_timeout_seconds": runtime.read_timeout_seconds,
+            "verify_tls": runtime.verify_tls,
+            "access_client_id": runtime.access_client_id,
+            "access_client_secret": runtime.access_client_secret,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _health_cache_key(user: User, runtime: OllamaRuntimeConfig) -> tuple[int, str]:
+    return user.id, _runtime_fingerprint(runtime)
+
+
+def _cache_health_status(key: tuple[int, str], status: AIHealthResponse) -> None:
+    _health_cache[key] = status
+    _health_cache.move_to_end(key)
+    while len(_health_cache) > _MAX_HEALTH_CACHE_ENTRIES:
+        _health_cache.popitem(last=False)
+
+
+def _invalidate_user_health_cache(user_id: int) -> None:
+    for key in [key for key in _health_cache if key[0] == user_id]:
+        del _health_cache[key]
 
 
 def _prepare_runtime_and_template(
@@ -186,10 +229,10 @@ async def _check_ollama(
     *,
     generate: bool,
 ) -> AIHealthResponse:
-    global _last_health_status
-
     runtime, safe_runtime = await run_in_threadpool(_load_health_context, db, user)
+    cache_key = _health_cache_key(user, runtime)
     client = OllamaClient(runtime)
+    api_error: ApiError | None = None
     try:
         version = await client.version()
         models = await client.list_models()
@@ -198,15 +241,22 @@ async def _check_ollama(
             await client.generate_text(prompt="请回复 OK", keep_alive=0)
     except OllamaClientError as exc:
         api_error = _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
-        _last_health_status = AIHealthResponse(
+        status = AIHealthResponse(
             status="error",
             message=_bounded_status_text(api_error.message) or "AI 服务检查失败",
             checked_at=datetime.now(timezone.utc),
             ollama_runtime=safe_runtime,
         )
-        raise api_error
+        _cache_health_status(cache_key, status)
+        exc.__traceback__ = None
+        exc.__cause__ = None
+        exc.__context__ = None
 
-    _last_health_status = AIHealthResponse(
+    if api_error is not None:
+        del client, runtime, safe_runtime, cache_key, db, user
+        _raise_api_error(api_error)
+
+    status = AIHealthResponse(
         status="healthy",
         message="AI 服务连接正常",
         checked_at=datetime.now(timezone.utc),
@@ -216,7 +266,8 @@ async def _check_ollama(
         generated=generate,
         ollama_runtime=safe_runtime,
     )
-    return _last_health_status
+    _cache_health_status(cache_key, status)
+    return status
 
 
 def _record_failure(
@@ -251,6 +302,7 @@ async def _run_json_task(
     created_by: int | None = None,
 ) -> BaseModel:
     client = OllamaClient(runtime)
+    api_error: ApiError | None = None
     try:
         result = await client.generate_json(prompt=prompt, response_model=response_model, model=model)
     except OllamaClientError as exc:
@@ -263,7 +315,14 @@ async def _run_json_task(
             exc=exc,
             created_by=created_by,
         )
-        raise _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
+        api_error = _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
+        exc.__traceback__ = None
+        exc.__cause__ = None
+        exc.__context__ = None
+
+    if api_error is not None:
+        del client, db, input_data, prompt, response_model, runtime
+        _raise_api_error(api_error)
 
     output_data = result.model_dump(mode="json")
     await run_in_threadpool(
@@ -286,7 +345,8 @@ async def get_ai_health(
     refresh: Annotated[bool, Query()] = False,
 ) -> AIHealthResponse:
     if not refresh:
-        return _last_health_status
+        runtime = await run_in_threadpool(get_ollama_runtime_config, db, current_user)
+        return _health_cache.get(_health_cache_key(current_user, runtime), AIHealthResponse())
     return await _check_ollama(db, current_user, generate=False)
 
 
@@ -313,17 +373,20 @@ def update_ai_config(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AISettingsResponse:
-    return update_user_ai_settings(db, current_user, payload)
+    response = update_user_ai_settings(db, current_user, payload)
+    _invalidate_user_health_cache(current_user.id)
+    return response
 
 
 @router.get("/models", response_model=OllamaModelsResponse)
 async def list_models(
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User | None, Depends(get_optional_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> OllamaModelsResponse:
     runtime = await run_in_threadpool(get_ollama_runtime_config, db, current_user)
     input_data = {"hostname": _safe_hostname(runtime.base_url)}
     client = OllamaClient(runtime)
+    api_error: ApiError | None = None
     try:
         result = await client.list_models()
     except OllamaClientError as exc:
@@ -334,9 +397,16 @@ async def list_models(
             model=None,
             input_data=input_data,
             exc=exc,
-            created_by=current_user.id if current_user else None,
+            created_by=current_user.id,
         )
-        raise _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
+        api_error = _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
+        exc.__traceback__ = None
+        exc.__cause__ = None
+        exc.__context__ = None
+
+    if api_error is not None:
+        del client, runtime, input_data, db, current_user
+        _raise_api_error(api_error)
 
     await run_in_threadpool(
         create_ai_task,
@@ -346,7 +416,7 @@ async def list_models(
         input_data=input_data,
         output_data=result.model_dump(mode="json"),
         status="success",
-        created_by=current_user.id if current_user else None,
+        created_by=current_user.id,
     )
     return result
 
@@ -355,7 +425,7 @@ async def list_models(
 async def classify_book(
     payload: ClassifyBookRequest,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User | None, Depends(get_optional_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> ClassifyBookResponse:
     runtime, categories_text, template = await run_in_threadpool(
         _prepare_classify_context,
@@ -379,7 +449,7 @@ async def classify_book(
         prompt=prompt,
         response_model=ClassifyBookResponse,
         runtime=runtime,
-        created_by=current_user.id if current_user else None,
+        created_by=current_user.id,
     )
 
 
@@ -387,7 +457,7 @@ async def classify_book(
 async def generate_tags(
     payload: GenerateTagsRequest,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User | None, Depends(get_optional_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> GenerateTagsResponse:
     runtime, template = await run_in_threadpool(
         _prepare_runtime_and_template,
@@ -413,7 +483,7 @@ async def generate_tags(
         prompt=prompt,
         response_model=GenerateTagsResponse,
         runtime=runtime,
-        created_by=current_user.id if current_user else None,
+        created_by=current_user.id,
     )
 
 
@@ -421,7 +491,7 @@ async def generate_tags(
 async def recommend_book_content(
     payload: RecommendBookContentRequest,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User | None, Depends(get_optional_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> RecommendBookContentResponse:
     runtime, template = await run_in_threadpool(
         _prepare_runtime_and_template,
@@ -444,7 +514,7 @@ async def recommend_book_content(
         prompt=prompt,
         response_model=RecommendBookContentResponse,
         runtime=runtime,
-        created_by=current_user.id if current_user else None,
+        created_by=current_user.id,
     )
 
 
@@ -452,7 +522,7 @@ async def recommend_book_content(
 async def summarize_book(
     payload: SummarizeBookRequest,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User | None, Depends(get_optional_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> SummarizeBookResponse:
     runtime, template = await run_in_threadpool(
         _prepare_runtime_and_template,
@@ -477,7 +547,7 @@ async def summarize_book(
         prompt=prompt,
         response_model=SummarizeBookResponse,
         runtime=runtime,
-        created_by=current_user.id if current_user else None,
+        created_by=current_user.id,
     )
 
 
@@ -485,7 +555,7 @@ async def summarize_book(
 async def detect_duplicate(
     payload: DetectDuplicateRequest,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User | None, Depends(get_optional_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> DetectDuplicateResponse:
     runtime, template = await run_in_threadpool(
         _prepare_runtime_and_template,
@@ -507,7 +577,7 @@ async def detect_duplicate(
         prompt=prompt,
         response_model=DetectDuplicateResponse,
         runtime=runtime,
-        created_by=current_user.id if current_user else None,
+        created_by=current_user.id,
     )
 
 
@@ -515,7 +585,7 @@ async def detect_duplicate(
 async def natural_search(
     payload: NaturalSearchRequest,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User | None, Depends(get_optional_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> NaturalSearchResponse:
     runtime, template = await run_in_threadpool(
         _prepare_runtime_and_template,
@@ -534,5 +604,5 @@ async def natural_search(
         prompt=prompt,
         response_model=NaturalSearchResponse,
         runtime=runtime,
-        created_by=current_user.id if current_user else None,
+        created_by=current_user.id,
     )

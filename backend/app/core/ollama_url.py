@@ -25,6 +25,8 @@ def normalize_ollama_base_url(value: str) -> str:
             and structural.hostname is not None
             and structural.username is None
             and structural.password is None
+            and not structural.query
+            and not structural.fragment
             and parsed.scheme in {"http", "https"}
             and bool(parsed.host)
             and not parsed.username

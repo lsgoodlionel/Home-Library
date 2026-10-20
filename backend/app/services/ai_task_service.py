@@ -15,6 +15,7 @@ _MAX_AUDIT_LIST_ITEMS = 20
 _MAX_AUDIT_DEPTH = 6
 _MAX_AUDIT_NODES = 256
 _MAX_AUDIT_JSON_BYTES = 16_384
+_MAX_OUTPUT_JSON_BYTES = 65_536
 _AUDIT_FIELD_ALLOWLIST = frozenset(
     {
         "model",
@@ -69,6 +70,12 @@ def serialize_ai_task_input(input_data: dict[str, Any]) -> str:
     return _bound_audit_json_size(result)
 
 
+def serialize_ai_task_output(output_data: dict[str, Any]) -> str:
+    sanitized = _sanitize_output_value(output_data, _AuditSanitizeState(), depth=0)
+    result = sanitized if isinstance(sanitized, dict) else {}
+    return _bound_json_size(result, _MAX_OUTPUT_JSON_BYTES, protected_root_keys=set())
+
+
 def _sanitize_audit_value(
     value: Any,
     state: _AuditSanitizeState,
@@ -119,18 +126,74 @@ def _safe_audit_string(value: str) -> str:
     return value[:_MAX_AUDIT_STRING_LENGTH].encode("utf-8", errors="replace").decode("utf-8")
 
 
+def _sanitize_output_value(
+    value: Any,
+    state: _AuditSanitizeState,
+    *,
+    depth: int,
+) -> Any:
+    if depth > _MAX_AUDIT_DEPTH or state.nodes >= _MAX_AUDIT_NODES:
+        return None
+    state.nodes += 1
+
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="replace").decode("utf-8")
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value if value.bit_length() <= 256 else None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if not isinstance(value, (dict, list)):
+        return None
+
+    container_id = id(value)
+    if container_id in state.active_container_ids:
+        return None
+    state.active_container_ids.add(container_id)
+    try:
+        if isinstance(value, list):
+            return [
+                _sanitize_output_value(item, state, depth=depth + 1)
+                for item in value[:_MAX_AUDIT_NODES]
+            ]
+
+        sanitized_dict: dict[str, Any] = {}
+        for key, item in list(value.items())[:_MAX_AUDIT_NODES]:
+            if not isinstance(key, str):
+                continue
+            safe_key = key.encode("utf-8", errors="replace").decode("utf-8")[:256]
+            sanitized_dict[safe_key] = _sanitize_output_value(item, state, depth=depth + 1)
+        return sanitized_dict
+    finally:
+        state.active_container_ids.remove(container_id)
+
+
 def _bound_audit_json_size(value: dict[str, Any]) -> str:
+    return _bound_json_size(
+        value,
+        _MAX_AUDIT_JSON_BYTES,
+        protected_root_keys={"title", "model", "hostname"},
+    )
+
+
+def _bound_json_size(
+    value: dict[str, Any],
+    limit: int,
+    *,
+    protected_root_keys: set[str],
+) -> str:
     while True:
         serialized = _serialize_audit_json(value)
         encoded_size = len(serialized.encode("utf-8"))
-        if encoded_size <= _MAX_AUDIT_JSON_BYTES:
+        if encoded_size <= limit:
             return serialized
-        excess = encoded_size - _MAX_AUDIT_JSON_BYTES
+        excess = encoded_size - limit
         if _truncate_longest_string(value, excess):
             continue
         if _drop_largest_list_tail(value):
             continue
-        if _drop_last_mapping_value(value, is_root=True):
+        if _drop_last_mapping_value(value, protected_keys=protected_root_keys):
             continue
         value.clear()
         return _serialize_audit_json(value)
@@ -197,18 +260,22 @@ def _drop_largest_list_tail(value: Any) -> bool:
     return True
 
 
-def _drop_last_mapping_value(value: Any, *, is_root: bool = False) -> bool:
+def _drop_last_mapping_value(
+    value: Any,
+    *,
+    protected_keys: set[str] | None = None,
+) -> bool:
     if isinstance(value, list):
         for item in reversed(value):
-            if _drop_last_mapping_value(item):
+            if _drop_last_mapping_value(item, protected_keys=set()):
                 return True
         return False
     if not isinstance(value, dict):
         return False
     for item in reversed(list(value.values())):
-        if _drop_last_mapping_value(item):
+        if _drop_last_mapping_value(item, protected_keys=set()):
             return True
-    protected = {"title", "model", "hostname"} if is_root else set()
+    protected = protected_keys or set()
     for key in reversed(list(value)):
         if key not in protected:
             del value[key]
@@ -232,7 +299,7 @@ def create_ai_task(
         task_type=task_type,
         model=model,
         input_data=serialize_ai_task_input(input_data),
-        output_data=json.dumps(output_data, ensure_ascii=False, default=str) if output_data is not None else None,
+        output_data=serialize_ai_task_output(output_data) if output_data is not None else None,
         status=status,
         error_message=error_message,
         created_by=created_by,

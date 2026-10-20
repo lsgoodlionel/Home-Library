@@ -6,7 +6,7 @@ export const API_TIMEOUTS = {
   default: 15000,
   search: 45000,
   aiHealth: 90000,
-  aiGeneration: 120000,
+  aiGeneration: 300000,
 };
 
 export const apiClient = axios.create({
