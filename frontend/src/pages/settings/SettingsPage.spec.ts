@@ -1,4 +1,4 @@
-import ElementPlus, { ElMessageBox } from 'element-plus';
+import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -117,6 +117,16 @@ function health(
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 async function mountPage(): Promise<VueWrapper> {
   const wrapper = mount(SettingsPage, { global: { plugins: [ElementPlus] } });
   await flushPromises();
@@ -146,6 +156,52 @@ afterEach(() => {
 });
 
 describe('SettingsPage AI status orchestration', () => {
+  it('waits_for_ai_settings_before_reading_process_health', async () => {
+    const pendingSettings = deferred<AIModelSettings>();
+    mocks.fetchAIModelSettings.mockReturnValueOnce(pendingSettings.promise);
+    const wrapper = mount(SettingsPage, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+
+    expect(mocks.fetchAIHealth).not.toHaveBeenCalled();
+
+    pendingSettings.resolve(settings());
+    await flushPromises();
+
+    expect(mocks.fetchAIHealth).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchAIHealth).toHaveBeenCalledWith(false);
+    expect(wrapper.text()).toContain(currentRuntime.baseUrl);
+  });
+
+  it('binds_initial_health_failure_to_the_resolved_account_runtime', async () => {
+    const pendingSettings = deferred<AIModelSettings>();
+    mocks.fetchAIModelSettings.mockReturnValueOnce(pendingSettings.promise);
+    mocks.fetchAIHealth.mockRejectedValueOnce({
+      response: { data: { error: { code: 'AI_CONNECT_TIMEOUT' } } },
+    });
+    const wrapper = mount(SettingsPage, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+    expect(mocks.fetchAIHealth).not.toHaveBeenCalled();
+
+    pendingSettings.resolve(settings());
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('连接异常');
+    expect(wrapper.text()).toContain(currentRuntime.baseUrl);
+    expect(wrapper.text()).not.toContain(staleRuntime.baseUrl);
+  });
+
+  it('does_not_read_process_health_when_ai_settings_fail_to_load', async () => {
+    const pendingSettings = deferred<AIModelSettings>();
+    mocks.fetchAIModelSettings.mockReturnValueOnce(pendingSettings.promise);
+    mount(SettingsPage, { global: { plugins: [ElementPlus] } });
+    await flushPromises();
+
+    pendingSettings.reject(new Error('settings unavailable'));
+    await flushPromises();
+
+    expect(mocks.fetchAIHealth).not.toHaveBeenCalled();
+  });
+
   it('mounted_only_reads_cached_health_without_probe', async () => {
     await mountPage();
 
@@ -241,6 +297,69 @@ describe('SettingsPage AI status orchestration', () => {
     expect(wrapper.text()).toContain(nextRuntime.baseUrl);
     expect(wrapper.text()).toContain('尚未检查');
     expect(wrapper.text()).not.toContain('0.12.6');
+  });
+
+  it('applies_ai_save_immediately_when_external_save_later_fails', async () => {
+    const nextRuntime = { ...currentRuntime, baseUrl: 'https://saved-ai.example.com', defaultModel: 'saved-ai-model' };
+    const aiSave = deferred<AIModelSettings>();
+    const externalSave = deferred<{ providers: [] }>();
+    mocks.saveAIModelSettings.mockReturnValueOnce(aiSave.promise);
+    mocks.saveExternalSearchSettings.mockReturnValueOnce(externalSave.promise);
+    const warning = vi.spyOn(ElMessage, 'warning');
+    const wrapper = await mountPage();
+
+    await button(wrapper, '保存设置').trigger('click');
+    aiSave.resolve(settings(nextRuntime));
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(nextRuntime.baseUrl);
+    expect(wrapper.text()).toContain('尚未检查');
+    expect(wrapper.text()).not.toContain('0.12.6');
+
+    externalSave.reject(new Error('external failed'));
+    await flushPromises();
+    expect(warning).toHaveBeenCalledWith('AI 配置已保存，外部检索设置保存失败');
+  });
+
+  it('applies_external_save_when_ai_save_later_fails', async () => {
+    const aiSave = deferred<AIModelSettings>();
+    const externalSave = deferred<{
+      providers: Array<{
+        provider: 'google_books';
+        enabled: boolean;
+        apiKey: string;
+        extra: string;
+        note: string;
+        hasApiKey: boolean;
+        hasExtra: boolean;
+      }>;
+    }>();
+    mocks.saveAIModelSettings.mockReturnValueOnce(aiSave.promise);
+    mocks.saveExternalSearchSettings.mockReturnValueOnce(externalSave.promise);
+    const warning = vi.spyOn(ElMessage, 'warning');
+    const wrapper = await mountPage();
+
+    await button(wrapper, '保存设置').trigger('click');
+    externalSave.resolve({
+      providers: [{
+        provider: 'google_books',
+        enabled: true,
+        apiKey: '',
+        extra: '',
+        note: '外部检索新配置已应用',
+        hasApiKey: false,
+        hasExtra: false,
+      }],
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('外部检索新配置已应用');
+    aiSave.reject(new Error('ai failed'));
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(currentRuntime.baseUrl);
+    expect(wrapper.text()).toContain('0.12.6');
+    expect(warning).toHaveBeenCalledWith('外部检索设置已保存，AI 配置保存失败');
   });
 
   it('refreshing_models_does_not_replace_the_saved_default_model', async () => {

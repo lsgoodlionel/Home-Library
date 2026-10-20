@@ -178,13 +178,15 @@ async function handleAIConnectionTest(generate: boolean) {
   }
 }
 
-async function loadAISettings() {
+async function loadAISettings(): Promise<boolean> {
   loadingAISettings.value = true;
   try {
     const data = await fetchAIModelSettings();
     applyAISettings(data);
+    return true;
   } catch {
     ElMessage.error('AI 模型配置加载失败');
+    return false;
   } finally {
     loadingAISettings.value = false;
   }
@@ -203,7 +205,12 @@ async function loadExternalSettings() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadVersionInfo(), loadAISettings(), loadExternalSettings(), loadAIHealth(false)]);
+  const ancillaryLoads = Promise.all([loadVersionInfo(), loadExternalSettings()]);
+  const aiSettingsLoaded = await loadAISettings();
+  if (aiSettingsLoaded) {
+    await loadAIHealth(false);
+  }
+  await ancillaryLoads;
 });
 
 async function loadVersionInfo() {
@@ -284,27 +291,46 @@ async function syncAIHealthFailure(error: unknown) {
 async function handleSave() {
   savingSettings.value = true;
   try {
-    const [savedAI, savedExternal] = await Promise.all([
-      saveAIModelSettings({
-      activeProvider: aiSettings.activeProvider,
-      defaultModel: aiSettings.defaultModel,
-      providers: aiSettings.providers,
-      ollamaRuntime: aiSettings.ollamaRuntime,
-      }),
-      saveExternalSearchSettings(externalSearchSettings),
-    ]);
-    applyAISettings(savedAI);
-    aiHealth.value = null;
-    externalSearchSettings.providers = savedExternal.providers.map((provider) => ({ ...provider, apiKey: '', extra: '' }));
+    let aiSaved = false;
+    let externalSaved = false;
+    const aiSave = (async () => {
+      const savedAI = await saveAIModelSettings({
+        activeProvider: aiSettings.activeProvider,
+        defaultModel: aiSettings.defaultModel,
+        providers: aiSettings.providers,
+        ollamaRuntime: aiSettings.ollamaRuntime,
+      });
+      applyAISettings(savedAI);
+      aiHealth.value = null;
+      aiSaved = true;
+    })();
+    const externalSave = (async () => {
+      const savedExternal = await saveExternalSearchSettings(externalSearchSettings);
+      externalSearchSettings.providers = savedExternal.providers.map((provider) => ({
+        ...provider,
+        apiKey: '',
+        extra: '',
+      }));
+      externalSaved = true;
+    })();
+
+    await Promise.allSettled([aiSave, externalSave]);
     saveLocalSettings({
       ollamaBaseUrl: getProvider('ollama')?.baseUrl || settings.ollamaBaseUrl,
       defaultModel: aiSettings.defaultModel,
       externalSearchEnabled: settings.externalSearchEnabled,
       externalProviderOrder: [...settings.externalProviderOrder],
     });
-    ElMessage.success('设置已保存到当前账号');
-  } catch {
-    ElMessage.error('设置保存失败');
+
+    if (aiSaved && externalSaved) {
+      ElMessage.success('设置已保存到当前账号');
+    } else if (aiSaved) {
+      ElMessage.warning('AI 配置已保存，外部检索设置保存失败');
+    } else if (externalSaved) {
+      ElMessage.warning('外部检索设置已保存，AI 配置保存失败');
+    } else {
+      ElMessage.error('AI 配置和外部检索设置均保存失败');
+    }
   } finally {
     savingSettings.value = false;
   }
