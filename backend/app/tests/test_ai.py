@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.models import AITask
 from app.models.user import User
+from app.schemas.ai import AIHealthResponse
 from app.services.ai_setting_service import get_effective_ai_settings, get_ollama_runtime_config
 from app.services.ollama_client import (
     OllamaAccessDeniedError,
@@ -86,6 +87,14 @@ def enabled_ollama_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def reset_ai_health_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.api.routes.ai._last_health_status",
+        AIHealthResponse(),
+    )
+
+
 def _generate_response(payload: dict) -> dict:
     return {"response": json.dumps(payload, ensure_ascii=False)}
 
@@ -100,6 +109,31 @@ def _classify_payload() -> dict:
     }
 
 
+def test_ai_health_returns_unchecked_cache_without_refresh(
+    client: TestClient,
+    member_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def client_must_not_be_created(runtime):
+        raise AssertionError("cached health read created an Ollama client")
+
+    monkeypatch.setattr("app.api.routes.ai.OllamaClient", client_must_not_be_created)
+
+    response = client.get("/api/ai/health", headers=member_headers)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "unchecked",
+        "message": "尚未检查",
+        "checked_at": None,
+        "version": None,
+        "installed_model_count": 0,
+        "running_model_count": 0,
+        "generated": False,
+        "ollama_runtime": None,
+    }
+
+
 def test_ai_health_returns_sanitized_version_and_model_counts(
     client: TestClient,
     member_headers: dict[str, str],
@@ -108,8 +142,10 @@ def test_ai_health_returns_sanitized_version_and_model_counts(
 ) -> None:
     del enabled_ollama_runtime
     response_marker = "upstream-response-secret-marker"
+    requested_paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
         if request.url.path == "/api/version":
             return httpx.Response(200, json={"version": "0.6.2", "ignored": response_marker})
         if request.url.path == "/api/tags":
@@ -123,7 +159,9 @@ def test_ai_health_returns_sanitized_version_and_model_counts(
 
     _mock_async_ollama(monkeypatch, handler)
 
-    response = client.get("/api/ai/health", headers=member_headers)
+    response = client.get("/api/ai/health?refresh=true", headers=member_headers)
+    requested_paths_after_refresh = requested_paths.copy()
+    cached = client.get("/api/ai/health", headers=member_headers)
 
     assert response.status_code == 200
     assert response.json() == {
@@ -146,6 +184,10 @@ def test_ai_health_returns_sanitized_version_and_model_counts(
         },
     }
     assert response.json()["checked_at"]
+    assert cached.status_code == 200
+    assert cached.json() == response.json()
+    assert requested_paths_after_refresh == ["/api/version", "/api/tags", "/api/ps"]
+    assert requested_paths == requested_paths_after_refresh
     assert response_marker not in response.text
 
 
@@ -196,6 +238,9 @@ def test_admin_connection_test_does_not_generate_by_default(
     assert response.status_code == 200
     assert response.json()["generated"] is False
     assert requested_paths == ["/api/version", "/api/tags", "/api/ps"]
+    cached = client.get("/api/ai/health", headers=admin_headers)
+    assert cached.json() == response.json()
+    assert requested_paths == ["/api/version", "/api/tags", "/api/ps"]
 
 
 def test_admin_generation_test_requires_explicit_true_and_uses_keep_alive_zero(
@@ -242,6 +287,59 @@ def test_admin_generation_test_requires_explicit_true_and_uses_keep_alive_zero(
             "keep_alive": 0,
         }
     ]
+
+
+@pytest.mark.parametrize("invalid_generate", ["true", "yes", 1])
+def test_admin_connection_test_rejects_non_boolean_generate_without_request(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_generate: object,
+) -> None:
+    def client_must_not_be_created(runtime):
+        raise AssertionError("invalid generate value created an Ollama client")
+
+    monkeypatch.setattr("app.api.routes.ai.OllamaClient", client_must_not_be_created)
+
+    response = client.post(
+        "/api/ai/test-connection",
+        headers=admin_headers,
+        json={"generate": invalid_generate},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_admin_connection_failure_updates_health_cache(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    enabled_ollama_runtime: None,
+) -> None:
+    del enabled_ollama_runtime
+
+    class FailingOllamaClient:
+        async def version(self):
+            raise OllamaTunnelError("safe", status_code=503)
+
+    monkeypatch.setattr(
+        "app.api.routes.ai.OllamaClient",
+        lambda runtime: FailingOllamaClient(),
+    )
+
+    failed = client.post(
+        "/api/ai/test-connection",
+        headers=admin_headers,
+        json={"generate": False},
+    )
+    cached = client.get("/api/ai/health", headers=admin_headers)
+
+    assert failed.status_code == 503
+    assert cached.status_code == 200
+    assert cached.json()["status"] == "error"
+    assert cached.json()["message"] == "Tunnel 或远程 Ollama Origin 不可用"
+    assert cached.json()["checked_at"]
 
 
 @pytest.mark.parametrize(
@@ -331,7 +429,8 @@ def test_health_failure_returns_chinese_classified_error_without_secret(
         lambda runtime: FailingOllamaClient(),
     )
 
-    response = client.get("/api/ai/health", headers=member_headers)
+    response = client.get("/api/ai/health?refresh=true", headers=member_headers)
+    cached = client.get("/api/ai/health", headers=member_headers)
     get_settings.cache_clear()
 
     assert response.status_code == expected_status
@@ -339,7 +438,12 @@ def test_health_failure_returns_chinese_classified_error_without_secret(
     assert response.json()["error"]["message"] == expected_message
     assert response.json()["error"]["details"]["hostname"] == "ollama.example.test"
     assert response.json()["error"]["details"]["category"] == getattr(error, "category")
+    assert cached.status_code == 200
+    assert cached.json()["status"] == "error"
+    assert cached.json()["message"] == expected_message
+    assert cached.json()["checked_at"]
     assert secret_marker not in response.text
+    assert secret_marker not in cached.text
     assert "client-id-route-marker" not in response.text
 
 

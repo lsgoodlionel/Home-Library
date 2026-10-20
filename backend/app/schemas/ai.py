@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator, model_validator
 
 from app.schemas.ai_setting import OllamaRuntimeStatus
 
@@ -55,7 +55,7 @@ class OllamaChatResponse(BaseModel):
 
 
 class AIConnectionTestRequest(BaseModel):
-    generate: bool = False
+    generate: StrictBool = False
 
 
 class AIHealthResponse(BaseModel):

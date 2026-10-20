@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -60,7 +60,7 @@ from app.services.ollama_service import (
 )
 
 router = APIRouter(prefix="/ai", tags=["ai"])
-_LAST_HEALTH_STATUS = AIHealthResponse()
+_last_health_status = AIHealthResponse()
 _MAX_STATUS_TEXT_LENGTH = 256
 
 
@@ -168,7 +168,7 @@ async def _check_ollama(
     *,
     generate: bool,
 ) -> AIHealthResponse:
-    global _LAST_HEALTH_STATUS
+    global _last_health_status
 
     runtime = get_ollama_runtime_config(db, user)
     safe_runtime = _safe_runtime_status(db, user)
@@ -181,7 +181,7 @@ async def _check_ollama(
             await client.generate_text(prompt="请回复 OK", keep_alive=0)
     except OllamaClientError as exc:
         api_error = _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
-        _LAST_HEALTH_STATUS = AIHealthResponse(
+        _last_health_status = AIHealthResponse(
             status="error",
             message=_bounded_status_text(api_error.message) or "AI 服务检查失败",
             checked_at=datetime.now(timezone.utc),
@@ -189,7 +189,7 @@ async def _check_ollama(
         )
         raise api_error
 
-    _LAST_HEALTH_STATUS = AIHealthResponse(
+    _last_health_status = AIHealthResponse(
         status="healthy",
         message="AI 服务连接正常",
         checked_at=datetime.now(timezone.utc),
@@ -199,7 +199,7 @@ async def _check_ollama(
         generated=generate,
         ollama_runtime=safe_runtime,
     )
-    return _LAST_HEALTH_STATUS
+    return _last_health_status
 
 
 def _record_failure_and_raise(
@@ -264,7 +264,10 @@ def _run_json_task(
 async def get_ai_health(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    refresh: Annotated[bool, Query()] = False,
 ) -> AIHealthResponse:
+    if not refresh:
+        return _last_health_status
     return await _check_ollama(db, current_user, generate=False)
 
 
