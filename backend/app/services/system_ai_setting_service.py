@@ -47,7 +47,9 @@ _VALUE_FIELD_NAMES = (
 
 @dataclass(frozen=True)
 class ServerAICredentialState:
-    configured: bool
+    access_client_id_configured: bool
+    access_client_secret_configured: bool
+    credentials_usable: bool
     source: ConfigurationSource
 
 
@@ -125,12 +127,27 @@ def _validate_credential_pair(client_id: str, client_secret: str) -> tuple[str, 
     return client_id, client_secret
 
 
+def _environment_credentials(
+    settings: Settings,
+) -> tuple[ServerAICredentialState, str, str]:
+    source = _environment_source(settings)
+    client_id = settings.ollama_cf_access_client_id
+    client_secret = settings.ollama_cf_access_client_secret
+    id_configured = bool(client_id)
+    secret_configured = bool(client_secret)
+    usable = id_configured and secret_configured
+    state = ServerAICredentialState(
+        access_client_id_configured=id_configured,
+        access_client_secret_configured=secret_configured,
+        credentials_usable=usable,
+        source=source,
+    )
+    return state, client_id if usable else "", client_secret if usable else ""
+
+
 def _environment_state(settings: Settings) -> _EffectiveServerAIState:
     source = _environment_source(settings)
-    client_id, client_secret = _validate_credential_pair(
-        settings.ollama_cf_access_client_id,
-        settings.ollama_cf_access_client_secret,
-    )
+    credential_state, client_id, client_secret = _environment_credentials(settings)
     config = ServerAIConfig(
         enabled=settings.ollama_enabled,
         default_base_url=normalize_ollama_base_url(settings.ollama_base_url),
@@ -139,7 +156,7 @@ def _environment_state(settings: Settings) -> _EffectiveServerAIState:
         connect_timeout_seconds=settings.ollama_connect_timeout_seconds,
         read_timeout_seconds=settings.ollama_read_timeout_seconds,
         verify_tls=settings.ollama_verify_tls,
-        credential_state=ServerAICredentialState(configured=bool(client_id), source=source),
+        credential_state=credential_state,
         configuration_source=source,
         config_version=0,
     )
@@ -151,15 +168,41 @@ def _database_state(row: SystemAISetting, settings: Settings) -> _EffectiveServe
         raise ValueError("服务器 AI 配置无效")
     id_ciphertext = row.access_client_id_ciphertext
     secret_ciphertext = row.access_client_secret_ciphertext
-    if bool(id_ciphertext) != bool(secret_ciphertext):
-        raise CredentialCryptoError("凭据配置不完整")
-    client_id = ""
-    client_secret = ""
-    if id_ciphertext and secret_ciphertext:
-        cipher = CredentialCipher.from_secret_key(settings.secret_key)
-        client_id = cipher.decrypt(id_ciphertext)
-        client_secret = cipher.decrypt(secret_ciphertext)
-        _validate_credential_pair(client_id, client_secret)
+    if id_ciphertext is None and secret_ciphertext is None:
+        credential_state, client_id, client_secret = _environment_credentials(settings)
+    elif id_ciphertext == "" and secret_ciphertext == "":
+        credential_state = ServerAICredentialState(
+            access_client_id_configured=False,
+            access_client_secret_configured=False,
+            credentials_usable=False,
+            source="database",
+        )
+        client_id = ""
+        client_secret = ""
+    else:
+        id_configured = bool(id_ciphertext)
+        secret_configured = bool(secret_ciphertext)
+        client_id = ""
+        client_secret = ""
+        usable = False
+        if id_configured and secret_configured:
+            try:
+                cipher = CredentialCipher.from_secret_key(settings.secret_key)
+                client_id = cipher.decrypt(id_ciphertext)
+                client_secret = cipher.decrypt(secret_ciphertext)
+                usable = bool(client_id) and bool(client_secret)
+            except CredentialCryptoError:
+                client_id = ""
+                client_secret = ""
+        credential_state = ServerAICredentialState(
+            access_client_id_configured=id_configured,
+            access_client_secret_configured=secret_configured,
+            credentials_usable=usable,
+            source="database",
+        )
+        if not usable:
+            client_id = ""
+            client_secret = ""
     config = ServerAIConfig(
         enabled=row.enabled,
         default_base_url=normalize_ollama_base_url(row.default_base_url),
@@ -168,7 +211,7 @@ def _database_state(row: SystemAISetting, settings: Settings) -> _EffectiveServe
         connect_timeout_seconds=row.connect_timeout_seconds,
         read_timeout_seconds=row.read_timeout_seconds,
         verify_tls=row.verify_tls,
-        credential_state=ServerAICredentialState(configured=bool(client_id), source="database"),
+        credential_state=credential_state,
         configuration_source="database",
         config_version=row.config_version,
     )
@@ -177,7 +220,7 @@ def _database_state(row: SystemAISetting, settings: Settings) -> _EffectiveServe
 
 def _get_effective_server_ai_state(db: Session) -> _EffectiveServerAIState:
     settings = get_settings()
-    row = db.get(SystemAISetting, 1)
+    row = db.get(SystemAISetting, 1, populate_existing=True)
     if row is None:
         return _environment_state(settings)
     return _database_state(row, settings)
@@ -213,15 +256,11 @@ def update_server_ai_config(
                 settings, credentials.client_id, credentials.client_secret,
             )
         elif credentials.mode == "clear_pair":
-            id_ciphertext = None
-            secret_ciphertext = None
+            id_ciphertext = ""
+            secret_ciphertext = ""
         elif row is not None:
             id_ciphertext = row.access_client_id_ciphertext
             secret_ciphertext = row.access_client_secret_ciphertext
-        elif previous.client_id and previous.client_secret:
-            id_ciphertext, secret_ciphertext = _encrypt_pair(
-                settings, previous.client_id, previous.client_secret,
-            )
         else:
             id_ciphertext = None
             secret_ciphertext = None

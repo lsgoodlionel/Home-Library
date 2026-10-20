@@ -144,11 +144,19 @@ def get_effective_ai_settings(db: Session, user: User | None) -> AISettingsRespo
         defaults = default_provider_configs()
         return _to_response("ollama", defaults["ollama"]["default_model"], defaults)
 
-    setting = get_or_create_user_ai_setting(db, user)
+    setting = db.query(UserAISetting).filter_by(user_id=user.id).first()
+    if setting is None:
+        defaults = default_provider_configs()
+        runtime = get_ollama_runtime_config(db, user)
+        defaults["ollama"]["base_url"] = runtime.base_url
+        defaults["ollama"]["default_model"] = runtime.default_model
+        return _to_response("ollama", runtime.default_model, defaults, runtime)
+    runtime = get_ollama_runtime_config(db, user)
     return _to_response(
         setting.active_provider,
         setting.default_model,
         _decode_configs(setting.provider_configs),
+        runtime,
     )
 
 
@@ -173,7 +181,12 @@ def update_user_ai_settings(db: Session, user: User, payload: AISettingsUpdate) 
     db.add(setting)
     db.commit()
     db.refresh(setting)
-    return _to_response(setting.active_provider, setting.default_model, configs)
+    return _to_response(
+        setting.active_provider,
+        setting.default_model,
+        configs,
+        get_ollama_runtime_config(db, user),
+    )
 
 
 def get_ollama_runtime_config(db: Session, user: User | None) -> OllamaRuntimeConfig:
@@ -182,18 +195,19 @@ def get_ollama_runtime_config(db: Session, user: User | None) -> OllamaRuntimeCo
     base_url = server.default_base_url
     default_model = server.default_model
     if user is not None:
-        setting = get_or_create_user_ai_setting(db, user)
-        configs = _decode_configs(setting.provider_configs)
-        if setting.active_provider == "ollama":
-            ollama = configs.get("ollama", {})
-            base_url = str(ollama.get("base_url") or server.default_base_url)
-            default_model = (
-                setting.default_model
-                or str(ollama.get("default_model") or "")
-                or server.default_model
-            )
-        else:
-            default_model = setting.default_model or server.default_model
+        setting = db.query(UserAISetting).filter_by(user_id=user.id).first()
+        if setting is not None:
+            configs = _decode_configs(setting.provider_configs)
+            if setting.active_provider == "ollama":
+                ollama = configs.get("ollama", {})
+                base_url = str(ollama.get("base_url") or server.default_base_url)
+                default_model = (
+                    setting.default_model
+                    or str(ollama.get("default_model") or "")
+                    or server.default_model
+                )
+            else:
+                default_model = setting.default_model or server.default_model
     return OllamaRuntimeConfig(
         enabled=server.enabled,
         base_url=base_url,
@@ -282,6 +296,7 @@ def _to_response(
     active_provider: str,
     default_model: str,
     configs: dict[str, dict[str, Any]],
+    runtime_config: OllamaRuntimeConfig | None = None,
 ) -> AISettingsResponse:
     settings = get_settings()
     providers: list[AIProviderConfig] = []
@@ -302,5 +317,28 @@ def _to_response(
         active_provider=active_provider,  # type: ignore[arg-type]
         default_model=default_model,
         providers=providers,
-        ollama_runtime=_runtime_status(active_provider, default_model, configs, settings),
+        ollama_runtime=(
+            _runtime_status_from_config(runtime_config)
+            if runtime_config is not None
+            else _runtime_status(active_provider, default_model, configs, settings)
+        ),
+    )
+
+
+def _runtime_status_from_config(runtime: OllamaRuntimeConfig) -> OllamaRuntimeStatus:
+    access_configured = bool(runtime.access_client_id and runtime.access_client_secret)
+    trusted_origin = normalize_access_origin(runtime.trusted_base_url)
+    return OllamaRuntimeStatus(
+        enabled=runtime.enabled,
+        base_url=runtime.base_url,
+        default_model=runtime.default_model,
+        connect_timeout_seconds=runtime.connect_timeout_seconds,
+        read_timeout_seconds=runtime.read_timeout_seconds,
+        verify_tls=runtime.verify_tls,
+        access_configured=access_configured,
+        uses_access=(
+            access_configured
+            and trusted_origin is not None
+            and normalize_access_origin(runtime.base_url) == trusted_origin
+        ),
     )

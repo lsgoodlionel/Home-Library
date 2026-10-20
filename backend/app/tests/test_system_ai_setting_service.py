@@ -90,7 +90,9 @@ def test_server_config_falls_back_to_environment_then_defaults(
     assert defaults.connect_timeout_seconds == 20.0
     assert defaults.read_timeout_seconds == 180.0
     assert defaults.verify_tls is True
-    assert defaults.credential_state.configured is False
+    assert defaults.credential_state.access_client_id_configured is False
+    assert defaults.credential_state.access_client_secret_configured is False
+    assert defaults.credential_state.credentials_usable is False
 
     monkeypatch.setenv("OLLAMA_ENABLED", "true")
     monkeypatch.setenv("HOME_LIBRARY_OLLAMA_BASE_URL", "https://env.example.test/path")
@@ -199,17 +201,21 @@ def test_empty_credentials_preserve_and_explicit_clear_removes_both(
     )
     runtime_after_clear = get_ollama_runtime_config(db, None)
 
-    assert created.credential_state.configured is True
-    assert preserved.credential_state.configured is True
+    assert created.credential_state.access_client_id_configured is True
+    assert created.credential_state.access_client_secret_configured is True
+    assert created.credential_state.credentials_usable is True
+    assert preserved.credential_state.credentials_usable is True
     assert runtime_before_clear.access_client_id == client_id_marker
     assert runtime_before_clear.access_client_secret == client_secret_marker
-    assert cleared.credential_state.configured is False
+    assert cleared.credential_state.access_client_id_configured is False
+    assert cleared.credential_state.access_client_secret_configured is False
+    assert cleared.credential_state.credentials_usable is False
     assert runtime_after_clear.access_client_id == ""
     assert runtime_after_clear.access_client_secret == ""
     row = db.get(SystemAISetting, 1)
     assert row is not None
-    assert row.access_client_id_ciphertext is None
-    assert row.access_client_secret_ciphertext is None
+    assert row.access_client_id_ciphertext == ""
+    assert row.access_client_secret_ciphertext == ""
 
     with pytest.raises(ValueError):
         CredentialUpdate(mode="preserve", client_id="not-allowed")
@@ -317,12 +323,23 @@ def test_changed_fields_audit_contains_names_only(
         assert marker not in captured_logs
 
 
-def test_corrupt_credentials_fail_closed_without_secret_in_error(
+@pytest.mark.parametrize(
+    ("client_id_ciphertext", "client_secret_ciphertext", "id_configured", "secret_configured"),
+    [
+        ("v1:one-sided-id-marker", None, True, False),
+        (None, "v1:one-sided-secret-marker", False, True),
+        ("v1:tampered-id-marker", "v1:tampered-secret-marker", True, True),
+    ],
+)
+def test_unusable_database_credentials_preserve_config_and_omit_runtime_pair(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    client_id_ciphertext: str | None,
+    client_secret_ciphertext: str | None,
+    id_configured: bool,
+    secret_configured: bool,
 ) -> None:
-    ciphertext_marker = "corrupt-ciphertext-marker"
     _clear_ai_environment(monkeypatch)
     _set_strong_secret_key(monkeypatch)
     db.add(
@@ -335,21 +352,274 @@ def test_corrupt_credentials_fail_closed_without_secret_in_error(
             connect_timeout_seconds=2.0,
             read_timeout_seconds=20.0,
             verify_tls=True,
-            access_client_id_ciphertext=f"v1:{ciphertext_marker}",
-            access_client_secret_ciphertext=f"v1:{ciphertext_marker}",
+            access_client_id_ciphertext=client_id_ciphertext,
+            access_client_secret_ciphertext=client_secret_ciphertext,
             config_version=1,
         )
     )
     db.commit()
 
-    with pytest.raises(CredentialCryptoError) as exc_info:
-        get_effective_server_ai_config(db)
+    config = get_effective_server_ai_config(db)
+    runtime = get_ollama_runtime_config(db, None)
 
-    rendered_error = str(exc_info.value)
+    assert config.default_model == "corrupt-model"
+    assert config.credential_state.access_client_id_configured is id_configured
+    assert config.credential_state.access_client_secret_configured is secret_configured
+    assert config.credential_state.credentials_usable is False
+    assert runtime.access_client_id == ""
+    assert runtime.access_client_secret == ""
     captured_logs = "\n".join(record.getMessage() for record in caplog.records)
-    assert rendered_error == "凭据解密失败"
-    assert ciphertext_marker not in rendered_error
-    assert ciphertext_marker not in captured_logs
+    for marker in (client_id_ciphertext, client_secret_ciphertext):
+        if marker:
+            assert marker not in captured_logs
+
+
+@pytest.mark.parametrize(
+    ("client_id", "client_secret", "id_configured", "secret_configured"),
+    [
+        ("environment-id-only-marker", "", True, False),
+        ("", "environment-secret-only-marker", False, True),
+    ],
+)
+def test_one_sided_environment_credentials_preserve_config_and_omit_runtime_pair(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    client_id: str,
+    client_secret: str,
+    id_configured: bool,
+    secret_configured: bool,
+) -> None:
+    _clear_ai_environment(monkeypatch)
+    monkeypatch.setenv("OLLAMA_DEFAULT_MODEL", "readable-environment-model")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_ID", client_id)
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_SECRET", client_secret)
+    get_settings.cache_clear()
+
+    config = get_effective_server_ai_config(db)
+    runtime = get_ollama_runtime_config(db, None)
+
+    assert config.default_model == "readable-environment-model"
+    assert config.credential_state.access_client_id_configured is id_configured
+    assert config.credential_state.access_client_secret_configured is secret_configured
+    assert config.credential_state.credentials_usable is False
+    assert runtime.access_client_id == ""
+    assert runtime.access_client_secret == ""
+
+
+def test_wrong_key_credentials_fail_closed_while_non_sensitive_config_remains_readable(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_ai_environment(monkeypatch)
+    monkeypatch.setenv("HOME_LIBRARY_SECRET_KEY", "first-task-2-strong-key-value-000001")
+    get_settings.cache_clear()
+    update_server_ai_config(
+        db,
+        values=_values(default_model="wrong-key-readable-model"),
+        credentials=CredentialUpdate(
+            mode="replace_pair",
+            client_id="wrong-key-client-marker",
+            client_secret="wrong-key-secret-marker",
+        ),
+        actor_id=82,
+    )
+    monkeypatch.setenv("HOME_LIBRARY_SECRET_KEY", "second-task-2-strong-key-value-00002")
+    get_settings.cache_clear()
+
+    config = get_effective_server_ai_config(db)
+    runtime = get_ollama_runtime_config(db, None)
+
+    assert config.default_model == "wrong-key-readable-model"
+    assert config.credential_state.access_client_id_configured is True
+    assert config.credential_state.access_client_secret_configured is True
+    assert config.credential_state.credentials_usable is False
+    assert runtime.access_client_id == ""
+    assert runtime.access_client_secret == ""
+
+
+def test_clear_and_replace_recover_from_corrupt_database_credentials(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_ai_environment(monkeypatch)
+    _set_strong_secret_key(monkeypatch)
+    db.add(
+        SystemAISetting(
+            id=1,
+            enabled=True,
+            default_base_url="https://recovery.example.test",
+            trusted_base_url="https://recovery.example.test",
+            default_model="before-recovery",
+            connect_timeout_seconds=3.0,
+            read_timeout_seconds=30.0,
+            verify_tls=True,
+            access_client_id_ciphertext="v1:corrupt-recovery-id-marker",
+            access_client_secret_ciphertext="v1:corrupt-recovery-secret-marker",
+            config_version=1,
+        )
+    )
+    db.commit()
+
+    cleared = update_server_ai_config(
+        db,
+        values=_values(default_model="cleared-recovery"),
+        credentials=CredentialUpdate(mode="clear_pair"),
+        actor_id=83,
+    )
+    assert cleared.credential_state.credentials_usable is False
+    row = db.get(SystemAISetting, 1)
+    assert row is not None
+    assert row.access_client_id_ciphertext == ""
+    assert row.access_client_secret_ciphertext == ""
+
+    row.access_client_id_ciphertext = "v1:second-corrupt-id-marker"
+    row.access_client_secret_ciphertext = None
+    db.commit()
+    replaced = update_server_ai_config(
+        db,
+        values=_values(default_model="replaced-recovery"),
+        credentials=CredentialUpdate(
+            mode="replace_pair",
+            client_id="replacement-client-marker",
+            client_secret="replacement-secret-marker",
+        ),
+        actor_id=84,
+    )
+    runtime = get_ollama_runtime_config(db, None)
+
+    assert replaced.credential_state.credentials_usable is True
+    assert runtime.access_client_id == "replacement-client-marker"
+    assert runtime.access_client_secret == "replacement-secret-marker"
+
+
+def test_weak_key_preserve_inherits_environment_credentials(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_ai_environment(monkeypatch)
+    monkeypatch.setenv("APP_SECRET_KEY", "change-this-secret")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_ID", "inherited-client-marker")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_SECRET", "inherited-secret-marker")
+    get_settings.cache_clear()
+
+    config = update_server_ai_config(
+        db,
+        values=_values(default_model="weak-key-preserve"),
+        credentials=CredentialUpdate(mode="preserve"),
+        actor_id=85,
+    )
+    runtime = get_ollama_runtime_config(db, None)
+    row = db.get(SystemAISetting, 1)
+
+    assert row is not None
+    assert row.access_client_id_ciphertext is None
+    assert row.access_client_secret_ciphertext is None
+    assert config.credential_state.source == "environment"
+    assert config.credential_state.credentials_usable is True
+    assert runtime.access_client_id == "inherited-client-marker"
+    assert runtime.access_client_secret == "inherited-secret-marker"
+
+
+def test_weak_key_clear_allows_non_sensitive_save_and_disables_inheritance(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_ai_environment(monkeypatch)
+    monkeypatch.setenv("APP_SECRET_KEY", "change-this-secret")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_ID", "clear-client-marker")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_SECRET", "clear-secret-marker")
+    get_settings.cache_clear()
+
+    config = update_server_ai_config(
+        db,
+        values=_values(default_model="weak-key-clear"),
+        credentials=CredentialUpdate(mode="clear_pair"),
+        actor_id=86,
+    )
+    runtime = get_ollama_runtime_config(db, None)
+    row = db.get(SystemAISetting, 1)
+
+    assert row is not None
+    assert row.access_client_id_ciphertext == ""
+    assert row.access_client_secret_ciphertext == ""
+    assert config.default_model == "weak-key-clear"
+    assert config.credential_state.credentials_usable is False
+    assert runtime.access_client_id == ""
+    assert runtime.access_client_secret == ""
+
+
+def test_weak_key_replace_pair_remains_rejected(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_ai_environment(monkeypatch)
+    monkeypatch.setenv("APP_SECRET_KEY", "change-this-secret")
+    get_settings.cache_clear()
+
+    with pytest.raises(CredentialCryptoError, match="服务器密钥强度不足"):
+        update_server_ai_config(
+            db,
+            values=_values(default_model="must-not-save"),
+            credentials=CredentialUpdate(
+                mode="replace_pair",
+                client_id="rejected-client-marker",
+                client_secret="rejected-secret-marker",
+            ),
+            actor_id=87,
+        )
+
+    assert db.get(SystemAISetting, 1) is None
+
+
+def test_account_without_saved_preferences_tracks_server_defaults(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_ai_environment(monkeypatch)
+    _set_strong_secret_key(monkeypatch)
+    update_server_ai_config(
+        db,
+        values=_values(
+            default_base_url="https://first-server.example.test",
+            default_model="first-server-model",
+        ),
+        credentials=CredentialUpdate(mode="preserve"),
+        actor_id=88,
+    )
+    user = User(
+        username="task2-inheriting-user",
+        password_hash="x",
+        display_name="Task 2 Inheriting",
+        role="member",
+        status="active",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    first = get_ollama_runtime_config(db, user)
+    assert db.query(UserAISetting).filter_by(user_id=user.id).first() is None
+
+    update_server_ai_config(
+        db,
+        values=_values(
+            default_base_url="https://second-server.example.test",
+            default_model="second-server-model",
+        ),
+        credentials=CredentialUpdate(mode="preserve"),
+        actor_id=89,
+    )
+    second = get_ollama_runtime_config(db, user)
+
+    assert (first.base_url, first.default_model) == (
+        "https://first-server.example.test",
+        "first-server-model",
+    )
+    assert (second.base_url, second.default_model) == (
+        "https://second-server.example.test",
+        "second-server-model",
+    )
+    assert db.query(UserAISetting).filter_by(user_id=user.id).first() is None
 
 
 def test_account_target_and_model_override_server_defaults_without_overriding_security(
@@ -482,6 +752,49 @@ def test_concurrent_reader_observes_only_complete_committed_versions(
         "version-two",
         22.0,
     )
+    writer.close()
+    reader.close()
+    engine.dispose()
+
+
+def test_long_lived_session_runtime_resolution_refreshes_server_row(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_ai_environment(monkeypatch)
+    _set_strong_secret_key(monkeypatch)
+    engine = create_engine(f"sqlite:///{tmp_path / 'task2-runtime-refresh.sqlite3'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    writer = sessions()
+    reader = sessions()
+    update_server_ai_config(
+        writer,
+        values=_values(default_model="long-lived-version-one", read_timeout_seconds=31.0),
+        credentials=CredentialUpdate(mode="preserve"),
+        actor_id=103,
+    )
+
+    cached_row = reader.get(SystemAISetting, 1)
+    assert cached_row is not None
+    first = get_ollama_runtime_config(reader, None)
+    update_server_ai_config(
+        writer,
+        values=_values(default_model="long-lived-version-two", read_timeout_seconds=32.0),
+        credentials=CredentialUpdate(mode="preserve"),
+        actor_id=104,
+    )
+    second = get_ollama_runtime_config(reader, None)
+
+    assert (first.default_model, first.read_timeout_seconds) == (
+        "long-lived-version-one",
+        31.0,
+    )
+    assert (second.default_model, second.read_timeout_seconds) == (
+        "long-lived-version-two",
+        32.0,
+    )
+    assert cached_row.default_model == "long-lived-version-two"
     writer.close()
     reader.close()
     engine.dispose()
