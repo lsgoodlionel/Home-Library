@@ -257,7 +257,19 @@ async def _check_ollama(
         ]
         if generate:
             probes.append(client.generate_text(prompt="请回复 OK", keep_alive=0))
-        version, models, running_models, *_ = await asyncio.gather(*probes)
+        probe_tasks = [asyncio.create_task(probe) for probe in probes]
+        probe_group = asyncio.gather(*probe_tasks)
+        try:
+            # Own cancellation here so a failing child cleanup cannot replace
+            # the caller's cancellation with an upstream error.
+            version, models, running_models, *_ = await asyncio.shield(probe_group)
+        finally:
+            for task in probe_tasks:
+                if not task.done():
+                    task.cancel()
+            # Retrieve both the group error and every child's final result,
+            # including exceptions raised while cancellation cleanup runs.
+            await asyncio.gather(probe_group, *probe_tasks, return_exceptions=True)
     except OllamaClientError as exc:
         api_error = _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
         status = AIHealthResponse(

@@ -457,6 +457,126 @@ def test_health_probes_run_concurrently_within_one_backend_timeout(
     assert len(started) == probe_count
 
 
+@pytest.mark.parametrize(
+    ("generate", "failed_probe"),
+    [(False, name) for name in ("version", "models", "running", None)]
+    + [(True, name) for name in ("version", "models", "running", "generate", None)],
+)
+@pytest.mark.parametrize("unexpected_failure", [False, True])
+def test_health_probe_failure_or_cancellation_drains_all_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+    generate: bool,
+    failed_probe: str | None,
+    unexpected_failure: bool,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url="https://ollama.example.test",
+        trusted_base_url="https://ollama.example.test",
+        default_model="qwen3:8b",
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_client_id="",
+        access_client_secret="",
+    )
+    safe_runtime = OllamaRuntimeStatus(
+        enabled=True,
+        base_url=runtime.base_url,
+        default_model=runtime.default_model,
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_configured=False,
+        uses_access=False,
+    )
+
+    async def exercise() -> None:
+        probe_count = 4 if generate else 3
+        started: set[str] = set()
+        finished: set[str] = set()
+        probe_tasks: list[asyncio.Task[Any]] = []
+        all_started = asyncio.Event()
+        blocked = asyncio.Event()
+        unhandled: list[dict[str, Any]] = []
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+
+        async def probe(name: str) -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            probe_tasks.append(task)
+            started.add(name)
+            if len(started) == probe_count:
+                all_started.set()
+            try:
+                await all_started.wait()
+                if name == failed_probe:
+                    if unexpected_failure:
+                        raise RuntimeError("unexpected probe failure")
+                    raise OllamaUpstreamError("safe upstream failure")
+                await blocked.wait()
+            except asyncio.CancelledError:
+                # Cleanup may yield and itself fail; the owner must await it
+                # and retrieve this exception before returning to the caller.
+                await asyncio.sleep(0)
+                raise OllamaUpstreamError("safe cleanup failure") from None
+            finally:
+                finished.add(name)
+
+        class ProbeClient:
+            def __init__(self, configured_runtime: OllamaRuntimeConfig) -> None:
+                del configured_runtime
+
+            async def version(self) -> None:
+                await probe("version")
+
+            async def list_models(self) -> None:
+                await probe("models")
+
+            async def running_models(self) -> None:
+                await probe("running")
+
+            async def generate_text(self, **kwargs: Any) -> None:
+                await probe("generate")
+
+        monkeypatch.setattr(ai_routes, "OllamaClient", ProbeClient)
+        monkeypatch.setattr(ai_routes, "_load_health_context", lambda *args: (runtime, safe_runtime))
+        owner = asyncio.create_task(
+            ai_routes._check_ollama(object(), SimpleNamespace(id=11), generate=generate)
+        )
+        try:
+            await asyncio.wait_for(all_started.wait(), timeout=1)
+            if failed_probe is None:
+                owner.cancel()
+                expected_error = asyncio.CancelledError
+            else:
+                expected_error = RuntimeError if unexpected_failure else ApiError
+            with pytest.raises(expected_error):
+                await asyncio.wait_for(owner, timeout=1)
+
+            assert finished == started
+            assert all(task.done() for task in probe_tasks)
+            assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+            # A probe exception not retrieved by its owner is reported when
+            # its task is released, even if the task has already completed.
+            probe_tasks.clear()
+            await asyncio.sleep(0)
+            assert not unhandled
+        finally:
+            # Test cleanup must not hide unfinished tasks at the assertions.
+            for task in [owner, *probe_tasks]:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(owner, *probe_tasks, return_exceptions=True)
+            loop.set_exception_handler(previous_handler)
+
+    asyncio.run(exercise())
+
+
 def test_health_cache_operations_hold_lock_during_mutation_and_iteration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

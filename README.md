@@ -260,13 +260,16 @@ npm run test:e2e
 
 | 检查项 | 结果 |
 |---|---|
-| 后端全量测试 | `311 passed, 0 failed` |
+| 后端全量测试 | `329 passed, 0 failed`（2026-10-20） |
+| AI 并发探针收尾 | 18 项回归通过：逐个探针失败、意外异常、调用方取消及取消清理异常；退出前取消并等待全部任务，取回异常 |
 | 前端类型检查 | 通过 |
 | 前端构建 | 通过，仅 Vite chunk size warning |
 | Vitest | `8 files / 42 tests passed` |
 | 发布脚本测试 | AI 超时层级、smoke Origin 安全矩阵和 SemVer tag 解析通过 |
 | Compose 配置 | 开发、生产配置均以临时 `.env` 普通展开通过 |
 | Docker 隔离流程 | 健康、登录、图书列表、AI 配置脱敏、权限和 AI 关闭降级通过 |
+
+2026-10-20 探针收尾复验：六个 AI 业务 route 的既有 traceback 隔离回归通过；健康检查自身的 `ApiError` traceback 仍可能通过探针对象间接访问 runtime（基线已有同类保留）。此项尚未修复，不能把上述测试通过视为所有 AI 端点的 traceback 对象图均已去敏。
 
 Release workflow 不跳过测试或放宽业务断言。借阅测试使用相对日期，分类统计按图书直接所属分类精确计数，版本接口测试跟随动态应用版本，因此当前完整后端门禁为零失败。
 
