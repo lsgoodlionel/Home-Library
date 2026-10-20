@@ -1,3 +1,4 @@
+import ipaddress
 from functools import lru_cache
 from typing import Annotated
 
@@ -59,6 +60,13 @@ class Settings(BaseSettings):
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173"],
         validation_alias=AliasChoices("HOME_LIBRARY_CORS_ORIGINS", "CORS_ORIGINS"),
+    )
+    server_config_trusted_proxy_ips: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["127.0.0.1", "::1"],
+        validation_alias=AliasChoices(
+            "HOME_LIBRARY_SERVER_CONFIG_TRUSTED_PROXY_IPS",
+            "SERVER_CONFIG_TRUSTED_PROXY_IPS",
+        ),
     )
     database_url: str = Field(
         default="sqlite:///./home_library.db",
@@ -173,6 +181,23 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
+
+    @field_validator("server_config_trusted_proxy_ips", mode="before")
+    @classmethod
+    def parse_server_config_trusted_proxy_ips(cls, value: str | list[str]) -> list[str]:
+        candidates = value.split(",") if isinstance(value, str) else value
+        trusted: list[str] = []
+        for candidate in candidates:
+            try:
+                address = ipaddress.ip_address(candidate.strip())
+            except (AttributeError, ValueError):
+                continue
+            if address.is_unspecified or address.is_multicast:
+                continue
+            normalized = str(address)
+            if normalized not in trusted:
+                trusted.append(normalized)
+        return trusted
 
 
 @lru_cache

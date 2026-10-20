@@ -19,12 +19,6 @@ from app.models.user import User
 
 _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _bearer = HTTPBearer(auto_error=False)
-_TRUSTED_PROXY_NETWORKS = (
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("fc00::/7"),
-)
 
 
 def hash_password(password: str) -> str:
@@ -142,7 +136,7 @@ def require_secure_server_config_transport(request: Request) -> None:
         return
 
     direct_address = _direct_client_address(request)
-    if direct_address is not None and _is_private_or_loopback(direct_address):
+    if direct_address is not None and _is_configured_trusted_proxy(direct_address):
         forwarded_proto = request.headers.get("x-forwarded-proto", "")
         if forwarded_proto.strip().lower() == "https":
             return
@@ -167,15 +161,10 @@ def _direct_client_address(request: Request) -> ipaddress.IPv4Address | ipaddres
         return None
 
 
-def _is_private_or_loopback(
+def _is_configured_trusted_proxy(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> bool:
-    if address.is_loopback:
-        return True
-    return any(
-        address.version == network.version and address in network
-        for network in _TRUSTED_PROXY_NETWORKS
-    )
+    return str(address) in get_settings().server_config_trusted_proxy_ips
 
 
 def _is_loopback_browser_source(value: str | None) -> bool:

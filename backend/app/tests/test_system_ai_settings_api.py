@@ -30,6 +30,8 @@ _SECRET_MARKERS = (
 
 @pytest.fixture(autouse=True)
 def configured_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    monkeypatch.delenv("HOME_LIBRARY_SERVER_CONFIG_TRUSTED_PROXY_IPS", raising=False)
+    monkeypatch.delenv("SERVER_CONFIG_TRUSTED_PROXY_IPS", raising=False)
     monkeypatch.setenv("APP_SECRET_KEY", _STRONG_APP_KEY)
     monkeypatch.setenv("UPGRADE_PASSWORD", _UPGRADE_PASSWORD)
     monkeypatch.setenv("OLLAMA_ENABLED", "true")
@@ -354,46 +356,85 @@ def test_delete_requires_explicit_confirmation_and_restores_environment(
     ]
 
 
-def test_remote_plain_http_is_rejected_but_loopback_and_proxy_https_are_accepted(
+def test_unconfigured_private_peer_cannot_assert_forwarded_https(
     db: Session,
 ) -> None:
     headers, _ = _auth_headers(db)
 
-    with _transport_client(db, direct_host="198.51.100.24") as remote:
-        rejected = remote.put("/api/system/ai-config", headers=headers, json=_valid_update())
-        forged_forwarded_for = remote.put(
+    with _transport_client(db, direct_host="10.0.0.8") as private_peer:
+        response = private_peer.put(
             "/api/system/ai-config",
-            headers={**headers, "X-Forwarded-For": "127.0.0.1"},
+            headers={**headers, "X-Forwarded-Proto": "https"},
             json=_valid_update(),
         )
-        forged_proxy_headers = remote.put(
+
+    assert response.status_code == 400
+    assert db.query(SystemAISetting).count() == 0
+    assert db.query(SystemConfigAudit).count() == 0
+
+
+def test_configured_exact_trusted_proxy_can_assert_forwarded_https(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME_LIBRARY_SERVER_CONFIG_TRUSTED_PROXY_IPS", "10.0.0.8")
+    get_settings.cache_clear()
+    headers, _ = _auth_headers(db)
+
+    with _transport_client(db, direct_host="10.0.0.8") as trusted_proxy:
+        response = trusted_proxy.put(
+            "/api/system/ai-config",
+            headers={**headers, "X-Forwarded-Proto": "https"},
+            json=_valid_update(default_model="configured-proxy-model"),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["default_model"] == "configured-proxy-model"
+
+
+def test_malformed_or_overbroad_trusted_proxy_config_fails_safely(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "HOME_LIBRARY_SERVER_CONFIG_TRUSTED_PROXY_IPS",
+        "10.0.0.0/8,*,not-an-ip,0.0.0.0,::",
+    )
+    get_settings.cache_clear()
+    headers, _ = _auth_headers(db)
+
+    with _transport_client(db, direct_host="10.0.0.8") as private_peer:
+        response = private_peer.put(
+            "/api/system/ai-config",
+            headers={**headers, "X-Forwarded-Proto": "https"},
+            json=_valid_update(),
+        )
+
+    assert response.status_code == 400
+    assert db.query(SystemConfigAudit).count() == 0
+
+
+def test_public_peer_spoofing_forwarded_headers_remains_rejected(db: Session) -> None:
+    headers, _ = _auth_headers(db)
+
+    with _transport_client(db, direct_host="8.8.8.8") as public_peer:
+        response = public_peer.put(
             "/api/system/ai-config",
             headers={
                 **headers,
                 "X-Forwarded-For": "127.0.0.1",
                 "X-Forwarded-Proto": "https",
+                "Origin": "http://localhost:5173",
             },
             json=_valid_update(),
         )
-        forged_local_origin = remote.put(
-            "/api/system/ai-config",
-            headers={**headers, "Origin": "http://localhost:5173"},
-            json=_valid_update(),
-        )
 
-    assert rejected.status_code == 400
-    assert forged_forwarded_for.status_code == 400
-    assert forged_proxy_headers.status_code == 400
-    assert forged_local_origin.status_code == 400
+    assert response.status_code == 400
     assert db.query(SystemConfigAudit).count() == 0
 
-    with _transport_client(db, direct_host="10.0.0.8") as private_proxy:
-        proxy_https = private_proxy.put(
-            "/api/system/ai-config",
-            headers={**headers, "X-Forwarded-Proto": "https"},
-            json=_valid_update(default_model="proxy-model"),
-        )
-    assert proxy_https.status_code == 200
+
+def test_loopback_browser_http_and_direct_https_remain_accepted(db: Session) -> None:
+    headers, _ = _auth_headers(db)
 
     with _transport_client(db, direct_host="127.0.0.1") as loopback:
         local_origin = loopback.put(
