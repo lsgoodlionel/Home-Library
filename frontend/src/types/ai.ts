@@ -1,3 +1,5 @@
+import type { OllamaRuntimeStatus } from './settings';
+
 export interface AIModel {
   name: string;
   size?: string;
@@ -6,6 +8,19 @@ export interface AIModel {
 
 export interface AIModelsResponse {
   models: AIModel[];
+}
+
+export type AIHealthState = 'unchecked' | 'healthy' | 'error';
+
+export interface AIHealthStatus {
+  status: AIHealthState;
+  message: string;
+  checkedAt: string | null;
+  version: string | null;
+  installedModelCount: number;
+  runningModelCount: number;
+  generated: boolean;
+  ollamaRuntime: OllamaRuntimeStatus | null;
 }
 
 export interface ClassifyBookRequest {

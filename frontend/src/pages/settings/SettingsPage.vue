@@ -3,7 +3,7 @@ import { ArrowDown, ArrowUp, RefreshLeft } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { computed, onMounted, reactive, ref } from 'vue';
 
-import { classifyBook } from '@/api/ai';
+import { classifyBook, fetchAIHealth, testAIConnection } from '@/api/ai';
 import { bookDetailToForm, getBook, getBooks, getCategoryOptions, updateBook } from '@/api/books';
 import {
   DEFAULT_EXTERNAL_PROVIDER_ORDER,
@@ -26,7 +26,9 @@ import {
   type BackupFormat,
   type ImportPreviewResult,
 } from '@/api/importExport';
-import type { AIModel, ClassifyBookResponse } from '@/types/ai';
+import OllamaConnectionStatus from '@/components/ai/OllamaConnectionStatus.vue';
+import { useAuthStore } from '@/stores/auth';
+import type { AIHealthStatus, AIModel, ClassifyBookResponse } from '@/types/ai';
 import type { BookListItem, CategoryOption } from '@/types/book';
 import type {
   AIModelSettings,
@@ -36,12 +38,17 @@ import type {
   ExternalSearchProviderConfig,
   ExternalSearchProviderKey,
   ExternalSearchSettings,
+  OllamaRuntimeStatus,
 } from '@/types/settings';
+import { getAIErrorMessage } from '@/utils/aiErrors';
+
+const authStore = useAuthStore();
 
 const models = ref<AIModel[]>([]);
 const loadingModels = ref(false);
 const savingSettings = ref(false);
 const loadingAISettings = ref(false);
+const loadingAIStatus = ref(false);
 const loadingExternalSettings = ref(false);
 const loadingVersion = ref(false);
 const validatingExternalProvider = ref<ExternalSearchProviderKey | ''>('');
@@ -55,12 +62,25 @@ const autoClassifying = ref(false);
 const stopAutoClassifyRequested = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const versionInfo = ref<AppVersionInfo | null>(null);
+const aiHealth = ref<AIHealthStatus | null>(null);
+
+const emptyOllamaRuntime: OllamaRuntimeStatus = {
+  enabled: false,
+  baseUrl: '',
+  defaultModel: '',
+  connectTimeoutSeconds: 0,
+  readTimeoutSeconds: 0,
+  verifyTls: true,
+  accessConfigured: false,
+  usesAccess: false,
+};
 
 const settings = reactive(loadLocalSettings());
 const aiSettings = reactive<AIModelSettings>({
   activeProvider: 'ollama',
   defaultModel: '',
   providers: [],
+  ollamaRuntime: { ...emptyOllamaRuntime },
 });
 const externalSearchSettings = reactive<ExternalSearchSettings>({
   providers: [],
@@ -73,6 +93,16 @@ const orderedProviders = computed(() =>
 const activeAIProvider = computed(() =>
   aiSettings.providers.find((provider) => provider.provider === aiSettings.activeProvider),
 );
+const ollamaConnectionStatus = computed<AIHealthStatus>(() => ({
+  status: aiHealth.value?.status || 'unchecked',
+  message: aiHealth.value?.message || '尚未检查',
+  checkedAt: aiHealth.value?.checkedAt || null,
+  version: aiHealth.value?.version || null,
+  installedModelCount: aiHealth.value?.installedModelCount || 0,
+  runningModelCount: aiHealth.value?.runningModelCount || 0,
+  generated: aiHealth.value?.generated || false,
+  ollamaRuntime: aiHealth.value?.ollamaRuntime || aiSettings.ollamaRuntime,
+}));
 const modelOptions = computed(() => {
   const names = models.value.map((model) => model.name).filter(Boolean);
   if (aiSettings.defaultModel && !names.includes(aiSettings.defaultModel)) {
@@ -99,13 +129,48 @@ async function loadModels() {
   loadingModels.value = true;
   try {
     models.value = await fetchAvailableModels();
-    if (!aiSettings.defaultModel && models.value.length > 0) {
-      setDefaultModel(models.value[0].name);
-    }
-  } catch {
+  } catch (err: unknown) {
     models.value = [];
+    ElMessage.warning(getAIErrorMessage(err));
   } finally {
     loadingModels.value = false;
+  }
+}
+
+async function loadAIHealth(refresh = false) {
+  loadingAIStatus.value = true;
+  try {
+    aiHealth.value = await fetchAIHealth(refresh);
+    if (refresh) ElMessage.success(aiHealth.value.message);
+  } catch (err: unknown) {
+    ElMessage.error(getAIErrorMessage(err));
+  } finally {
+    loadingAIStatus.value = false;
+  }
+}
+
+async function handleAIConnectionTest(generate: boolean) {
+  if (generate) {
+    try {
+      await ElMessageBox.confirm(
+        '生成测试会调用当前默认模型执行一次最小生成，并在完成后释放模型。确认继续吗？',
+        '确认生成测试',
+        { type: 'warning', confirmButtonText: '开始测试', cancelButtonText: '取消' },
+      );
+    } catch (err: unknown) {
+      if (isCancelError(err)) return;
+      throw err;
+    }
+  }
+
+  loadingAIStatus.value = true;
+  try {
+    aiHealth.value = await testAIConnection(generate);
+    ElMessage.success(generate ? '生成测试成功' : '连接测试成功');
+  } catch (err: unknown) {
+    ElMessage.error(getAIErrorMessage(err));
+  } finally {
+    loadingAIStatus.value = false;
   }
 }
 
@@ -134,8 +199,7 @@ async function loadExternalSettings() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadVersionInfo(), loadAISettings(), loadExternalSettings()]);
-  await loadModels();
+  await Promise.all([loadVersionInfo(), loadAISettings(), loadExternalSettings(), loadAIHealth(false)]);
 });
 
 async function loadVersionInfo() {
@@ -154,6 +218,7 @@ function applyAISettings(data: AIModelSettings) {
   aiSettings.activeProvider = data.activeProvider;
   aiSettings.defaultModel = data.defaultModel;
   aiSettings.providers = data.providers.map((provider) => ({ ...provider, apiKey: '' }));
+  aiSettings.ollamaRuntime = { ...data.ollamaRuntime };
 }
 
 async function handleSave() {
@@ -164,6 +229,7 @@ async function handleSave() {
       activeProvider: aiSettings.activeProvider,
       defaultModel: aiSettings.defaultModel,
       providers: aiSettings.providers,
+      ollamaRuntime: aiSettings.ollamaRuntime,
       }),
       saveExternalSearchSettings(externalSearchSettings),
     ]);
@@ -176,7 +242,6 @@ async function handleSave() {
       externalProviderOrder: [...settings.externalProviderOrder],
     });
     ElMessage.success('设置已保存到当前账号');
-    await loadModels();
   } catch {
     ElMessage.error('设置保存失败');
   } finally {
@@ -538,6 +603,15 @@ function getErrorMessage(err: unknown): string {
       </template>
 
       <el-form v-loading="loadingAISettings" label-width="140px">
+        <OllamaConnectionStatus
+          :status="ollamaConnectionStatus"
+          :is-admin="authStore.isAdmin"
+          :loading="loadingAIStatus"
+          @check="loadAIHealth(true)"
+          @test="handleAIConnectionTest(false)"
+          @test-generate="handleAIConnectionTest(true)"
+        />
+
         <el-form-item label="当前服务商">
           <el-select
             v-model="aiSettings.activeProvider"

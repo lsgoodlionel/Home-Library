@@ -17,10 +17,22 @@ export interface AIProviderConfig {
   hasApiKey: boolean;
 }
 
+export interface OllamaRuntimeStatus {
+  enabled: boolean;
+  baseUrl: string;
+  defaultModel: string;
+  connectTimeoutSeconds: number;
+  readTimeoutSeconds: number;
+  verifyTls: boolean;
+  accessConfigured: boolean;
+  usesAccess: boolean;
+}
+
 export interface AIModelSettings {
   activeProvider: AIProviderKey;
   defaultModel: string;
   providers: AIProviderConfig[];
+  ollamaRuntime: OllamaRuntimeStatus;
 }
 
 export type ExternalSearchProviderKey = 'google_books' | 'isbn_work' | 'douban';

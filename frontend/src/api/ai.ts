@@ -1,5 +1,6 @@
 import { API_TIMEOUTS, apiClient } from './client';
 import type {
+  AIHealthStatus,
   AIModel,
   ClassifyBookRequest,
   ClassifyBookResponse,
@@ -12,9 +13,58 @@ import type {
   SummarizeBookRequest,
   SummarizeBookResponse,
 } from '@/types/ai';
+import type { OllamaRuntimeStatus } from '@/types/settings';
 
 interface ApiAIModelsResponse {
   models: Array<{ name: string; size?: string; modified_at?: string }>;
+}
+
+interface ApiOllamaRuntimeStatus {
+  enabled: boolean;
+  base_url: string;
+  default_model: string;
+  connect_timeout_seconds: number;
+  read_timeout_seconds: number;
+  verify_tls: boolean;
+  access_configured: boolean;
+  uses_access: boolean;
+}
+
+interface ApiAIHealthResponse {
+  status: AIHealthStatus['status'];
+  message: string;
+  checked_at?: string | null;
+  version?: string | null;
+  installed_model_count: number;
+  running_model_count: number;
+  generated: boolean;
+  ollama_runtime?: ApiOllamaRuntimeStatus | null;
+}
+
+function normalizeOllamaRuntime(data: ApiOllamaRuntimeStatus): OllamaRuntimeStatus {
+  return {
+    enabled: data.enabled,
+    baseUrl: data.base_url,
+    defaultModel: data.default_model,
+    connectTimeoutSeconds: data.connect_timeout_seconds,
+    readTimeoutSeconds: data.read_timeout_seconds,
+    verifyTls: data.verify_tls,
+    accessConfigured: data.access_configured,
+    usesAccess: data.uses_access,
+  };
+}
+
+function normalizeAIHealth(data: ApiAIHealthResponse): AIHealthStatus {
+  return {
+    status: data.status,
+    message: data.message,
+    checkedAt: data.checked_at || null,
+    version: data.version || null,
+    installedModelCount: data.installed_model_count,
+    runningModelCount: data.running_model_count,
+    generated: data.generated,
+    ollamaRuntime: data.ollama_runtime ? normalizeOllamaRuntime(data.ollama_runtime) : null,
+  };
 }
 
 interface ApiClassifyBookResponse {
@@ -76,12 +126,31 @@ interface ApiDetectDuplicateResponse {
 }
 
 export async function getAIModels(): Promise<AIModel[]> {
-  const { data } = await apiClient.get<ApiAIModelsResponse>('/ai/models');
+  const { data } = await apiClient.get<ApiAIModelsResponse>('/ai/models', {
+    timeout: API_TIMEOUTS.aiHealth,
+  });
   return data.models.map((m) => ({
     name: m.name,
     size: m.size,
     modifiedAt: m.modified_at,
   }));
+}
+
+export async function fetchAIHealth(refresh = false): Promise<AIHealthStatus> {
+  const { data } = await apiClient.get<ApiAIHealthResponse>('/ai/health', {
+    params: { refresh },
+    timeout: API_TIMEOUTS.aiHealth,
+  });
+  return normalizeAIHealth(data);
+}
+
+export async function testAIConnection(generate: boolean): Promise<AIHealthStatus> {
+  const { data } = await apiClient.post<ApiAIHealthResponse>(
+    '/ai/test-connection',
+    { generate },
+    { timeout: generate ? API_TIMEOUTS.aiGeneration : API_TIMEOUTS.aiHealth },
+  );
+  return normalizeAIHealth(data);
 }
 
 export async function classifyBook(req: ClassifyBookRequest): Promise<ClassifyBookResponse> {

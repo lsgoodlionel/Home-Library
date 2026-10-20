@@ -11,6 +11,7 @@ import type {
   ExternalSearchProviderConfig,
   ExternalSearchProviderKey,
   ExternalSearchSettings,
+  OllamaRuntimeStatus,
   UpgradeStartResult,
   UpgradeTaskStatus,
 } from '@/types/settings';
@@ -103,6 +104,18 @@ interface ApiAISettingsResponse {
   active_provider: AIProviderKey;
   default_model: string;
   providers: ApiAIProviderConfig[];
+  ollama_runtime: ApiOllamaRuntimeStatus;
+}
+
+interface ApiOllamaRuntimeStatus {
+  enabled: boolean;
+  base_url: string;
+  default_model: string;
+  connect_timeout_seconds: number;
+  read_timeout_seconds: number;
+  verify_tls: boolean;
+  access_configured: boolean;
+  uses_access: boolean;
 }
 
 interface ApiExternalSearchProviderConfig {
@@ -153,11 +166,25 @@ function normalizeAIProvider(config: ApiAIProviderConfig): AIProviderConfig {
   };
 }
 
+function normalizeOllamaRuntime(config: ApiOllamaRuntimeStatus): OllamaRuntimeStatus {
+  return {
+    enabled: config.enabled,
+    baseUrl: config.base_url,
+    defaultModel: config.default_model,
+    connectTimeoutSeconds: config.connect_timeout_seconds,
+    readTimeoutSeconds: config.read_timeout_seconds,
+    verifyTls: config.verify_tls,
+    accessConfigured: config.access_configured,
+    usesAccess: config.uses_access,
+  };
+}
+
 function normalizeAISettings(data: ApiAISettingsResponse): AIModelSettings {
   return {
     activeProvider: data.active_provider,
     defaultModel: data.default_model,
     providers: data.providers.map(normalizeAIProvider),
+    ollamaRuntime: normalizeOllamaRuntime(data.ollama_runtime),
   };
 }
 

@@ -5,6 +5,7 @@ export const AUTH_TOKEN_STORAGE_KEY = 'home_library_token';
 export const API_TIMEOUTS = {
   default: 15000,
   search: 45000,
+  aiHealth: 90000,
   aiGeneration: 120000,
 };
 
