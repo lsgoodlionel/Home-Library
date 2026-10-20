@@ -163,9 +163,12 @@ OLLAMA_CF_ACCESS_CLIENT_SECRET=
 bash scripts/ollama-cloudflare-smoke-test.sh
 ```
 
-发布 workflow 只接受 `vMAJOR.MINOR.PATCH` 或带合法 prerelease 的 tag，例如
-`v1.2.3`、`v1.2.3-rc.1`。该 tag 同时作为应用版本和两个 GHCR 镜像 tag，非法
-`v*` tag 会在构建镜像前失败。
+发布 workflow 只接受 `vMAJOR.MINOR.PATCH` 或带合法 prerelease 的 Git tag，例如
+`v1.2.3`、`v1.2.3-rc.1`。共享 `prepare` job 会移除前导 `v`：Git tag
+`v1.2.3-rc.1` 对应应用 `APP_VERSION=1.2.3-rc.1` 和两个 GHCR 镜像 tag
+`1.2.3-rc.1`。因此现有 `VERSION=1.2.3` Compose 部署和
+`bash scripts/update.sh --version 1.2.3` 保持可用。解析结果最长 128 个字符，非法或
+超长 `v*` tag 会在构建镜像前失败，版本字符串不会被 Docker metadata 再次改写。
 
 管理员还可以在“设置 > AI 模型配置”执行连接测试。普通测试只读；生成测试需要前端二次确认。AI 故障只影响 AI 推荐，核心图书功能继续可用。
 

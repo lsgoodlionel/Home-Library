@@ -51,7 +51,9 @@ function collapseOverflowItems(items: DistributionItem[], maxItems: number) {
   }
   const visibleItems = items.slice(0, maxItems - 1);
   const overflowCount = items.slice(maxItems - 1).reduce((sum, item) => sum + item.count, 0);
-  return overflowCount > 0 ? [...visibleItems, { name: '其他', count: overflowCount }] : visibleItems;
+  return overflowCount > 0
+    ? [...visibleItems, { key: 'category:overflow', name: '其他', count: overflowCount }]
+    : visibleItems;
 }
 
 function hasValues(items: Array<{ count: number }>) {

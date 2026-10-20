@@ -83,12 +83,12 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - name: Validate tag and resolve release version
+      - name: Validate Git tag and resolve version without v
         id: version
         shell: bash
         run: |
-          VERSION="$(bash scripts/resolve-release-version.sh "$GITHUB_REF_TYPE" "$GITHUB_REF_NAME" "$GITHUB_RUN_NUMBER")"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          RESOLVED_VERSION="$(bash scripts/resolve-release-version.sh "$GITHUB_REF_TYPE" "$GITHUB_REF_NAME" "$GITHUB_RUN_NUMBER")"
+          echo "version=${RESOLVED_VERSION}" >> "$GITHUB_OUTPUT"
 
   build-backend:
     needs: [prepare]

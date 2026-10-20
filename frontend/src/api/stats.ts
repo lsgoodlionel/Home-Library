@@ -41,8 +41,8 @@ interface ApiOverview {
 }
 
 interface ApiDistributionItem {
-  id?: number;
-  code?: string;
+  id?: number | null;
+  code?: string | null;
   name?: string;
   label?: string;
   count?: number;
@@ -89,8 +89,8 @@ function normalizeActiveBorrow(record: ApiActiveBorrow): ActiveBorrowSummary {
 
 function normalizeDistributionItem(item: ApiDistributionItem): DistributionItem {
   return {
-    id: item.id,
-    code: item.code,
+    id: item.id ?? undefined,
+    code: item.code ?? undefined,
     name: item.name || item.label || '未分类',
     count: item.count ?? item.value ?? 0,
   };
@@ -119,7 +119,15 @@ export async function getCategoryStats(): Promise<DistributionItem[]> {
   const { data } = await apiClient.get<ApiDistributionItem[] | { items?: ApiDistributionItem[] }>(
     '/stats/categories',
   );
-  return normalizeDistribution(data);
+  return normalizeDistribution(data).map((item, index) => ({
+    ...item,
+    key: item.id !== undefined
+      ? `category:id:${item.id}`
+      : item.code
+        ? `category:code:${item.code}`
+        : `category:${item.name}:${index}`,
+    name: item.code ? `${item.code} ${item.name}` : item.name,
+  }));
 }
 
 export async function getLocationStats(): Promise<DistributionItem[]> {

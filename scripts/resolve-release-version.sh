@@ -18,13 +18,17 @@ if [[ "$ref_type" == "tag" ]]; then
     echo "错误：Release tag 必须是 vMAJOR.MINOR.PATCH，可带合法 prerelease。" >&2
     exit 2
   fi
-  printf '%s\n' "$ref_name"
-  exit 0
-fi
-
-if [[ "$ref_type" != "branch" || "$ref_name" != "main" || ! "$run_number" =~ ^[1-9][0-9]*$ ]]; then
+  version="${ref_name#v}"
+elif [[ "$ref_type" == "branch" && "$ref_name" == "main" && "$run_number" =~ ^[1-9][0-9]*$ ]]; then
+  version="0.1.${run_number}"
+else
   echo "错误：只支持 main 分支或 SemVer Release tag。" >&2
   exit 2
 fi
 
-printf '0.1.%s\n' "$run_number"
+if (( ${#version} > 128 )); then
+  echo "错误：发布版本不能超过 128 个字符。" >&2
+  exit 2
+fi
+
+printf '%s\n' "$version"

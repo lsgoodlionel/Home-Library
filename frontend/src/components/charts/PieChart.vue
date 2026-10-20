@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 
 const props = defineProps<{
-  items: Array<{ name: string; count: number; color?: string }>;
+  items: Array<{ key?: string; name: string; count: number; color?: string }>;
 }>();
 
 const palette = ['#2f6f73', '#8f6f3f', '#4c78a8', '#d07f4f', '#6b7280', '#7a8f55'];
@@ -14,6 +14,7 @@ const segments = computed(() => {
     const dash = total.value > 0 ? (item.count / total.value) * 100 : 0;
     const segment = {
       ...item,
+      segmentKey: item.key ?? `${item.name}:${index}`,
       color: item.color || palette[index % palette.length],
       dash,
       offset,
@@ -30,7 +31,8 @@ const segments = computed(() => {
       <circle class="pie-chart__base" cx="21" cy="21" r="15.915" />
       <circle
         v-for="segment in segments"
-        :key="segment.name"
+        :key="segment.segmentKey"
+        :data-segment-key="segment.segmentKey"
         class="pie-chart__segment"
         cx="21"
         cy="21"
@@ -44,7 +46,12 @@ const segments = computed(() => {
     </svg>
 
     <div class="pie-chart__legend">
-      <div v-for="segment in segments" :key="segment.name" class="pie-chart__legend-item">
+      <div
+        v-for="segment in segments"
+        :key="segment.segmentKey"
+        :data-segment-key="segment.segmentKey"
+        class="pie-chart__legend-item"
+      >
         <span class="pie-chart__dot" :style="{ background: segment.color }" />
         <span class="pie-chart__name" :title="segment.name">{{ segment.name }}</span>
         <span class="pie-chart__count">{{ segment.count }}</span>

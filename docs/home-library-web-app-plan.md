@@ -1002,6 +1002,8 @@ nginx
 - 日志查看
 - 数据迁移工具
 - GitHub Release 在后端 pytest、前端测试/类型检查/构建、交付脚本安全测试和 Compose 配置展开全部通过后自动生成前后端 multi-arch 镜像和部署资产；只接受严格 SemVer `v*` tag，并为同一 ref 取消旧 run
+- Release Git tag 保留前导 `v`，应用版本、GHCR 镜像 tag、Compose `VERSION` 和 `update.sh --version` 使用去掉 `v` 后的同一版本值，最长 128 个字符
+- 分类分布按图书直接所属分类计数，前端使用分类 `id/code` 作为稳定图表 key，并以“分类号 分类名”展示，同名分类不会产生重复 key
 
 ## 14. MVP 范围建议
 

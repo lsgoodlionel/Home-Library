@@ -26,10 +26,17 @@ expect_invalid() {
   fi
 }
 
-expect_version tag v1.2.3 42 v1.2.3
-expect_version tag v0.0.1-rc.1 42 v0.0.1-rc.1
-expect_version tag v2.10.3-alpha.beta-7 42 v2.10.3-alpha.beta-7
+expect_version tag v1.2.3 42 1.2.3
+expect_version tag v0.0.1-rc.1 42 0.0.1-rc.1
+expect_version tag v2.10.3-alpha.beta-7 42 2.10.3-alpha.beta-7
 expect_version branch main 42 0.1.42
+
+prerelease_127="$(printf 'a%.0s' {1..121})"
+prerelease_128="$(printf 'b%.0s' {1..122})"
+prerelease_129="$(printf 'c%.0s' {1..123})"
+expect_version tag "v1.2.3-${prerelease_127}" 42 "1.2.3-${prerelease_127}"
+expect_version tag "v1.2.3-${prerelease_128}" 42 "1.2.3-${prerelease_128}"
+expect_invalid "v1.2.3-${prerelease_129}"
 
 expect_invalid v
 expect_invalid vfoo

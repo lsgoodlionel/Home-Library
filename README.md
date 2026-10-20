@@ -240,7 +240,7 @@ Access headers：
 bash scripts/ollama-cloudflare-smoke-test.sh
 ```
 
-GitHub 的 `Build & Release` workflow 会先运行后端 pytest、前端 Vitest、类型检查、生产构建、脚本安全测试和普通 Compose 配置展开；全部通过后才构建并推送前后端 multi-arch GHCR 镜像。Release tag 必须是 `vMAJOR.MINOR.PATCH`，可带合法 prerelease；两个镜像成功后才创建带部署资产的 Release。同一分支或 tag 的旧 run 会自动取消，不同 tag 互不影响。
+GitHub 的 `Build & Release` workflow 会先运行后端 pytest、前端 Vitest、类型检查、生产构建、脚本安全测试和普通 Compose 配置展开；全部通过后才构建并推送前后端 multi-arch GHCR 镜像。Release Git tag 必须是 `vMAJOR.MINOR.PATCH`，可带合法 prerelease；`prepare` 会去掉前导 `v`，例如将 `v1.2.3-rc.1` 映射为应用版本和 GHCR 镜像 tag `1.2.3-rc.1`，与 `VERSION=1.2.3-rc.1`、`update.sh --version 1.2.3-rc.1` 保持一致。两个镜像成功后才创建带部署资产的 Release。同一分支或 tag 的旧 run 会自动取消，不同 tag 互不影响。
 
 ## 测试与质量
 
@@ -263,7 +263,7 @@ npm run test:e2e
 | 后端全量测试 | `285 passed, 0 failed` |
 | 前端类型检查 | 通过 |
 | 前端构建 | 通过，仅 Vite chunk size warning |
-| Vitest | `5 files / 37 tests passed` |
+| Vitest | `7 files / 39 tests passed` |
 | 发布脚本测试 | smoke Origin 安全矩阵和 SemVer tag 解析通过 |
 | Compose 配置 | 开发、生产配置均以临时 `.env` 普通展开通过 |
 | Docker 隔离流程 | 健康、登录、图书列表、AI 配置脱敏、权限和 AI 关闭降级通过 |
