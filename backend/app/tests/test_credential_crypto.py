@@ -2,6 +2,7 @@
 
 import base64
 import secrets
+from datetime import timedelta
 
 import pytest
 
@@ -79,6 +80,16 @@ def test_production_secret_key_rejects_defaults_examples_and_short_values():
     assert is_production_secret_key("中" * 11)
 
 
+def test_production_secret_key_rejects_whitespace_padded_defaults():
+    known_defaults = ("change-this-secret", "dev-secret-change-me-in-production")
+    padding = " " * 32
+
+    assert all(
+        not is_production_secret_key(padding + default + padding)
+        for default in known_defaults
+    )
+
+
 def test_system_setting_metadata_is_registered_without_generic_audit_payload():
     from app.models import Base
 
@@ -100,6 +111,21 @@ def test_system_setting_metadata_is_registered_without_generic_audit_payload():
     assert {tuple(column.name for column in index.columns) for index in audit.indexes} >= {
         ("action",), ("created_at",),
     }
+
+
+def test_system_setting_timestamp_callables_return_utc_aware_values():
+    from app.models import SystemAISetting, SystemConfigAudit
+
+    setting_columns = SystemAISetting.__table__.c
+    audit_columns = SystemConfigAudit.__table__.c
+    timestamps = (
+        setting_columns.created_at.default.arg(None),
+        setting_columns.updated_at.default.arg(None),
+        setting_columns.updated_at.onupdate.arg(None),
+        audit_columns.created_at.default.arg(None),
+    )
+
+    assert all(timestamp.utcoffset() == timedelta(0) for timestamp in timestamps)
 
 
 def test_system_setting_database_enforces_fixed_singleton_id(db):

@@ -21,10 +21,11 @@ class CredentialCryptoError(ValueError):
 
 
 def is_production_secret_key(secret_key: str) -> bool:
+    normalized_key = secret_key.strip()
     return (
-        bool(secret_key.strip())
-        and secret_key not in _DEFAULT_KEYS
-        and len(secret_key.encode("utf-8")) >= 32
+        bool(normalized_key)
+        and normalized_key not in _DEFAULT_KEYS
+        and len(normalized_key.encode("utf-8")) >= 32
     )
 
 
