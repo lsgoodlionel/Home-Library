@@ -1,19 +1,30 @@
 from __future__ import annotations
 
+import ipaddress
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
+from urllib.parse import urlsplit
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from passlib.context import CryptContext
+from pydantic import SecretStr
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.session import get_db
+from app.models.user import User
 
 _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _bearer = HTTPBearer(auto_error=False)
+_TRUSTED_PROXY_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
 
 
 def hash_password(password: str) -> str:
@@ -98,3 +109,88 @@ def require_admin(
             detail="需要管理员权限",
         )
     return current_user
+
+
+def verify_admin_secondary_auth(
+    current_user: User,
+    admin_password: SecretStr,
+    upgrade_password: SecretStr,
+) -> None:
+    settings = get_settings()
+    if not settings.upgrade_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="服务器二次认证未配置",
+        )
+    if not verify_password(admin_password.get_secret_value(), current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="管理员密码错误",
+        )
+    if not secrets.compare_digest(
+        upgrade_password.get_secret_value(),
+        settings.upgrade_password,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="服务器升级专用密码错误",
+        )
+
+
+def require_secure_server_config_transport(request: Request) -> None:
+    if request.url.scheme.lower() == "https":
+        return
+
+    direct_address = _direct_client_address(request)
+    if direct_address is not None and _is_private_or_loopback(direct_address):
+        forwarded_proto = request.headers.get("x-forwarded-proto", "")
+        if forwarded_proto.strip().lower() == "https":
+            return
+
+    if direct_address is not None and direct_address.is_loopback:
+        browser_source = request.headers.get("origin") or request.headers.get("referer")
+        if _is_loopback_browser_source(browser_source):
+            return
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="服务器配置必须通过 HTTPS 或本机回环地址提交",
+    )
+
+
+def _direct_client_address(request: Request) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    if request.client is None:
+        return None
+    try:
+        return ipaddress.ip_address(request.client.host)
+    except ValueError:
+        return None
+
+
+def _is_private_or_loopback(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    if address.is_loopback:
+        return True
+    return any(
+        address.version == network.version and address in network
+        for network in _TRUSTED_PROXY_NETWORKS
+    )
+
+
+def _is_loopback_browser_source(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        hostname = urlsplit(value).hostname
+    except ValueError:
+        return False
+    if hostname is None:
+        return False
+    normalized = hostname.rstrip(".").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
