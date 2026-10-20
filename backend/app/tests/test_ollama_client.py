@@ -123,7 +123,33 @@ def test_untrusted_origin_never_receives_access_headers() -> None:
 @pytest.mark.parametrize(
     "base_url",
     [
+        "http://[",
+        "ftp://ollama.example.com",
+        "localhost:11434",
+        "http:///missing-host",
         "https://ollama.example.com@evil.example",
+    ],
+)
+def test_invalid_or_unsupported_base_url_maps_to_safe_model_error(base_url: str) -> None:
+    def request_must_not_be_sent(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("invalid base URL reached the transport")
+
+    client = OllamaClient(
+        _runtime(base_url=base_url),
+        transport=httpx.MockTransport(request_must_not_be_sent),
+    )
+
+    with pytest.raises(OllamaModelError) as caught:
+        _run(client.version())
+
+    assert caught.value.category == "model"
+    assert str(caught.value) == "Ollama base URL is invalid"
+    _assert_sensitive_exception_state_unreachable(caught.value, base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
         "https://sub.ollama.example.com",
         "https://evil.example?next=https://ollama.example.com",
     ],

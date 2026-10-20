@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.core.errors import ApiError
 from app.core.security import get_current_user, get_optional_current_user, require_admin
@@ -152,6 +153,32 @@ def _safe_runtime_status(db: Session, user: User) -> Any:
     )
 
 
+def _load_health_context(
+    db: Session,
+    user: User,
+) -> tuple[OllamaRuntimeConfig, Any]:
+    return get_ollama_runtime_config(db, user), _safe_runtime_status(db, user)
+
+
+def _prepare_runtime_and_template(
+    db: Session,
+    user: User | None,
+    template_name: str,
+) -> tuple[OllamaRuntimeConfig, str]:
+    return get_ollama_runtime_config(db, user), load_prompt_template(template_name)
+
+
+def _prepare_classify_context(
+    db: Session,
+    user: User | None,
+) -> tuple[OllamaRuntimeConfig, str, str]:
+    return (
+        get_ollama_runtime_config(db, user),
+        _format_categories_for_prompt(db),
+        load_prompt_template("classify_book.txt"),
+    )
+
+
 async def _check_ollama(
     db: Session,
     user: User,
@@ -160,8 +187,7 @@ async def _check_ollama(
 ) -> AIHealthResponse:
     global _last_health_status
 
-    runtime = get_ollama_runtime_config(db, user)
-    safe_runtime = _safe_runtime_status(db, user)
+    runtime, safe_runtime = await run_in_threadpool(_load_health_context, db, user)
     client = OllamaClient(runtime)
     try:
         version = await client.version()
@@ -192,14 +218,13 @@ async def _check_ollama(
     return _last_health_status
 
 
-def _record_failure_and_raise(
+def _record_failure(
     db: Session,
     *,
     task_type: str,
     model: str | None,
     input_data: dict[str, Any],
     exc: OllamaClientError,
-    hostname: str | None = None,
     created_by: int | None = None,
 ) -> None:
     create_ai_task(
@@ -211,7 +236,6 @@ def _record_failure_and_raise(
         error_message=exc.category,
         created_by=created_by,
     )
-    raise _ai_error_from_ollama(exc, hostname=hostname)
 
 
 async def _run_json_task(
@@ -229,18 +253,20 @@ async def _run_json_task(
     try:
         result = await client.generate_json(prompt=prompt, response_model=response_model, model=model)
     except OllamaClientError as exc:
-        _record_failure_and_raise(
+        await run_in_threadpool(
+            _record_failure,
             db,
             task_type=task_type,
             model=model,
             input_data=input_data,
             exc=exc,
-            hostname=_safe_hostname(runtime.base_url),
             created_by=created_by,
         )
+        raise _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
 
     output_data = result.model_dump(mode="json")
-    create_ai_task(
+    await run_in_threadpool(
+        create_ai_task,
         db,
         task_type=task_type,
         model=model,
@@ -294,23 +320,25 @@ async def list_models(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> OllamaModelsResponse:
-    runtime = get_ollama_runtime_config(db, current_user)
+    runtime = await run_in_threadpool(get_ollama_runtime_config, db, current_user)
     input_data = {"hostname": _safe_hostname(runtime.base_url)}
     client = OllamaClient(runtime)
     try:
         result = await client.list_models()
     except OllamaClientError as exc:
-        _record_failure_and_raise(
+        await run_in_threadpool(
+            _record_failure,
             db,
             task_type="models",
             model=None,
             input_data=input_data,
             exc=exc,
-            hostname=_safe_hostname(runtime.base_url),
             created_by=current_user.id if current_user else None,
         )
+        raise _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
 
-    create_ai_task(
+    await run_in_threadpool(
+        create_ai_task,
         db,
         task_type="models",
         model=None,
@@ -328,11 +356,14 @@ async def classify_book(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> ClassifyBookResponse:
-    runtime = get_ollama_runtime_config(db, current_user)
+    runtime, categories_text, template = await run_in_threadpool(
+        _prepare_classify_context,
+        db,
+        current_user,
+    )
     model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
-    categories_text = _format_categories_for_prompt(db)
-    prompt = load_prompt_template("classify_book.txt").format(
+    prompt = template.format(
         title=payload.title,
         author=_clean_text(payload.author),
         publisher=_clean_text(payload.publisher),
@@ -357,10 +388,15 @@ async def generate_tags(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> GenerateTagsResponse:
-    runtime = get_ollama_runtime_config(db, current_user)
+    runtime, template = await run_in_threadpool(
+        _prepare_runtime_and_template,
+        db,
+        current_user,
+        "generate_tags.txt",
+    )
     model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
-    prompt = load_prompt_template("generate_tags.txt").format(
+    prompt = template.format(
         title=payload.title,
         author=_clean_text(payload.author),
         publisher=_clean_text(payload.publisher),
@@ -386,10 +422,15 @@ async def recommend_book_content(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> RecommendBookContentResponse:
-    runtime = get_ollama_runtime_config(db, current_user)
+    runtime, template = await run_in_threadpool(
+        _prepare_runtime_and_template,
+        db,
+        current_user,
+        "recommend_book_content.txt",
+    )
     model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
-    prompt = load_prompt_template("recommend_book_content.txt").format(
+    prompt = template.format(
         current=_dump(payload.current),
         candidates=_dump(payload.candidates),
         missing_fields=", ".join(payload.missing_fields),
@@ -412,10 +453,15 @@ async def summarize_book(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> SummarizeBookResponse:
-    runtime = get_ollama_runtime_config(db, current_user)
+    runtime, template = await run_in_threadpool(
+        _prepare_runtime_and_template,
+        db,
+        current_user,
+        "summarize_book.txt",
+    )
     model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
-    prompt = load_prompt_template("summarize_book.txt").format(
+    prompt = template.format(
         title=payload.title,
         author=_clean_text(payload.author),
         publisher=_clean_text(payload.publisher),
@@ -440,10 +486,15 @@ async def detect_duplicate(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> DetectDuplicateResponse:
-    runtime = get_ollama_runtime_config(db, current_user)
+    runtime, template = await run_in_threadpool(
+        _prepare_runtime_and_template,
+        db,
+        current_user,
+        "detect_duplicate.txt",
+    )
     model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
-    prompt = load_prompt_template("detect_duplicate.txt").format(
+    prompt = template.format(
         first=_dump(payload.first),
         second=_dump(payload.second),
     )
@@ -465,10 +516,15 @@ async def natural_search(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> NaturalSearchResponse:
-    runtime = get_ollama_runtime_config(db, current_user)
+    runtime, template = await run_in_threadpool(
+        _prepare_runtime_and_template,
+        db,
+        current_user,
+        "natural_search.txt",
+    )
     model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
-    prompt = load_prompt_template("natural_search.txt").format(query=payload.query)
+    prompt = template.format(query=payload.query)
     return await _run_json_task(
         db,
         task_type="natural_search",

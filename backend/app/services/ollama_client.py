@@ -285,8 +285,23 @@ async def _read_bounded(response: httpx.Response, limit: int) -> bytes:
 
 def _candidate_base_urls(base_url: str) -> list[str]:
     normalized = base_url.rstrip("/")
+    valid = False
+    parsed = None
+    try:
+        parsed = urlsplit(normalized)
+        valid = (
+            parsed.scheme.lower() in {"http", "https"}
+            and parsed.hostname is not None
+            and parsed.username is None
+            and parsed.password is None
+        )
+        parsed.port
+    except ValueError:
+        valid = False
+    if not valid or parsed is None:
+        raise OllamaModelError("Ollama base URL is invalid")
+
     candidates = [normalized]
-    parsed = urlsplit(normalized)
     if parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
         netloc = "host.docker.internal"
         if parsed.port:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 
 import httpx
@@ -12,7 +13,12 @@ from app.core.config import Settings, get_settings
 from app.models import AITask, Book
 from app.models.user import User
 from app.schemas.ai import AIHealthResponse
-from app.services.ai_setting_service import get_effective_ai_settings, get_ollama_runtime_config
+from app.services.ai_setting_service import (
+    OllamaRuntimeConfig,
+    get_effective_ai_settings,
+    get_ollama_runtime_config,
+)
+from app.services.ai_task_service import sanitize_ai_task_input
 from app.services.ollama_client import (
     OllamaAccessDeniedError,
     OllamaClient,
@@ -606,6 +612,44 @@ def test_ai_config_is_persisted_per_account(client: TestClient, admin_headers: d
     assert openai["has_api_key"] is True
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://[",
+        "ftp://ollama.example.com",
+        "localhost:11434",
+        "http:///missing-host",
+        "https://ollama.example.com@evil.example",
+    ],
+)
+def test_ai_config_rejects_invalid_or_unsupported_base_url(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    base_url: str,
+) -> None:
+    response = client.put(
+        "/api/ai/config",
+        headers=admin_headers,
+        json={
+            "active_provider": "ollama",
+            "default_model": "qwen3:8b",
+            "providers": [
+                {
+                    "provider": "ollama",
+                    "enabled": True,
+                    "base_url": base_url,
+                    "default_model": "qwen3:8b",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    saved = client.get("/api/ai/config", headers=admin_headers).json()
+    ollama = next(item for item in saved["providers"] if item["provider"] == "ollama")
+    assert ollama["base_url"] != base_url
+
+
 def test_models_use_account_ollama_base_url(
     client: TestClient,
     admin_headers: dict[str, str],
@@ -832,6 +876,129 @@ def test_ai_task_input_truncates_long_summary_and_never_stores_headers(
     assert "headers" not in serialized
     assert "authorization" not in serialized
     assert secret not in serialized
+
+
+def test_sanitize_ai_task_input_bounds_cycles_depth_nodes_and_json_bytes() -> None:
+    cyclic: dict[str, object] = {"title": "保留标题"}
+    cyclic["current"] = cyclic
+
+    deep: dict[str, object] = {"title": "最深层"}
+    for _ in range(20):
+        deep = {"title": "层级", "current": deep}
+
+    branch: dict[str, object] = {
+        "title": "节点" * 300,
+        "summary": "摘要" * 300,
+    }
+    for _ in range(5):
+        branch = {"title": "根", "candidates": [branch] * 20, "current": branch}
+
+    sanitized = sanitize_ai_task_input(
+        {"title": "审计根", "current": cyclic, "first": deep, "candidates": [branch] * 20}
+    )
+    encoded = json.dumps(sanitized, ensure_ascii=False).encode("utf-8")
+
+    assert sanitized["title"] == "审计根"
+    assert sanitized["current"]["title"] == "保留标题"
+    assert len(encoded) <= 16_384
+
+    def count_nodes(value: object) -> int:
+        if isinstance(value, dict):
+            return 1 + sum(count_nodes(item) for item in value.values())
+        if isinstance(value, list):
+            return 1 + sum(count_nodes(item) for item in value)
+        return 1
+
+    assert count_nodes(sanitized) <= 256
+
+    depth = 0
+    cursor = sanitized.get("first")
+    while isinstance(cursor, dict) and "current" in cursor:
+        depth += 1
+        cursor = cursor["current"]
+    assert depth <= 6
+
+
+def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    sync_threads: list[int] = []
+    event_loop_threads: list[int] = []
+    original_runtime = ai_routes.get_ollama_runtime_config
+    original_categories = ai_routes._format_categories_for_prompt
+    original_template = ai_routes.load_prompt_template
+    original_create_task = ai_routes.create_ai_task
+
+    def track_sync(callable_):
+        def wrapper(*args, **kwargs):
+            sync_threads.append(threading.get_ident())
+            return callable_(*args, **kwargs)
+
+        return wrapper
+
+    class ThreadTrackingClient:
+        def __init__(self, runtime: OllamaRuntimeConfig) -> None:
+            self.runtime = runtime
+
+        async def generate_json(self, **kwargs):
+            event_loop_threads.append(threading.get_ident())
+            return kwargs["response_model"].model_validate(
+                {
+                    "category_code": "C91",
+                    "category_name": "社会学",
+                    "confidence": 0.9,
+                    "tags": ["社会学"],
+                    "reason": "线程边界测试",
+                    "model": kwargs["model"],
+                }
+            )
+
+    monkeypatch.setattr(ai_routes, "get_ollama_runtime_config", track_sync(original_runtime))
+    monkeypatch.setattr(ai_routes, "_format_categories_for_prompt", track_sync(original_categories))
+    monkeypatch.setattr(ai_routes, "load_prompt_template", track_sync(original_template))
+    monkeypatch.setattr(ai_routes, "create_ai_task", track_sync(original_create_task))
+    monkeypatch.setattr(ai_routes, "OllamaClient", ThreadTrackingClient)
+
+    response = client.post("/api/ai/classify-book", json={"title": "乡土中国"})
+
+    assert response.status_code == 200
+    assert event_loop_threads
+    assert len(sync_threads) == 4
+    assert all(thread_id != event_loop_threads[0] for thread_id in sync_threads)
+
+
+def test_invalid_runtime_is_audited_and_returns_stable_ai_error(
+    client: TestClient,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid_runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url="http://[sensitive-invalid-url",
+        trusted_base_url="https://openclaw.lsgood.cn",
+        default_model="qwen3:8b",
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_client_id="",
+        access_client_secret="",
+    )
+    monkeypatch.setattr(
+        "app.api.routes.ai.get_ollama_runtime_config",
+        lambda db, user: invalid_runtime,
+    )
+
+    response = client.get("/api/ai/models")
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "AI_MODEL_ERROR"
+    assert "sensitive-invalid-url" not in response.text
+    task = db.query(AITask).one()
+    assert task.status == "failed"
+    assert task.error_message == "model"
 
 
 def test_ai_failure_does_not_modify_book_or_block_non_ai_health(

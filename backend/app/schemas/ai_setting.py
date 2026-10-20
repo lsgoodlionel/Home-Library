@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -47,6 +48,27 @@ class AIProviderConfigUpdate(BaseModel):
     @classmethod
     def clean_optional_text(cls, value: object) -> str:
         return value.strip() if isinstance(value, str) else ""
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        if not value:
+            return value
+        valid = False
+        try:
+            parsed = urlsplit(value)
+            valid = (
+                parsed.scheme.lower() in {"http", "https"}
+                and parsed.hostname is not None
+                and parsed.username is None
+                and parsed.password is None
+            )
+            parsed.port
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError("服务地址必须是包含主机名的 HTTP 或 HTTPS URL")
+        return value
 
 
 class AISettingsUpdate(BaseModel):
