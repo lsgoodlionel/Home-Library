@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import Generator
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,8 +22,9 @@ from app.schemas.ai import (
     OllamaRunningModelsResponse,
     OllamaVersionResponse,
 )
+from app.schemas.ai_setting import OllamaRuntimeStatus
 from app.services.ai_health_status_cache import AIHealthStatusCache
-from app.services.ai_setting_service import get_ollama_runtime_config
+from app.services.ai_setting_service import OllamaRuntimeConfig, get_ollama_runtime_config
 from app.services.ollama_client import OllamaUpstreamError
 from app.tests.conftest import make_user
 
@@ -262,6 +266,105 @@ def test_account_runtime_fingerprint_changes_when_server_security_config_changes
     cache = AIHealthStatusCache(max_entries=2)
     cache.put(user_id, first, AIHealthResponse(status="healthy"))
     assert cache.get(user_id, second).status == "unchecked"
+
+
+def test_health_refresh_uses_one_immutable_runtime_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url="https://old-runtime.example.test/ollama",
+        trusted_base_url="https://old-runtime.example.test",
+        default_model="old-model",
+        connect_timeout_seconds=4,
+        read_timeout_seconds=40,
+        verify_tls=True,
+        access_client_id="old-client-id-marker",
+        access_client_secret="old-client-secret-marker",
+    )
+    new_runtime = replace(
+        old_runtime,
+        base_url="https://new-runtime.example.test/ollama",
+        trusted_base_url="https://new-runtime.example.test",
+        default_model="new-model",
+        verify_tls=False,
+        access_client_id="new-client-id-marker",
+        access_client_secret="new-client-secret-marker",
+    )
+    new_reported_runtime = OllamaRuntimeStatus(
+        enabled=True,
+        base_url=new_runtime.base_url,
+        default_model=new_runtime.default_model,
+        connect_timeout_seconds=new_runtime.connect_timeout_seconds,
+        read_timeout_seconds=new_runtime.read_timeout_seconds,
+        verify_tls=new_runtime.verify_tls,
+        access_configured=True,
+        uses_access=True,
+    )
+    runtime_state = {"value": old_runtime}
+    first_snapshot_captured = threading.Event()
+    release_first_snapshot = threading.Event()
+    former_second_read_called = threading.Event()
+    probed_runtimes: list[OllamaRuntimeConfig] = []
+
+    def resolve_probe_runtime(*args) -> OllamaRuntimeConfig:
+        del args
+        snapshot = runtime_state["value"]
+        first_snapshot_captured.set()
+        assert release_first_snapshot.wait(timeout=2)
+        return snapshot
+
+    def resolve_reported_runtime(*args):
+        del args
+        former_second_read_called.set()
+        return SimpleNamespace(ollama_runtime=new_reported_runtime)
+
+    class CapturingClient(_HealthyClient):
+        def __init__(self, runtime: OllamaRuntimeConfig) -> None:
+            super().__init__(runtime)
+            probed_runtimes.append(runtime)
+
+    monkeypatch.setattr(ai_routes, "get_ollama_runtime_config", resolve_probe_runtime)
+    monkeypatch.setattr(ai_routes, "get_effective_ai_settings", resolve_reported_runtime)
+    monkeypatch.setattr(ai_routes, "OllamaClient", CapturingClient)
+
+    user_id = 41
+    result: dict[str, AIHealthResponse] = {}
+    failures: list[BaseException] = []
+
+    def run_health_refresh() -> None:
+        try:
+            result["status"] = asyncio.run(
+                ai_routes._check_ollama(object(), SimpleNamespace(id=user_id), generate=False)
+            )
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=run_health_refresh)
+    worker.start()
+    assert first_snapshot_captured.wait(timeout=2)
+    runtime_state["value"] = new_runtime
+    release_first_snapshot.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert failures == []
+    assert probed_runtimes == [old_runtime]
+    assert not former_second_read_called.is_set()
+    response = result["status"]
+    assert response.ollama_runtime is not None
+    assert response.ollama_runtime.base_url == old_runtime.base_url
+    assert response.ollama_runtime.default_model == old_runtime.default_model
+    assert response.ollama_runtime.verify_tls is old_runtime.verify_tls
+    old_fingerprint = ai_routes._runtime_fingerprint(old_runtime)
+    new_fingerprint = ai_routes._runtime_fingerprint(new_runtime)
+    assert ai_routes._health_status_cache.get(user_id, old_fingerprint) is response
+    assert ai_routes._health_status_cache.get(user_id, new_fingerprint).status == "unchecked"
+    serialized = response.model_dump_json()
+    assert "old-client-id-marker" not in serialized
+    assert "old-client-secret-marker" not in serialized
+    assert "old-client-id-marker" not in old_fingerprint
+    assert "old-client-secret-marker" not in old_fingerprint
 
 
 def test_non_ai_health_and_book_api_survive_server_ai_failure(

@@ -36,11 +36,12 @@ from app.schemas.ai import (
     SummarizeBookRequest,
     SummarizeBookResponse,
 )
-from app.schemas.ai_setting import AISettingsResponse, AISettingsUpdate
+from app.schemas.ai_setting import AISettingsResponse, AISettingsUpdate, OllamaRuntimeStatus
 from app.services.ai_setting_service import (
     OllamaRuntimeConfig,
     get_effective_ai_settings,
     get_ollama_runtime_config,
+    normalize_access_origin,
     update_user_ai_settings,
 )
 from app.services.ai_health_status_cache import ai_health_status_cache as _health_status_cache
@@ -155,26 +156,36 @@ def _safe_hostname(url: str) -> str | None:
         return None
 
 
-def _safe_runtime_status(db: Session, user: User) -> Any:
-    runtime = get_effective_ai_settings(db, user).ollama_runtime
+def _safe_runtime_status(runtime: OllamaRuntimeConfig) -> OllamaRuntimeStatus:
     safe_base_url = ""
     try:
         safe_base_url = normalize_ollama_base_url(runtime.base_url).rstrip("/")
     except (InvalidOllamaBaseURL, ValueError):
         safe_base_url = ""
-    return runtime.model_copy(
-        update={
-            "base_url": _bounded_status_text(safe_base_url) or "",
-            "default_model": _bounded_status_text(runtime.default_model) or "",
-        }
+    access_configured = bool(runtime.access_client_id and runtime.access_client_secret)
+    trusted_origin = normalize_access_origin(runtime.trusted_base_url)
+    return OllamaRuntimeStatus(
+        enabled=runtime.enabled,
+        base_url=_bounded_status_text(safe_base_url) or "",
+        default_model=_bounded_status_text(runtime.default_model) or "",
+        connect_timeout_seconds=runtime.connect_timeout_seconds,
+        read_timeout_seconds=runtime.read_timeout_seconds,
+        verify_tls=runtime.verify_tls,
+        access_configured=access_configured,
+        uses_access=(
+            access_configured
+            and trusted_origin is not None
+            and normalize_access_origin(runtime.base_url) == trusted_origin
+        ),
     )
 
 
 def _load_health_context(
     db: Session,
     user: User,
-) -> tuple[OllamaRuntimeConfig, Any]:
-    return get_ollama_runtime_config(db, user), _safe_runtime_status(db, user)
+) -> tuple[OllamaRuntimeConfig, OllamaRuntimeStatus]:
+    runtime = get_ollama_runtime_config(db, user)
+    return runtime, _safe_runtime_status(runtime)
 
 
 def _runtime_fingerprint(runtime: OllamaRuntimeConfig) -> str:
