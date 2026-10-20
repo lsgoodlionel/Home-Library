@@ -29,7 +29,7 @@ export interface StatsOverview {
 
 export interface DistributionItem {
   id?: number;
-  key?: string;
+  key: string;
   name: string;
   count: number;
   code?: string;

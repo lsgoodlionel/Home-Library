@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 
 const props = defineProps<{
-  items: Array<{ key?: string; name: string; count: number; color?: string }>;
+  items: Array<{ key: string; name: string; count: number; color?: string }>;
 }>();
 
 const palette = ['#2f6f73', '#8f6f3f', '#4c78a8', '#d07f4f', '#6b7280', '#7a8f55'];
@@ -14,7 +14,7 @@ const segments = computed(() => {
     const dash = total.value > 0 ? (item.count / total.value) * 100 : 0;
     const segment = {
       ...item,
-      segmentKey: item.key ?? `${item.name}:${index}`,
+      segmentKey: item.key,
       color: item.color || palette[index % palette.length],
       dash,
       offset,

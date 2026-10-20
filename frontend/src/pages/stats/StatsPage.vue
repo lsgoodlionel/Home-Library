@@ -37,10 +37,10 @@ const errors = ref({
 });
 
 const readingItems = computed(() => [
-  { name: '未读', count: readingStats.value?.unread || 0, color: '#6b7280' },
-  { name: '阅读中', count: readingStats.value?.reading || 0, color: '#4c78a8' },
-  { name: '已读', count: readingStats.value?.read || 0, color: '#2f6f73' },
-  { name: '暂停', count: readingStats.value?.paused || 0, color: '#b57a36' },
+  { key: 'reading:unread', name: '未读', count: readingStats.value?.unread || 0, color: '#6b7280' },
+  { key: 'reading:reading', name: '阅读中', count: readingStats.value?.reading || 0, color: '#4c78a8' },
+  { key: 'reading:read', name: '已读', count: readingStats.value?.read || 0, color: '#2f6f73' },
+  { key: 'reading:paused', name: '暂停', count: readingStats.value?.paused || 0, color: '#b57a36' },
 ]);
 
 const categoryChartItems = computed(() => collapseOverflowItems(categoryItems.value, 22));

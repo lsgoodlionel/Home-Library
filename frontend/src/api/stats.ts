@@ -87,18 +87,27 @@ function normalizeActiveBorrow(record: ApiActiveBorrow): ActiveBorrowSummary {
   };
 }
 
-function normalizeDistributionItem(item: ApiDistributionItem): DistributionItem {
+function normalizeDistributionItem(item: ApiDistributionItem, scope: string): DistributionItem {
+  const name = item.name || item.label || '未分类';
   return {
     id: item.id ?? undefined,
     code: item.code ?? undefined,
-    name: item.name || item.label || '未分类',
+    key: item.id != null
+      ? `${scope}:id:${item.id}`
+      : item.code
+        ? `${scope}:code:${item.code}`
+        : `${scope}:name:${name}`,
+    name,
     count: item.count ?? item.value ?? 0,
   };
 }
 
-function normalizeDistribution(data: ApiDistributionItem[] | { items?: ApiDistributionItem[] }): DistributionItem[] {
+function normalizeDistribution(
+  data: ApiDistributionItem[] | { items?: ApiDistributionItem[] },
+  scope: string,
+): DistributionItem[] {
   const items = Array.isArray(data) ? data : data.items || [];
-  return items.map(normalizeDistributionItem);
+  return items.map((item) => normalizeDistributionItem(item, scope));
 }
 
 export async function getStatsOverview(): Promise<StatsOverview> {
@@ -119,13 +128,13 @@ export async function getCategoryStats(): Promise<DistributionItem[]> {
   const { data } = await apiClient.get<ApiDistributionItem[] | { items?: ApiDistributionItem[] }>(
     '/stats/categories',
   );
-  return normalizeDistribution(data).map((item, index) => ({
+  return normalizeDistribution(data, 'category').map((item) => ({
     ...item,
     key: item.id !== undefined
       ? `category:id:${item.id}`
       : item.code
         ? `category:code:${item.code}`
-        : `category:${item.name}:${index}`,
+        : 'category:uncategorized',
     name: item.code ? `${item.code} ${item.name}` : item.name,
   }));
 }
@@ -134,7 +143,7 @@ export async function getLocationStats(): Promise<DistributionItem[]> {
   const { data } = await apiClient.get<ApiDistributionItem[] | { items?: ApiDistributionItem[] }>(
     '/stats/locations',
   );
-  return normalizeDistribution(data);
+  return normalizeDistribution(data, 'location');
 }
 
 export async function getAuthorStats(limit = 10): Promise<DistributionItem[]> {
@@ -142,13 +151,13 @@ export async function getAuthorStats(limit = 10): Promise<DistributionItem[]> {
     '/stats/authors',
     { params: { limit } },
   );
-  return normalizeDistribution(data);
+  return normalizeDistribution(data, 'author');
 }
 
 export async function getReadingStats(): Promise<ReadingStats> {
   const { data } = await apiClient.get<ApiReadingStats>('/stats/reading');
   if (data.items) {
-    const mapped = normalizeDistribution(data).reduce(
+    const mapped = normalizeDistribution(data, 'reading').reduce(
       (acc, item) => ({ ...acc, [item.name]: item.count }),
       {} as Record<string, number>,
     );
