@@ -72,6 +72,14 @@ class _SafeApiFailure:
     error: ApiError
 
 
+@dataclass(frozen=True, slots=True)
+class _SafeHealthCancellation:
+    pass
+
+
+_HEALTH_CANCELLED = _SafeHealthCancellation()
+
+
 def _model_name(requested_model: str | None, default_model: str) -> str:
     return requested_model or default_model
 
@@ -245,6 +253,55 @@ async def _check_ollama(
     *,
     generate: bool,
 ) -> AIHealthResponse:
+    outcome = await _check_ollama_outcome(db, user, generate=generate)
+    del db, user
+    if outcome is _HEALTH_CANCELLED:
+        # The original cancellation never crosses this safe value boundary.
+        raise asyncio.CancelledError() from None
+    if isinstance(outcome, _SafeApiFailure):
+        _raise_api_error(outcome.error)
+    return outcome
+
+
+async def _check_ollama_outcome(
+    db: Session,
+    user: User,
+    *,
+    generate: bool,
+) -> AIHealthResponse | _SafeApiFailure | _SafeHealthCancellation:
+    try:
+        return await _probe_ollama_health(db, user, generate=generate)
+    except asyncio.CancelledError as exc:
+        exc.__traceback__ = None
+        exc.__cause__ = None
+        exc.__context__ = None
+    return _HEALTH_CANCELLED
+
+
+async def _drain_health_probes(
+    group: asyncio.Future[Any],
+    tasks: list[asyncio.Task[Any]],
+) -> bool:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    drain = asyncio.gather(group, *tasks, return_exceptions=True)
+    cancelled = False
+    while True:
+        try:
+            # Repeated owner cancellation must not cancel child cleanup.
+            await asyncio.shield(drain)
+            return cancelled
+        except asyncio.CancelledError:
+            cancelled = True
+
+
+async def _probe_ollama_health(
+    db: Session,
+    user: User,
+    *,
+    generate: bool,
+) -> AIHealthResponse | _SafeApiFailure:
     runtime, safe_runtime = await run_in_threadpool(_load_health_context, db, user)
     cache_key = _health_cache_key(user, runtime)
     client = OllamaClient(runtime)
@@ -264,15 +321,12 @@ async def _check_ollama(
             # the caller's cancellation with an upstream error.
             version, models, running_models, *_ = await asyncio.shield(probe_group)
         finally:
-            for task in probe_tasks:
-                if not task.done():
-                    task.cancel()
-            # Retrieve both the group error and every child's final result,
-            # including exceptions raised while cancellation cleanup runs.
-            await asyncio.gather(probe_group, *probe_tasks, return_exceptions=True)
+            cancelled_during_drain = await _drain_health_probes(probe_group, probe_tasks)
             # Completed tasks can retain cancellation tracebacks containing
             # client credentials. Drop every probe handle before raising.
-            del probes, probe_tasks, probe_group, task
+            del probes, probe_tasks, probe_group
+            if cancelled_during_drain:
+                raise asyncio.CancelledError() from None
     except OllamaClientError as exc:
         api_error = _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
         status = AIHealthResponse(
@@ -288,7 +342,7 @@ async def _check_ollama(
 
     if api_error is not None:
         del client, runtime, safe_runtime, cache_key, db, user
-        _raise_api_error(api_error)
+        return _SafeApiFailure(api_error)
 
     status = AIHealthResponse(
         status="healthy",

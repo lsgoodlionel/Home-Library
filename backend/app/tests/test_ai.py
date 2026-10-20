@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import math
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
-from types import CoroutineType, FrameType, SimpleNamespace, TracebackType
+from types import CoroutineType, FrameType, FunctionType, ModuleType, SimpleNamespace, TracebackType
 from typing import Any
 
 import httpx
@@ -110,7 +111,20 @@ def reset_ai_health_cache(monkeypatch: pytest.MonkeyPatch) -> None:
         ai_routes._health_cache.clear()
 
 
-def _assert_route_exception_graph_excludes(exc: ApiError, *markers: str) -> None:
+def _future_result_or_error(future: asyncio.Future[Any]) -> Any:
+    # Keep graph-walker markers and queues out of tracebacks added by result().
+    try:
+        return future.result()
+    except BaseException as error:
+        return error
+
+
+def _assert_route_exception_graph_excludes(
+    exc: BaseException,
+    *markers: str,
+    forbidden_types: tuple[type, ...] = (),
+    include_test_frames: bool = False,
+) -> None:
     assert exc.__cause__ is None
     assert exc.__context__ is None
 
@@ -121,6 +135,7 @@ def _assert_route_exception_graph_excludes(exc: ApiError, *markers: str) -> None
         if value is None or id(value) in seen:
             continue
         seen.add(id(value))
+        assert not isinstance(value, forbidden_types), "sensitive object remains reachable"
 
         if isinstance(value, bytes):
             text = value.decode("utf-8", errors="replace")
@@ -138,12 +153,11 @@ def _assert_route_exception_graph_excludes(exc: ApiError, *markers: str) -> None
             continue
         if isinstance(value, asyncio.Future):
             if value.done():
-                try:
-                    pending.append(value.result())
-                except BaseException as task_error:
-                    pending.append(task_error)
+                pending.append(_future_result_or_error(value))
             if isinstance(value, asyncio.Task):
                 pending.append(value.get_coro())
+            for attribute in ("_children", "_result", "_exception", "_cancel_message"):
+                pending.append(getattr(value, attribute, None))
             continue
         if isinstance(value, CoroutineType):
             pending.extend([value.cr_frame, value.cr_await])
@@ -156,14 +170,21 @@ def _assert_route_exception_graph_excludes(exc: ApiError, *markers: str) -> None
             continue
         if isinstance(value, FrameType):
             filename = value.f_code.co_filename
-            if "/app/" in filename and "/app/tests/" not in filename:
+            if include_test_frames or ("/app/" in filename and "/app/tests/" not in filename):
                 pending.append(value.f_locals)
             continue
-        if not isinstance(value, type):
+        if not isinstance(value, (type, FunctionType, ModuleType)):
             try:
                 pending.append(vars(value))
             except TypeError:
                 pass
+            for cls in type(value).__mro__:
+                slots = cls.__dict__.get("__slots__", ())
+                if isinstance(slots, str):
+                    slots = (slots,)
+                for slot in slots:
+                    if slot not in {"__dict__", "__weakref__"}:
+                        pending.append(getattr(value, slot, None))
 
 
 def _generate_response(payload: dict) -> dict:
@@ -671,6 +692,146 @@ def test_health_api_error_graph_drops_completed_probe_secrets(
         "health-access-secret-marker",
         "health-response-body-marker",
     )
+
+
+async def _observe_health_owner_cancellation(owner: asyncio.Task[Any]) -> BaseException:
+    # Return the exception as a value: setup fixtures never enter its traceback.
+    try:
+        await owner
+    except asyncio.CancelledError as error:
+        return error
+    raise AssertionError("health owner did not preserve cancellation")
+
+
+@pytest.mark.parametrize("generate", [False, True])
+@pytest.mark.parametrize("repeat_cancel", [False, True])
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+@pytest.mark.parametrize("upstream_failure_first", [False, True])
+def test_health_owner_cancellation_graph_and_complete_drain(
+    monkeypatch: pytest.MonkeyPatch,
+    generate: bool,
+    repeat_cancel: bool,
+    cleanup_failure: bool,
+    upstream_failure_first: bool,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url="https://ollama.example.test",
+        trusted_base_url="https://ollama.example.test",
+        default_model="qwen3:8b",
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_client_id="cancel-client-id-marker",
+        access_client_secret="cancel-access-secret-marker",
+    )
+    safe_runtime = OllamaRuntimeStatus(
+        enabled=True, base_url=runtime.base_url, default_model=runtime.default_model,
+        connect_timeout_seconds=20, read_timeout_seconds=180, verify_tls=True,
+        access_configured=True, uses_access=True,
+    )
+
+    async def exercise() -> None:
+        count = 4 if generate else 3
+        started: set[str] = set()
+        cleaned: set[str] = set()
+        cleaning: set[str] = set()
+        all_started = asyncio.Event()
+        all_cleaning = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        blocked = asyncio.Event()
+        unhandled: list[dict[str, Any]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            started.add(path)
+            if len(started) == count:
+                all_started.set()
+            try:
+                await all_started.wait()
+                if upstream_failure_first and path == "/api/version":
+                    cleaned.add(path)
+                    return httpx.Response(503, text="synthetic upstream failure")
+                await blocked.wait()
+            except asyncio.CancelledError:
+                cleaning.add(path)
+                if len(cleaning) == count - int(upstream_failure_first):
+                    all_cleaning.set()
+                await release_cleanup.wait()
+                cleaned.add(path)
+                if cleanup_failure:
+                    raise RuntimeError("synthetic cleanup failure") from None
+                raise
+            raise AssertionError("blocked probe unexpectedly completed")
+
+        class TrackedTransport(httpx.MockTransport):
+            closed = 0
+
+            async def aclose(self) -> None:
+                self.closed += 1
+                await super().aclose()
+
+        transport = TrackedTransport(handler)
+        monkeypatch.setattr(
+            ai_routes, "OllamaClient", lambda config: OllamaClient(config, transport=transport)
+        )
+        monkeypatch.setattr(ai_routes, "_load_health_context", lambda *args: (runtime, safe_runtime))
+        key = ai_routes._health_cache_key(SimpleNamespace(id=17), runtime)
+        cached = ai_routes.AIHealthResponse(status="healthy", message="existing cached status")
+        ai_routes._cache_health_status(key, cached)
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+        owner = asyncio.create_task(
+            ai_routes._check_ollama(object(), SimpleNamespace(id=17), generate=generate)
+        )
+        observer = asyncio.create_task(_observe_health_owner_cancellation(owner))
+        try:
+            await asyncio.wait_for(all_started.wait(), 1)
+            if upstream_failure_first:
+                # Let the upstream error, rather than owner cancellation,
+                # start drain before injecting the external cancellation.
+                await asyncio.wait_for(all_cleaning.wait(), 1)
+            owner.cancel("cancel-message-marker")
+            await asyncio.wait_for(all_cleaning.wait(), 1)
+            if repeat_cancel:
+                for _ in range(3):
+                    owner.cancel("repeat-cancel-message-marker")
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                    assert not owner.done(), "repeated cancellation interrupted drain"
+            release_cleanup.set()
+            error = await asyncio.wait_for(observer, 1)
+            assert cleaned == started
+            assert transport.closed == count
+            assert owner.cancelled()
+            assert ai_routes._get_cached_health_status(key) is cached
+            assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+            _assert_route_exception_graph_excludes(
+                error,
+                "cancel-client-id-marker", "cancel-access-secret-marker",
+                "cancel-message-marker", "repeat-cancel-message-marker",
+                "CF-Access-Client-Id", "CF-Access-Client-Secret",
+                "cf-access-client-id", "cf-access-client-secret",
+                forbidden_types=(OllamaRuntimeConfig, OllamaClient),
+                include_test_frames=True,
+            )
+            del error, owner, observer
+            gc.collect()
+            await asyncio.sleep(0)
+            assert not unhandled
+        finally:
+            release_cleanup.set()
+            # Only the failing test's cleanup may recover unfinished tasks.
+            if "owner" in locals():
+                if not owner.done():
+                    owner.cancel()
+                await asyncio.gather(owner, observer, return_exceptions=True)
+            loop.set_exception_handler(previous_handler)
+
+    asyncio.run(exercise())
 
 
 def test_health_cache_operations_hold_lock_during_mutation_and_iteration(
