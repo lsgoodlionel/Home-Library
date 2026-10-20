@@ -12,6 +12,17 @@ from app.core.config import Settings, get_settings
 from app.models import AITask
 from app.models.user import User
 from app.services.ai_setting_service import get_effective_ai_settings, get_ollama_runtime_config
+from app.services.ollama_client import (
+    OllamaAccessDeniedError,
+    OllamaClient,
+    OllamaConnectTimeoutError,
+    OllamaDisabledError,
+    OllamaModelError,
+    OllamaReadTimeoutError,
+    OllamaResponseInvalidError,
+    OllamaTunnelError,
+    OllamaUpstreamError,
+)
 
 
 OLLAMA_ENVIRONMENT_VARIABLES = (
@@ -53,6 +64,28 @@ def _mock_ollama(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Reque
     monkeypatch.setattr("app.services.ollama_service.httpx.Client", client_factory)
 
 
+def _mock_async_ollama(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> None:
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "app.api.routes.ai.OllamaClient",
+        lambda runtime: OllamaClient(runtime, transport=transport),
+    )
+
+
+@pytest.fixture
+def enabled_ollama_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_ollama_environment(monkeypatch)
+    monkeypatch.setenv("OLLAMA_ENABLED", "true")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "https://ollama.example.test")
+    monkeypatch.setenv("OLLAMA_DEFAULT_MODEL", "qwen3:8b")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 def _generate_response(payload: dict) -> dict:
     return {"response": json.dumps(payload, ensure_ascii=False)}
 
@@ -65,6 +98,250 @@ def _classify_payload() -> dict:
         "summary": "社会学经典作品",
         "model": "qwen2.5",
     }
+
+
+def test_ai_health_returns_sanitized_version_and_model_counts(
+    client: TestClient,
+    member_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    enabled_ollama_runtime: None,
+) -> None:
+    del enabled_ollama_runtime
+    response_marker = "upstream-response-secret-marker"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "0.6.2", "ignored": response_marker})
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "qwen3:8b"}, {"name": "nomic-embed-text"}]},
+            )
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": [{"name": "qwen3:8b"}]})
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    _mock_async_ollama(monkeypatch, handler)
+
+    response = client.get("/api/ai/health", headers=member_headers)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "healthy",
+        "message": "AI 服务连接正常",
+        "checked_at": response.json()["checked_at"],
+        "version": "0.6.2",
+        "installed_model_count": 2,
+        "running_model_count": 1,
+        "generated": False,
+        "ollama_runtime": {
+            "enabled": True,
+            "base_url": "https://ollama.example.test",
+            "default_model": "qwen3:8b",
+            "connect_timeout_seconds": 20.0,
+            "read_timeout_seconds": 180.0,
+            "verify_tls": True,
+            "access_configured": False,
+            "uses_access": False,
+        },
+    }
+    assert response.json()["checked_at"]
+    assert response_marker not in response.text
+
+
+def test_ai_health_requires_login(client: TestClient) -> None:
+    response = client.get("/api/ai/health")
+
+    assert response.status_code == 401
+
+
+def test_member_cannot_run_ai_connection_test(
+    client: TestClient,
+    member_headers: dict[str, str],
+) -> None:
+    response = client.post(
+        "/api/ai/test-connection",
+        headers=member_headers,
+        json={"generate": False},
+    )
+
+    assert response.status_code == 403
+
+
+def test_admin_connection_test_does_not_generate_by_default(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    enabled_ollama_runtime: None,
+) -> None:
+    del enabled_ollama_runtime
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "0.6.2"})
+        if request.url.path in {"/api/tags", "/api/ps"}:
+            return httpx.Response(200, json={"models": []})
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    _mock_async_ollama(monkeypatch, handler)
+
+    response = client.post(
+        "/api/ai/test-connection",
+        headers=admin_headers,
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["generated"] is False
+    assert requested_paths == ["/api/version", "/api/tags", "/api/ps"]
+
+
+def test_admin_generation_test_requires_explicit_true_and_uses_keep_alive_zero(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    enabled_ollama_runtime: None,
+) -> None:
+    del enabled_ollama_runtime
+    generation_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "0.6.2"})
+        if request.url.path in {"/api/tags", "/api/ps"}:
+            return httpx.Response(200, json={"models": []})
+        if request.url.path == "/api/generate":
+            generation_payloads.append(json.loads(request.content))
+            return httpx.Response(200, json={"response": '{"ok":true}'})
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    _mock_async_ollama(monkeypatch, handler)
+
+    disabled = client.post(
+        "/api/ai/test-connection",
+        headers=admin_headers,
+        json={"generate": False},
+    )
+    enabled = client.post(
+        "/api/ai/test-connection",
+        headers=admin_headers,
+        json={"generate": True},
+    )
+
+    assert disabled.status_code == 200
+    assert disabled.json()["generated"] is False
+    assert enabled.status_code == 200
+    assert enabled.json()["generated"] is True
+    assert generation_payloads == [
+        {
+            "model": "qwen3:8b",
+            "prompt": "请仅返回 JSON：{\"ok\": true}",
+            "stream": False,
+            "format": "json",
+            "keep_alive": 0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code", "expected_status", "expected_message"),
+    [
+        pytest.param(
+            OllamaDisabledError("safe"),
+            "AI_SERVICE_DISABLED",
+            503,
+            "AI 服务尚未启用",
+            id="disabled",
+        ),
+        pytest.param(
+            OllamaAccessDeniedError("safe", status_code=403),
+            "AI_ACCESS_DENIED",
+            502,
+            "Cloudflare Access 凭据缺失、无效或策略不允许",
+            id="access_denied",
+        ),
+        pytest.param(
+            OllamaTunnelError("safe", status_code=503),
+            "AI_TUNNEL_UNAVAILABLE",
+            503,
+            "Tunnel 或远程 Ollama Origin 不可用",
+            id="tunnel",
+        ),
+        pytest.param(
+            OllamaConnectTimeoutError("safe"),
+            "AI_CONNECT_TIMEOUT",
+            504,
+            "无法在限定时间内连接 AI 服务",
+            id="connect_timeout",
+        ),
+        pytest.param(
+            OllamaReadTimeoutError("safe"),
+            "AI_RESPONSE_TIMEOUT",
+            504,
+            "模型启动或生成超时",
+            id="read_timeout",
+        ),
+        pytest.param(
+            OllamaModelError("safe", status_code=400),
+            "AI_MODEL_ERROR",
+            502,
+            "模型配置或请求参数错误",
+            id="model",
+        ),
+        pytest.param(
+            OllamaUpstreamError("safe", status_code=500),
+            "AI_UPSTREAM_ERROR",
+            502,
+            "上游 AI 服务异常",
+            id="upstream",
+        ),
+        pytest.param(
+            OllamaResponseInvalidError("safe"),
+            "AI_RESPONSE_INVALID",
+            502,
+            "模型返回内容不能安全使用",
+            id="response_invalid",
+        ),
+    ],
+)
+def test_health_failure_returns_chinese_classified_error_without_secret(
+    client: TestClient,
+    member_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected_code: str,
+    expected_status: int,
+    expected_message: str,
+) -> None:
+    secret_marker = "access-secret-route-marker"
+    _clear_ollama_environment(monkeypatch)
+    monkeypatch.setenv("OLLAMA_ENABLED", "true")
+    monkeypatch.setenv("OLLAMA_BASE_URL", f"https://ollama.example.test/path?token={secret_marker}")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_ID", "client-id-route-marker")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_SECRET", secret_marker)
+    get_settings.cache_clear()
+
+    class FailingOllamaClient:
+        async def version(self):
+            raise error
+
+    monkeypatch.setattr(
+        "app.api.routes.ai.OllamaClient",
+        lambda runtime: FailingOllamaClient(),
+    )
+
+    response = client.get("/api/ai/health", headers=member_headers)
+    get_settings.cache_clear()
+
+    assert response.status_code == expected_status
+    assert response.json()["error"]["code"] == expected_code
+    assert response.json()["error"]["message"] == expected_message
+    assert response.json()["error"]["details"]["hostname"] == "ollama.example.test"
+    assert response.json()["error"]["details"]["category"] == getattr(error, "category")
+    assert secret_marker not in response.text
+    assert "client-id-route-marker" not in response.text
 
 
 def test_ollama_runtime_defaults_to_remote_disabled_configuration(

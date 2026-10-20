@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.schemas.ai_setting import OllamaRuntimeStatus
 
 BookStatus = Literal["available", "borrowed", "lost", "pending", "gifted"]
 ReadStatus = Literal["unread", "reading", "read", "paused"]
@@ -49,6 +52,21 @@ class OllamaChatMessage(BaseModel):
 
 class OllamaChatResponse(BaseModel):
     message: OllamaChatMessage
+
+
+class AIConnectionTestRequest(BaseModel):
+    generate: bool = False
+
+
+class AIHealthResponse(BaseModel):
+    status: Literal["unchecked", "healthy", "error"] = "unchecked"
+    message: str = "尚未检查"
+    checked_at: datetime | None = None
+    version: str | None = None
+    installed_model_count: int = 0
+    running_model_count: int = 0
+    generated: bool = False
+    ollama_runtime: OllamaRuntimeStatus | None = None
 
 
 class ClassifyBookRequest(AIBaseRequest):

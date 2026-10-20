@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
-from app.core.security import get_current_user, get_optional_current_user
+from app.core.security import get_current_user, get_optional_current_user, require_admin
 from app.db.session import get_db
 from app.models import Category
 from app.models.user import User
 from app.schemas.ai import (
+    AIConnectionTestRequest,
+    AIHealthResponse,
     ClassifyBookRequest,
     ClassifyBookResponse,
     DetectDuplicateRequest,
@@ -21,6 +25,7 @@ from app.schemas.ai import (
     GenerateTagsResponse,
     NaturalSearchRequest,
     NaturalSearchResponse,
+    OllamaGenerateResponse,
     OllamaModelsResponse,
     RecommendBookContentRequest,
     RecommendBookContentResponse,
@@ -34,6 +39,18 @@ from app.services.ai_setting_service import (
     update_user_ai_settings,
 )
 from app.services.ai_task_service import create_ai_task
+from app.services.ollama_client import (
+    OllamaAccessDeniedError,
+    OllamaClient,
+    OllamaClientError,
+    OllamaConnectTimeoutError,
+    OllamaDisabledError,
+    OllamaModelError,
+    OllamaReadTimeoutError,
+    OllamaResponseInvalidError,
+    OllamaTunnelError,
+    OllamaUpstreamError,
+)
 from app.services.ollama_service import (
     OllamaInvalidJSONError,
     OllamaService,
@@ -44,6 +61,8 @@ from app.services.ollama_service import (
 )
 
 router = APIRouter(prefix="/ai", tags=["ai"])
+_LAST_HEALTH_STATUS = AIHealthResponse()
+_MAX_STATUS_TEXT_LENGTH = 256
 
 
 def _model_name(requested_model: str | None, default_model: str) -> str:
@@ -74,12 +93,125 @@ def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
 
-def _ai_error_from_ollama(exc: OllamaServiceError) -> ApiError:
+def _ai_error_from_ollama(
+    exc: OllamaServiceError | OllamaClientError,
+    *,
+    hostname: str | None = None,
+) -> ApiError:
     if isinstance(exc, OllamaUnavailableError):
         return ApiError("AI_SERVICE_UNAVAILABLE", str(exc), status_code=503)
     if isinstance(exc, (OllamaInvalidJSONError, OllamaValidationError)):
         return ApiError("EXTERNAL_SERVICE_ERROR", str(exc), status_code=502)
+    mappings: tuple[tuple[type[OllamaClientError], str, str, int], ...] = (
+        (OllamaDisabledError, "AI_SERVICE_DISABLED", "AI 服务尚未启用", 503),
+        (
+            OllamaAccessDeniedError,
+            "AI_ACCESS_DENIED",
+            "Cloudflare Access 凭据缺失、无效或策略不允许",
+            502,
+        ),
+        (
+            OllamaTunnelError,
+            "AI_TUNNEL_UNAVAILABLE",
+            "Tunnel 或远程 Ollama Origin 不可用",
+            503,
+        ),
+        (OllamaConnectTimeoutError, "AI_CONNECT_TIMEOUT", "无法在限定时间内连接 AI 服务", 504),
+        (OllamaReadTimeoutError, "AI_RESPONSE_TIMEOUT", "模型启动或生成超时", 504),
+        (OllamaModelError, "AI_MODEL_ERROR", "模型配置或请求参数错误", 502),
+        (OllamaUpstreamError, "AI_UPSTREAM_ERROR", "上游 AI 服务异常", 502),
+        (OllamaResponseInvalidError, "AI_RESPONSE_INVALID", "模型返回内容不能安全使用", 502),
+    )
+    for error_type, code, message, status_code in mappings:
+        if isinstance(exc, error_type):
+            details: dict[str, Any] = {"category": exc.category}
+            if hostname:
+                details["hostname"] = hostname
+            if exc.status_code is not None:
+                details["status"] = exc.status_code
+            return ApiError(code, message, status_code=status_code, details=details)
     return ApiError("EXTERNAL_SERVICE_ERROR", "AI 服务调用失败", status_code=502)
+
+
+def _bounded_status_text(value: str | None) -> str | None:
+    return value[:_MAX_STATUS_TEXT_LENGTH] if value else None
+
+
+def _safe_hostname(url: str) -> str | None:
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
+def _safe_runtime_status(db: Session, user: User) -> Any:
+    runtime = get_effective_ai_settings(db, user).ollama_runtime
+    hostname = _safe_hostname(runtime.base_url)
+    safe_base_url = ""
+    if hostname:
+        try:
+            parsed = urlsplit(runtime.base_url)
+            port = f":{parsed.port}" if parsed.port is not None else ""
+            safe_base_url = f"{parsed.scheme}://{hostname}{port}"
+        except ValueError:
+            safe_base_url = ""
+    return runtime.model_copy(
+        update={
+            "base_url": _bounded_status_text(safe_base_url) or "",
+            "default_model": _bounded_status_text(runtime.default_model) or "",
+        }
+    )
+
+
+async def _check_ollama(
+    db: Session,
+    user: User,
+    *,
+    generate: bool,
+) -> AIHealthResponse:
+    global _LAST_HEALTH_STATUS
+
+    runtime = get_ollama_runtime_config(db, user)
+    safe_runtime = _safe_runtime_status(db, user)
+    client = OllamaClient(runtime)
+    try:
+        version = await client.version()
+        models = await client.list_models()
+        running_models = await client.running_models()
+        if generate:
+            response = await client._request(
+                "POST",
+                "/api/generate",
+                json={
+                    "model": runtime.default_model,
+                    "prompt": '请仅返回 JSON：{"ok": true}',
+                    "stream": False,
+                    "format": "json",
+                    "keep_alive": 0,
+                },
+            )
+            client._validate_response(response, OllamaGenerateResponse)
+    except OllamaClientError as exc:
+        api_error = _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
+        _LAST_HEALTH_STATUS = AIHealthResponse(
+            status="error",
+            message=_bounded_status_text(api_error.message) or "AI 服务检查失败",
+            checked_at=datetime.now(timezone.utc),
+            ollama_runtime=safe_runtime,
+        )
+        raise api_error
+
+    _LAST_HEALTH_STATUS = AIHealthResponse(
+        status="healthy",
+        message="AI 服务连接正常",
+        checked_at=datetime.now(timezone.utc),
+        version=_bounded_status_text(version.version),
+        installed_model_count=len(models.models),
+        running_model_count=len(running_models.models),
+        generated=generate,
+        ollama_runtime=safe_runtime,
+    )
+    return _LAST_HEALTH_STATUS
 
 
 def _record_failure_and_raise(
@@ -138,6 +270,23 @@ def _run_json_task(
         created_by=created_by,
     )
     return result
+
+
+@router.get("/health", response_model=AIHealthResponse)
+async def get_ai_health(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AIHealthResponse:
+    return await _check_ollama(db, current_user, generate=False)
+
+
+@router.post("/test-connection", response_model=AIHealthResponse)
+async def test_ai_connection(
+    payload: AIConnectionTestRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_admin)],
+) -> AIHealthResponse:
+    return await _check_ollama(db, current_user, generate=payload.generate)
 
 
 @router.get("/config", response_model=AISettingsResponse)
