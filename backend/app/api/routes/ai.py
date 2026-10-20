@@ -25,7 +25,6 @@ from app.schemas.ai import (
     GenerateTagsResponse,
     NaturalSearchRequest,
     NaturalSearchResponse,
-    OllamaGenerateResponse,
     OllamaModelsResponse,
     RecommendBookContentRequest,
     RecommendBookContentResponse,
@@ -179,18 +178,7 @@ async def _check_ollama(
         models = await client.list_models()
         running_models = await client.running_models()
         if generate:
-            response = await client._request(
-                "POST",
-                "/api/generate",
-                json={
-                    "model": runtime.default_model,
-                    "prompt": '请仅返回 JSON：{"ok": true}',
-                    "stream": False,
-                    "format": "json",
-                    "keep_alive": 0,
-                },
-            )
-            client._validate_response(response, OllamaGenerateResponse)
+            await client.generate_text(prompt="请回复 OK", keep_alive=0)
     except OllamaClientError as exc:
         api_error = _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
         _LAST_HEALTH_STATUS = AIHealthResponse(

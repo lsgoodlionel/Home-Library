@@ -21,6 +21,7 @@ T = TypeVar("T", bound=BaseModel)
 
 MAX_PROMPT_CHARS = 100_000
 MAX_RESPONSE_BYTES = 1_048_576
+MAX_GENERATED_TEXT_CHARS = 4_096
 CF_ERROR_PREFIX_BYTES = 8 * 1024
 _CF_1033_PATTERN = re.compile(rb"(?<!\d)1033(?!\d)")
 
@@ -134,6 +135,27 @@ class OllamaClient:
                 "Ollama generated an invalid response"
             )
         raise validation_error
+
+    async def generate_text(
+        self,
+        *,
+        prompt: str,
+        model: str | None = None,
+        keep_alive: int | str | None = None,
+    ) -> str:
+        self._validate_prompt_length(prompt)
+        payload: dict[str, Any] = {
+            "model": model or self.runtime.default_model,
+            "prompt": prompt,
+            "stream": False,
+        }
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
+        response = await self._request("POST", "/api/generate", json=payload)
+        text = self._validate_response(response, OllamaGenerateResponse).response
+        if len(text) > MAX_GENERATED_TEXT_CHARS:
+            raise OllamaResponseInvalidError("Ollama generated text exceeds the maximum length")
+        return text
 
     async def chat(
         self,

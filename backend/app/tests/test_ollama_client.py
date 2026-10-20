@@ -386,6 +386,39 @@ def test_health_generation_and_chat_methods_use_expected_upstream_contracts() ->
     assert chat_text == "Hi"
 
 
+def test_generate_text_uses_current_model_keep_alive_zero_and_returns_text() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/generate"
+        payload = json.loads(request.content)
+        assert payload == {
+            "model": "qwen3:8b",
+            "prompt": "Reply with OK",
+            "stream": False,
+            "keep_alive": 0,
+        }
+        return httpx.Response(200, json={"response": "OK"})
+
+    client = OllamaClient(_runtime(), transport=httpx.MockTransport(handler))
+
+    text = _run(client.generate_text(prompt="Reply with OK", keep_alive=0))
+
+    assert text == "OK"
+
+
+def test_generate_text_rejects_text_over_bound_without_retaining_it() -> None:
+    response_marker = "oversized-text-sensitive-marker"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"response": response_marker + ("x" * 4097)})
+
+    client = OllamaClient(_runtime(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(OllamaResponseInvalidError) as caught:
+        _run(client.generate_text(prompt="Reply briefly", keep_alive=0))
+
+    _assert_sensitive_exception_state_unreachable(caught.value, response_marker)
+
+
 def test_generate_json_enforces_prompt_and_response_bounds() -> None:
     prompt_marker = "oversized-prompt-sensitive-marker"
 

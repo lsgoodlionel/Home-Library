@@ -237,9 +237,8 @@ def test_admin_generation_test_requires_explicit_true_and_uses_keep_alive_zero(
     assert generation_payloads == [
         {
             "model": "qwen3:8b",
-            "prompt": "请仅返回 JSON：{\"ok\": true}",
+            "prompt": "请回复 OK",
             "stream": False,
-            "format": "json",
             "keep_alive": 0,
         }
     ]
