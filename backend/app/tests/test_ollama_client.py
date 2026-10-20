@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -41,6 +42,55 @@ def _runtime(
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _assert_sensitive_exception_state_unreachable(
+    exc: BaseException,
+    *markers: str,
+) -> None:
+    assert exc.__cause__ is None
+    assert exc.__context__ is None
+
+    pending: list[Any] = [exc]
+    seen: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if value is None or id(value) in seen:
+            continue
+        seen.add(id(value))
+
+        if isinstance(value, bytes):
+            text = value.decode("utf-8", errors="replace")
+            assert all(marker not in text for marker in markers)
+            continue
+        if isinstance(value, str):
+            assert all(marker not in value for marker in markers)
+            continue
+        if isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+            continue
+        if isinstance(value, (list, tuple, set, frozenset)):
+            pending.extend(value)
+            continue
+
+        if isinstance(value, BaseException):
+            pending.extend(value.args)
+            pending.extend([value.__cause__, value.__context__])
+        if isinstance(value, httpx.Request):
+            pending.extend([str(value.url), dict(value.headers), value.content])
+        if isinstance(value, httpx.Response):
+            pending.extend([value.request, dict(value.headers), value.content])
+
+        for attribute in ("request", "response", "input", "doc"):
+            try:
+                pending.append(getattr(value, attribute, None))
+            except (AttributeError, RuntimeError):
+                pass
+
+        errors = getattr(value, "errors", None)
+        if callable(errors):
+            pending.append(errors())
 
 
 def test_trusted_origin_receives_access_headers() -> None:
@@ -92,21 +142,29 @@ def test_userinfo_subdomain_and_query_cannot_spoof_trusted_origin(base_url: str)
 @pytest.mark.parametrize(
     ("transport_error", "expected_error"),
     [
-        (httpx.ConnectTimeout("connect timed out"), OllamaConnectTimeoutError),
-        (httpx.ReadTimeout("read timed out"), OllamaReadTimeoutError),
+        (httpx.ConnectTimeout, OllamaConnectTimeoutError),
+        (httpx.ReadTimeout, OllamaReadTimeoutError),
     ],
 )
 def test_connect_timeout_and_read_timeout_are_distinct(
-    transport_error: httpx.TimeoutException,
+    transport_error: type[httpx.TimeoutException],
     expected_error: type[Exception],
 ) -> None:
+    timeout_marker = "timeout-sensitive-marker"
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raise transport_error
+        raise transport_error(timeout_marker, request=request)
 
     client = OllamaClient(_runtime(), transport=httpx.MockTransport(handler))
 
-    with pytest.raises(expected_error):
+    with pytest.raises(expected_error) as caught:
         _run(client.version())
+
+    _assert_sensitive_exception_state_unreachable(
+        caught.value,
+        timeout_marker,
+        "client-secret-marker",
+    )
 
 
 @pytest.mark.parametrize("status_code", [401, 403])
@@ -124,6 +182,7 @@ def test_access_401_and_403_map_to_access_denied(status_code: int) -> None:
     assert caught.value.category == "access_denied"
     assert caught.value.status_code == status_code
     assert body_marker not in str(caught.value)
+    _assert_sensitive_exception_state_unreachable(caught.value, body_marker)
 
 
 @pytest.mark.parametrize(
@@ -146,6 +205,35 @@ def test_tunnel_502_503_and_1033_map_to_tunnel_error(status_code: int, body: str
     assert caught.value.category == "tunnel"
     assert caught.value.status_code == status_code
     assert "upstream-secret-body-marker" not in str(caught.value)
+    _assert_sensitive_exception_state_unreachable(
+        caught.value,
+        "upstream-secret-body-marker",
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "body", "expected_error"),
+    [
+        (500, ("x" * 8192) + " 1033 ", OllamaUpstreamError),
+        (500, "error code 11033", OllamaUpstreamError),
+        (500, "error code 10330", OllamaUpstreamError),
+        (400, "error code 1033", OllamaModelError),
+    ],
+)
+def test_1033_outside_prefix_adjacent_or_non_5xx_is_not_tunnel(
+    status_code: int,
+    body: str,
+    expected_error: type[Exception],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, text=body)
+
+    client = OllamaClient(_runtime(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(expected_error) as caught:
+        _run(client.version())
+
+    assert not isinstance(caught.value, OllamaTunnelError)
 
 
 @pytest.mark.parametrize("status_code", [400, 404, 429])
@@ -163,6 +251,7 @@ def test_model_4xx_maps_to_model_error_without_body_leak(status_code: int) -> No
     assert caught.value.category == "model"
     assert caught.value.status_code == status_code
     assert body_marker not in str(caught.value)
+    _assert_sensitive_exception_state_unreachable(caught.value, body_marker)
 
 
 @pytest.mark.parametrize("status_code", [500, 504])
@@ -180,6 +269,7 @@ def test_upstream_5xx_maps_to_upstream_error_without_body_leak(status_code: int)
     assert caught.value.category == "upstream"
     assert caught.value.status_code == status_code
     assert body_marker not in str(caught.value)
+    _assert_sensitive_exception_state_unreachable(caught.value, body_marker)
 
 
 class _GeneratedPayload(BaseModel):
@@ -206,6 +296,10 @@ def test_generate_json_rejects_invalid_json_and_schema(response_body: bytes) -> 
 
     assert caught.value.category == "response_invalid"
     assert "not-model-json" not in str(caught.value)
+    _assert_sensitive_exception_state_unreachable(
+        caught.value,
+        response_body.decode(),
+    )
 
 
 def test_disabled_runtime_never_sends_request() -> None:
@@ -230,6 +324,11 @@ def test_disabled_runtime_never_sends_request() -> None:
         _run(client.version())
 
     assert caught.value.category == "disabled"
+    _assert_sensitive_exception_state_unreachable(
+        caught.value,
+        "client-id-secret-marker",
+        "client-secret-marker",
+    )
 
 
 def test_transient_connect_failure_retries_once_before_response() -> None:
@@ -288,30 +387,111 @@ def test_health_generation_and_chat_methods_use_expected_upstream_contracts() ->
 
 
 def test_generate_json_enforces_prompt_and_response_bounds() -> None:
+    prompt_marker = "oversized-prompt-sensitive-marker"
+
     def request_must_not_be_sent(request: httpx.Request) -> httpx.Response:
         raise AssertionError("oversized prompt was sent upstream")
 
     prompt_client = OllamaClient(
         _runtime(), transport=httpx.MockTransport(request_must_not_be_sent)
     )
-    with pytest.raises(OllamaModelError):
+    with pytest.raises(OllamaModelError) as prompt_caught:
         _run(
             prompt_client.generate_json(
-                prompt="x" * 100_001,
+                prompt=prompt_marker + ("x" * 100_001),
                 response_model=_GeneratedPayload,
             )
         )
+    _assert_sensitive_exception_state_unreachable(prompt_caught.value, prompt_marker)
 
+    response_marker = "oversized-response-sensitive-marker"
     def oversized_response(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"x" * 1_048_577)
+        return httpx.Response(
+            200,
+            content=response_marker.encode() + (b"x" * 1_048_577),
+        )
 
     response_client = OllamaClient(
         _runtime(), transport=httpx.MockTransport(oversized_response)
     )
-    with pytest.raises(OllamaResponseInvalidError):
+    with pytest.raises(OllamaResponseInvalidError) as response_caught:
         _run(
             response_client.generate_json(
                 prompt="Return a title",
                 response_model=_GeneratedPayload,
             )
+        )
+    _assert_sensitive_exception_state_unreachable(
+        response_caught.value,
+        response_marker,
+    )
+
+
+def test_propagated_ollama_errors_drop_sensitive_exception_state() -> None:
+    secret_marker = "access-secret-boundary-marker"
+    prompt_marker = "full-prompt-boundary-marker"
+    query_marker = "query-boundary-marker"
+    response_marker = "response-boundary-marker"
+    runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url=f"https://ollama.example.com?token={query_marker}",
+        trusted_base_url="https://ollama.example.com",
+        default_model="qwen3:8b",
+        connect_timeout_seconds=2.5,
+        read_timeout_seconds=30.0,
+        verify_tls=True,
+        access_client_id="client-id",
+        access_client_secret=secret_marker,
+    )
+
+    def connect_failure(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection failed", request=request)
+
+    connect_client = OllamaClient(runtime, transport=httpx.MockTransport(connect_failure))
+    with pytest.raises(OllamaUpstreamError) as connect_caught:
+        _run(
+            connect_client.generate_json(
+                prompt=prompt_marker,
+                response_model=_GeneratedPayload,
+            )
+        )
+    _assert_sensitive_exception_state_unreachable(
+        connect_caught.value,
+        secret_marker,
+        prompt_marker,
+        query_marker,
+        response_marker,
+    )
+
+    invalid_responses = [
+        response_marker.encode(),
+        json.dumps({"response": f"not-json-{response_marker}"}).encode(),
+        json.dumps(
+            {"response": json.dumps({"unexpected": response_marker})}
+        ).encode(),
+    ]
+    for response_body in invalid_responses:
+        def invalid_response(
+            request: httpx.Request,
+            body: bytes = response_body,
+        ) -> httpx.Response:
+            return httpx.Response(200, content=body)
+
+        response_client = OllamaClient(
+            runtime,
+            transport=httpx.MockTransport(invalid_response),
+        )
+        with pytest.raises(OllamaResponseInvalidError) as response_caught:
+            _run(
+                response_client.generate_json(
+                    prompt=prompt_marker,
+                    response_model=_GeneratedPayload,
+                )
+            )
+        _assert_sensitive_exception_state_unreachable(
+            response_caught.value,
+            secret_marker,
+            prompt_marker,
+            query_marker,
+            response_marker,
         )

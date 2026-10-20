@@ -195,7 +195,7 @@ def get_ollama_runtime_config(db: Session, user: User | None) -> OllamaRuntimeCo
     )
 
 
-def _normalized_origin(url: str) -> tuple[str, str, int | None] | None:
+def normalize_ollama_origin(url: str) -> tuple[str, str, int | None] | None:
     try:
         parsed = urlsplit(url)
         if not parsed.scheme or not parsed.hostname or parsed.username is not None or parsed.password is not None:
@@ -225,11 +225,11 @@ def _runtime_status(
     access_configured = bool(
         settings.ollama_cf_access_client_id and settings.ollama_cf_access_client_secret
     )
-    trusted_origin = _normalized_origin(settings.ollama_base_url)
+    trusted_origin = normalize_ollama_origin(settings.ollama_base_url)
     uses_access = (
         access_configured
         and trusted_origin is not None
-        and _normalized_origin(base_url) == trusted_origin
+        and normalize_ollama_origin(base_url) == trusted_origin
     )
     return OllamaRuntimeStatus(
         enabled=settings.ollama_enabled,

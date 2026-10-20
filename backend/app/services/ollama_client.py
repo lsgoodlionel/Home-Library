@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, TypeVar
-from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -15,7 +14,7 @@ from app.schemas.ai import (
     OllamaRunningModelsResponse,
     OllamaVersionResponse,
 )
-from app.services.ai_setting_service import OllamaRuntimeConfig
+from app.services.ai_setting_service import OllamaRuntimeConfig, normalize_ollama_origin
 from app.services.ollama_service import parse_model_json
 
 T = TypeVar("T", bound=BaseModel)
@@ -66,23 +65,6 @@ class OllamaResponseInvalidError(OllamaClientError):
     category = "response_invalid"
 
 
-def _normalized_origin(url: str) -> tuple[str, str, int | None] | None:
-    try:
-        parsed = urlsplit(url)
-        if not parsed.scheme or not parsed.hostname:
-            return None
-        if parsed.username is not None or parsed.password is not None:
-            return None
-        port = parsed.port
-    except ValueError:
-        return None
-
-    scheme = parsed.scheme.lower()
-    if port is None:
-        port = {"http": 80, "https": 443}.get(scheme)
-    return scheme, parsed.hostname.lower(), port
-
-
 class OllamaClient:
     def __init__(
         self,
@@ -101,8 +83,9 @@ class OllamaClient:
         credentials_complete = bool(runtime.access_client_id and runtime.access_client_secret)
         if (
             credentials_complete
-            and _normalized_origin(runtime.base_url) is not None
-            and _normalized_origin(runtime.base_url) == _normalized_origin(runtime.trusted_base_url)
+            and normalize_ollama_origin(runtime.base_url) is not None
+            and normalize_ollama_origin(runtime.base_url)
+            == normalize_ollama_origin(runtime.trusted_base_url)
         ):
             self._headers = {
                 "CF-Access-Client-Id": runtime.access_client_id,
@@ -141,12 +124,16 @@ class OllamaClient:
             },
         )
         envelope = self._validate_response(response, OllamaGenerateResponse)
+        validation_error: OllamaResponseInvalidError | None = None
         try:
             data = parse_model_json(envelope.response)
             data.setdefault("model", selected_model)
             return response_model.model_validate(data)
-        except (ValueError, ValidationError) as exc:
-            raise OllamaResponseInvalidError("Ollama generated an invalid response") from exc
+        except (ValueError, ValidationError):
+            validation_error = OllamaResponseInvalidError(
+                "Ollama generated an invalid response"
+            )
+        raise validation_error
 
     async def chat(
         self,
@@ -182,6 +169,8 @@ class OllamaClient:
             connect_attempts = 0
             while True:
                 response_received = False
+                request_error: OllamaClientError | None = None
+                retry_connect = False
                 try:
                     async with client.stream(method, path, **kwargs) as response:
                         response_received = True
@@ -195,24 +184,32 @@ class OllamaClient:
                             content=content,
                             request=response.request,
                         )
-                except httpx.ConnectTimeout as exc:
-                    raise OllamaConnectTimeoutError("Ollama connection timed out") from exc
-                except httpx.ReadTimeout as exc:
-                    raise OllamaReadTimeoutError("Ollama response timed out") from exc
-                except httpx.ConnectError as exc:
+                except httpx.ConnectTimeout:
+                    request_error = OllamaConnectTimeoutError("Ollama connection timed out")
+                except httpx.ReadTimeout:
+                    request_error = OllamaReadTimeoutError("Ollama response timed out")
+                except httpx.ConnectError:
                     if not response_received and connect_attempts == 0:
                         connect_attempts += 1
-                        continue
-                    raise OllamaUpstreamError("Ollama connection failed") from exc
-                except httpx.RequestError as exc:
-                    raise OllamaUpstreamError("Ollama request failed") from exc
+                        retry_connect = True
+                    else:
+                        request_error = OllamaUpstreamError("Ollama connection failed")
+                except httpx.RequestError:
+                    request_error = OllamaUpstreamError("Ollama request failed")
+
+                if retry_connect:
+                    continue
+                if request_error is not None:
+                    raise request_error
 
     @staticmethod
     def _validate_response(response: httpx.Response, model: type[T]) -> T:
+        validation_error: OllamaResponseInvalidError | None = None
         try:
             return model.model_validate(response.json())
-        except (ValueError, ValidationError) as exc:
-            raise OllamaResponseInvalidError("Ollama returned an invalid response") from exc
+        except (ValueError, ValidationError):
+            validation_error = OllamaResponseInvalidError("Ollama returned an invalid response")
+        raise validation_error
 
     @staticmethod
     def _validate_prompt_length(prompt: str) -> None:
