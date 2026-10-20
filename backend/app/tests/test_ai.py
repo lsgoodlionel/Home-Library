@@ -33,6 +33,7 @@ from app.services.ai_setting_service import (
     get_effective_ai_settings,
     get_ollama_runtime_config,
 )
+from app.services.ai_health_status_cache import AIHealthStatusCache
 from app.services.ai_task_service import create_ai_task, sanitize_ai_task_input
 from app.services.ollama_client import (
     OllamaAccessDeniedError,
@@ -109,8 +110,7 @@ def enabled_ollama_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 def reset_ai_health_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api.routes import ai as ai_routes
 
-    with ai_routes._health_cache_lock:
-        ai_routes._health_cache.clear()
+    ai_routes._health_status_cache.invalidate_all()
 
 
 def _future_result_or_error(future: asyncio.Future[Any]) -> Any:
@@ -780,9 +780,10 @@ def test_health_owner_cancellation_graph_and_complete_drain(
             ai_routes, "OllamaClient", lambda config: OllamaClient(config, transport=transport)
         )
         monkeypatch.setattr(ai_routes, "_load_health_context", lambda *args: (runtime, safe_runtime))
-        key = ai_routes._health_cache_key(SimpleNamespace(id=17), runtime)
+        user_id = 17
+        fingerprint = ai_routes._runtime_fingerprint(runtime)
         cached = ai_routes.AIHealthResponse(status="healthy", message="existing cached status")
-        ai_routes._cache_health_status(key, cached)
+        ai_routes._health_status_cache.put(user_id, fingerprint, cached)
         loop = asyncio.get_running_loop()
         previous_handler = loop.get_exception_handler()
         loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
@@ -809,7 +810,7 @@ def test_health_owner_cancellation_graph_and_complete_drain(
             assert cleaned == started
             assert transport.closed == count
             assert owner.cancelled()
-            assert ai_routes._get_cached_health_status(key) is cached
+            assert ai_routes._health_status_cache.get(user_id, fingerprint) is cached
             assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
             _assert_route_exception_graph_excludes(
                 error,
@@ -883,15 +884,15 @@ def test_health_cache_operations_hold_lock_during_mutation_and_iteration(
             self._assert_locked()
             return super().popitem(last)
 
-    monkeypatch.setattr(ai_routes, "_health_cache_lock", lock)
-    monkeypatch.setattr(ai_routes, "_health_cache", GuardedCache())
-    monkeypatch.setattr(ai_routes, "_MAX_HEALTH_CACHE_ENTRIES", 1)
+    cache = AIHealthStatusCache(max_entries=1)
+    monkeypatch.setattr(cache, "_lock", lock)
+    monkeypatch.setattr(cache, "_entries", GuardedCache())
     status = ai_routes.AIHealthResponse(status="healthy")
 
-    ai_routes._cache_health_status((1, "one"), status)
-    ai_routes._cache_health_status((1, "two"), status)
-    assert ai_routes._get_cached_health_status((1, "two")) is status
-    ai_routes._invalidate_user_health_cache(1)
+    cache.put(1, "one", status)
+    cache.put(1, "two", status)
+    assert cache.get(1, "two") is status
+    cache.invalidate_user(1)
 
     assert lock.entries == 4
 

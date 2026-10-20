@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
-from threading import Lock
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
@@ -45,6 +43,7 @@ from app.services.ai_setting_service import (
     get_ollama_runtime_config,
     update_user_ai_settings,
 )
+from app.services.ai_health_status_cache import ai_health_status_cache as _health_status_cache
 from app.services.ai_task_service import create_ai_task
 from app.services.ollama_client import (
     OllamaAccessDeniedError,
@@ -61,9 +60,6 @@ from app.services.ollama_client import (
 from app.services.ollama_service import load_prompt_template
 
 router = APIRouter(prefix="/ai", tags=["ai"])
-_health_cache: OrderedDict[tuple[int, str], AIHealthResponse] = OrderedDict()
-_health_cache_lock = Lock()
-_MAX_HEALTH_CACHE_ENTRIES = 128
 _MAX_STATUS_TEXT_LENGTH = 256
 
 
@@ -195,8 +191,10 @@ def _runtime_fingerprint(runtime: OllamaRuntimeConfig) -> str:
             "connect_timeout_seconds": runtime.connect_timeout_seconds,
             "read_timeout_seconds": runtime.read_timeout_seconds,
             "verify_tls": runtime.verify_tls,
-            "access_client_id": runtime.access_client_id,
-            "access_client_secret": runtime.access_client_secret,
+            "access_client_id_digest": sha256(runtime.access_client_id.encode("utf-8")).hexdigest(),
+            "access_client_secret_digest": sha256(
+                runtime.access_client_secret.encode("utf-8")
+            ).hexdigest(),
         },
         ensure_ascii=True,
         sort_keys=True,
@@ -205,27 +203,13 @@ def _runtime_fingerprint(runtime: OllamaRuntimeConfig) -> str:
     return sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _health_cache_key(user: User, runtime: OllamaRuntimeConfig) -> tuple[int, str]:
-    return user.id, _runtime_fingerprint(runtime)
-
-
-def _cache_health_status(key: tuple[int, str], status: AIHealthResponse) -> None:
-    with _health_cache_lock:
-        _health_cache[key] = status
-        _health_cache.move_to_end(key)
-        while len(_health_cache) > _MAX_HEALTH_CACHE_ENTRIES:
-            _health_cache.popitem(last=False)
-
-
-def _get_cached_health_status(key: tuple[int, str]) -> AIHealthResponse:
-    with _health_cache_lock:
-        return _health_cache.get(key, AIHealthResponse())
-
-
-def _invalidate_user_health_cache(user_id: int) -> None:
-    with _health_cache_lock:
-        for key in [key for key in _health_cache if key[0] == user_id]:
-            del _health_cache[key]
+def _disabled_api_error(runtime: OllamaRuntimeConfig) -> ApiError | None:
+    if runtime.enabled:
+        return None
+    return _ai_error_from_ollama(
+        OllamaDisabledError("AI service disabled"),
+        hostname=_safe_hostname(runtime.base_url),
+    )
 
 
 def _prepare_runtime_and_template(
@@ -303,7 +287,17 @@ async def _probe_ollama_health(
     generate: bool,
 ) -> AIHealthResponse | _SafeApiFailure:
     runtime, safe_runtime = await run_in_threadpool(_load_health_context, db, user)
-    cache_key = _health_cache_key(user, runtime)
+    fingerprint = _runtime_fingerprint(runtime)
+    disabled_error = _disabled_api_error(runtime)
+    if disabled_error is not None:
+        status = AIHealthResponse(
+            status="error",
+            message=_bounded_status_text(disabled_error.message) or "AI 服务尚未启用",
+            checked_at=datetime.now(timezone.utc),
+            ollama_runtime=safe_runtime,
+        )
+        _health_status_cache.put(user.id, fingerprint, status)
+        return _SafeApiFailure(disabled_error)
     client = OllamaClient(runtime)
     api_error: ApiError | None = None
     try:
@@ -335,13 +329,13 @@ async def _probe_ollama_health(
             checked_at=datetime.now(timezone.utc),
             ollama_runtime=safe_runtime,
         )
-        _cache_health_status(cache_key, status)
+        _health_status_cache.put(user.id, fingerprint, status)
         exc.__traceback__ = None
         exc.__cause__ = None
         exc.__context__ = None
 
     if api_error is not None:
-        del client, runtime, safe_runtime, cache_key, db, user
+        del client, runtime, safe_runtime, fingerprint, db, user
         return _SafeApiFailure(api_error)
 
     status = AIHealthResponse(
@@ -354,7 +348,7 @@ async def _probe_ollama_health(
         generated=generate,
         ollama_runtime=safe_runtime,
     )
-    _cache_health_status(cache_key, status)
+    _health_status_cache.put(user.id, fingerprint, status)
     return status
 
 
@@ -389,6 +383,18 @@ async def _run_json_task(
     runtime: OllamaRuntimeConfig,
     created_by: int | None = None,
 ) -> BaseModel | _SafeApiFailure:
+    disabled_error = _disabled_api_error(runtime)
+    if disabled_error is not None:
+        await run_in_threadpool(
+            _record_failure,
+            db,
+            task_type=task_type,
+            model=model,
+            input_data=input_data,
+            exc=OllamaDisabledError("AI service disabled"),
+            created_by=created_by,
+        )
+        return _SafeApiFailure(disabled_error)
     client = OllamaClient(runtime)
     api_error: ApiError | None = None
     try:
@@ -434,7 +440,7 @@ async def get_ai_health(
 ) -> AIHealthResponse:
     if not refresh:
         runtime = await run_in_threadpool(get_ollama_runtime_config, db, current_user)
-        return _get_cached_health_status(_health_cache_key(current_user, runtime))
+        return _health_status_cache.get(current_user.id, _runtime_fingerprint(runtime))
     return await _check_ollama(db, current_user, generate=False)
 
 
@@ -462,7 +468,7 @@ def update_ai_config(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AISettingsResponse:
     response = update_user_ai_settings(db, current_user, payload)
-    _invalidate_user_health_cache(current_user.id)
+    _health_status_cache.invalidate_user(current_user.id)
     return response
 
 
@@ -473,6 +479,18 @@ async def list_models(
 ) -> OllamaModelsResponse:
     runtime = await run_in_threadpool(get_ollama_runtime_config, db, current_user)
     input_data = {"hostname": _safe_hostname(runtime.base_url)}
+    disabled_error = _disabled_api_error(runtime)
+    if disabled_error is not None:
+        await run_in_threadpool(
+            _record_failure,
+            db,
+            task_type="models",
+            model=None,
+            input_data=input_data,
+            exc=OllamaDisabledError("AI service disabled"),
+            created_by=current_user.id,
+        )
+        _raise_api_error(disabled_error)
     client = OllamaClient(runtime)
     api_error: ApiError | None = None
     try:
