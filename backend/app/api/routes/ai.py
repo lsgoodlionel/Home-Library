@@ -33,6 +33,7 @@ from app.schemas.ai import (
 )
 from app.schemas.ai_setting import AISettingsResponse, AISettingsUpdate
 from app.services.ai_setting_service import (
+    OllamaRuntimeConfig,
     get_effective_ai_settings,
     get_ollama_runtime_config,
     update_user_ai_settings,
@@ -50,14 +51,7 @@ from app.services.ollama_client import (
     OllamaTunnelError,
     OllamaUpstreamError,
 )
-from app.services.ollama_service import (
-    OllamaInvalidJSONError,
-    OllamaService,
-    OllamaServiceError,
-    OllamaUnavailableError,
-    OllamaValidationError,
-    load_prompt_template,
-)
+from app.services.ollama_service import load_prompt_template
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 _last_health_status = AIHealthResponse()
@@ -93,14 +87,10 @@ def _dump(value: Any) -> str:
 
 
 def _ai_error_from_ollama(
-    exc: OllamaServiceError | OllamaClientError,
+    exc: OllamaClientError,
     *,
     hostname: str | None = None,
 ) -> ApiError:
-    if isinstance(exc, OllamaUnavailableError):
-        return ApiError("AI_SERVICE_UNAVAILABLE", str(exc), status_code=503)
-    if isinstance(exc, (OllamaInvalidJSONError, OllamaValidationError)):
-        return ApiError("EXTERNAL_SERVICE_ERROR", str(exc), status_code=502)
     mappings: tuple[tuple[type[OllamaClientError], str, str, int], ...] = (
         (OllamaDisabledError, "AI_SERVICE_DISABLED", "AI 服务尚未启用", 503),
         (
@@ -208,7 +198,8 @@ def _record_failure_and_raise(
     task_type: str,
     model: str | None,
     input_data: dict[str, Any],
-    exc: OllamaServiceError,
+    exc: OllamaClientError,
+    hostname: str | None = None,
     created_by: int | None = None,
 ) -> None:
     create_ai_task(
@@ -217,13 +208,13 @@ def _record_failure_and_raise(
         model=model,
         input_data=input_data,
         status="failed",
-        error_message=str(exc),
+        error_message=exc.category,
         created_by=created_by,
     )
-    raise _ai_error_from_ollama(exc)
+    raise _ai_error_from_ollama(exc, hostname=hostname)
 
 
-def _run_json_task(
+async def _run_json_task(
     db: Session,
     *,
     task_type: str,
@@ -231,19 +222,20 @@ def _run_json_task(
     input_data: dict[str, Any],
     prompt: str,
     response_model: type[BaseModel],
-    base_url: str,
+    runtime: OllamaRuntimeConfig,
     created_by: int | None = None,
 ) -> BaseModel:
-    service = OllamaService(base_url=base_url, default_model=model)
+    client = OllamaClient(runtime)
     try:
-        result = service.generate_json(prompt=prompt, response_model=response_model, model=model)
-    except OllamaServiceError as exc:
+        result = await client.generate_json(prompt=prompt, response_model=response_model, model=model)
+    except OllamaClientError as exc:
         _record_failure_and_raise(
             db,
             task_type=task_type,
             model=model,
             input_data=input_data,
             exc=exc,
+            hostname=_safe_hostname(runtime.base_url),
             created_by=created_by,
         )
 
@@ -298,22 +290,23 @@ def update_ai_config(
 
 
 @router.get("/models", response_model=OllamaModelsResponse)
-def list_models(
+async def list_models(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> OllamaModelsResponse:
-    base_url, default_model = get_ollama_runtime_config(db, current_user)
-    input_data = {"base_url": base_url}
-    service = OllamaService(base_url=base_url, default_model=default_model)
+    runtime = get_ollama_runtime_config(db, current_user)
+    input_data = {"hostname": _safe_hostname(runtime.base_url)}
+    client = OllamaClient(runtime)
     try:
-        result = service.list_models()
-    except OllamaServiceError as exc:
+        result = await client.list_models()
+    except OllamaClientError as exc:
         _record_failure_and_raise(
             db,
             task_type="models",
             model=None,
             input_data=input_data,
             exc=exc,
+            hostname=_safe_hostname(runtime.base_url),
             created_by=current_user.id if current_user else None,
         )
 
@@ -330,13 +323,13 @@ def list_models(
 
 
 @router.post("/classify-book", response_model=ClassifyBookResponse)
-def classify_book(
+async def classify_book(
     payload: ClassifyBookRequest,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> ClassifyBookResponse:
-    base_url, default_model = get_ollama_runtime_config(db, current_user)
-    model = _model_name(payload.model, default_model)
+    runtime = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
     categories_text = _format_categories_for_prompt(db)
     prompt = load_prompt_template("classify_book.txt").format(
@@ -346,26 +339,26 @@ def classify_book(
         summary=_clean_text(payload.summary),
         categories=categories_text,
     )
-    return _run_json_task(
+    return await _run_json_task(
         db,
         task_type="classify_book",
         model=model,
         input_data=input_data,
         prompt=prompt,
         response_model=ClassifyBookResponse,
-        base_url=base_url,
+        runtime=runtime,
         created_by=current_user.id if current_user else None,
     )
 
 
 @router.post("/generate-tags", response_model=GenerateTagsResponse)
-def generate_tags(
+async def generate_tags(
     payload: GenerateTagsRequest,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> GenerateTagsResponse:
-    base_url, default_model = get_ollama_runtime_config(db, current_user)
-    model = _model_name(payload.model, default_model)
+    runtime = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
     prompt = load_prompt_template("generate_tags.txt").format(
         title=payload.title,
@@ -375,52 +368,52 @@ def generate_tags(
         summary=_clean_text(payload.summary),
         existing_tags=", ".join(payload.existing_tags),
     )
-    return _run_json_task(
+    return await _run_json_task(
         db,
         task_type="generate_tags",
         model=model,
         input_data=input_data,
         prompt=prompt,
         response_model=GenerateTagsResponse,
-        base_url=base_url,
+        runtime=runtime,
         created_by=current_user.id if current_user else None,
     )
 
 
 @router.post("/recommend-book-content", response_model=RecommendBookContentResponse)
-def recommend_book_content(
+async def recommend_book_content(
     payload: RecommendBookContentRequest,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> RecommendBookContentResponse:
-    base_url, default_model = get_ollama_runtime_config(db, current_user)
-    model = _model_name(payload.model, default_model)
+    runtime = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
     prompt = load_prompt_template("recommend_book_content.txt").format(
         current=_dump(payload.current),
         candidates=_dump(payload.candidates),
         missing_fields=", ".join(payload.missing_fields),
     )
-    return _run_json_task(
+    return await _run_json_task(
         db,
         task_type="recommend_book_content",
         model=model,
         input_data=input_data,
         prompt=prompt,
         response_model=RecommendBookContentResponse,
-        base_url=base_url,
+        runtime=runtime,
         created_by=current_user.id if current_user else None,
     )
 
 
 @router.post("/summarize-book", response_model=SummarizeBookResponse)
-def summarize_book(
+async def summarize_book(
     payload: SummarizeBookRequest,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> SummarizeBookResponse:
-    base_url, default_model = get_ollama_runtime_config(db, current_user)
-    model = _model_name(payload.model, default_model)
+    runtime = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
     prompt = load_prompt_template("summarize_book.txt").format(
         title=payload.title,
@@ -429,60 +422,60 @@ def summarize_book(
         raw_summary=_clean_text(payload.raw_summary),
         raw_author_intro=_clean_text(payload.raw_author_intro),
     )
-    return _run_json_task(
+    return await _run_json_task(
         db,
         task_type="summarize_book",
         model=model,
         input_data=input_data,
         prompt=prompt,
         response_model=SummarizeBookResponse,
-        base_url=base_url,
+        runtime=runtime,
         created_by=current_user.id if current_user else None,
     )
 
 
 @router.post("/detect-duplicate", response_model=DetectDuplicateResponse)
-def detect_duplicate(
+async def detect_duplicate(
     payload: DetectDuplicateRequest,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> DetectDuplicateResponse:
-    base_url, default_model = get_ollama_runtime_config(db, current_user)
-    model = _model_name(payload.model, default_model)
+    runtime = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
     prompt = load_prompt_template("detect_duplicate.txt").format(
         first=_dump(payload.first),
         second=_dump(payload.second),
     )
-    return _run_json_task(
+    return await _run_json_task(
         db,
         task_type="detect_duplicate",
         model=model,
         input_data=input_data,
         prompt=prompt,
         response_model=DetectDuplicateResponse,
-        base_url=base_url,
+        runtime=runtime,
         created_by=current_user.id if current_user else None,
     )
 
 
 @router.post("/natural-search", response_model=NaturalSearchResponse)
-def natural_search(
+async def natural_search(
     payload: NaturalSearchRequest,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User | None, Depends(get_optional_current_user)],
 ) -> NaturalSearchResponse:
-    base_url, default_model = get_ollama_runtime_config(db, current_user)
-    model = _model_name(payload.model, default_model)
+    runtime = get_ollama_runtime_config(db, current_user)
+    model = _model_name(payload.model, runtime.default_model)
     input_data = payload.model_dump(mode="json")
     prompt = load_prompt_template("natural_search.txt").format(query=payload.query)
-    return _run_json_task(
+    return await _run_json_task(
         db,
         task_type="natural_search",
         model=model,
         input_data=input_data,
         prompt=prompt,
         response_model=NaturalSearchResponse,
-        base_url=base_url,
+        runtime=runtime,
         created_by=current_user.id if current_user else None,
     )

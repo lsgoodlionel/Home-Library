@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.models import AITask
+from app.models import AITask, Book
 from app.models.user import User
 from app.schemas.ai import AIHealthResponse
 from app.services.ai_setting_service import get_effective_ai_settings, get_ollama_runtime_config
@@ -55,14 +55,9 @@ def _clear_ollama_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _mock_ollama(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], httpx.Response]) -> None:
-    real_client = httpx.Client
-    transport = httpx.MockTransport(handler)
-
-    def client_factory(*args, **kwargs):
-        kwargs["transport"] = transport
-        return real_client(*args, **kwargs)
-
-    monkeypatch.setattr("app.services.ollama_service.httpx.Client", client_factory)
+    monkeypatch.setenv("OLLAMA_ENABLED", "true")
+    get_settings.cache_clear()
+    _mock_async_ollama(monkeypatch, handler)
 
 
 def _mock_async_ollama(
@@ -687,6 +682,188 @@ def test_models_fallback_to_docker_host_for_localhost_ollama(
     assert requested_hosts == ["localhost", "host.docker.internal"]
 
 
+def test_ai_business_routes_use_account_runtime_and_default_model(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = client.put(
+        "/api/ai/config",
+        headers=admin_headers,
+        json={
+            "active_provider": "ollama",
+            "default_model": "saved-default-model",
+            "providers": [
+                {
+                    "provider": "ollama",
+                    "enabled": True,
+                    "base_url": "http://account-ollama.local:11434",
+                    "default_model": "saved-default-model",
+                    "note": "account runtime",
+                }
+            ],
+        },
+    )
+    assert configured.status_code == 200
+
+    generated_payloads = iter(
+        [
+            {
+                "category_code": "C91",
+                "category_name": "社会学",
+                "confidence": 0.9,
+                "tags": ["社会学"],
+                "reason": "分类结果",
+            },
+            {"tags": ["社会学"], "reason": "标签结果"},
+            {
+                "recommended": {"publisher": "三联书店"},
+                "source_summary": "候选来源",
+                "confidence": 0.8,
+                "reason": "内容结果",
+            },
+            {"summary": "整理后的简介", "author_intro": "作者简介"},
+            {"is_duplicate": True, "confidence": 0.95, "reason": "书目信息一致"},
+            {"keyword": "乡土", "tags": ["社会学"]},
+        ]
+    )
+    requested_models: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "account-ollama.local"
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "first-listed-model"}]})
+        assert request.url.path == "/api/generate"
+        body = json.loads(request.content)
+        requested_models.append(body["model"])
+        return httpx.Response(200, json=_generate_response(next(generated_payloads)))
+
+    _mock_ollama(monkeypatch, handler)
+
+    assert client.get("/api/ai/models", headers=admin_headers).status_code == 200
+    responses = [
+        client.post(
+            "/api/ai/classify-book",
+            headers=admin_headers,
+            json={"title": "乡土中国", "author": "费孝通"},
+        ),
+        client.post(
+            "/api/ai/generate-tags",
+            headers=admin_headers,
+            json={"title": "乡土中国", "summary": "社会学经典"},
+        ),
+        client.post(
+            "/api/ai/recommend-book-content",
+            headers=admin_headers,
+            json={
+                "current": {"title": "乡土中国"},
+                "candidates": [{"source": "openlibrary", "publisher": "三联书店"}],
+                "missing_fields": ["publisher"],
+            },
+        ),
+        client.post(
+            "/api/ai/summarize-book",
+            headers=admin_headers,
+            json={"title": "乡土中国", "raw_summary": "待整理简介"},
+        ),
+        client.post(
+            "/api/ai/detect-duplicate",
+            headers=admin_headers,
+            json={"first": {"title": "乡土中国"}, "second": {"title": "乡土中国"}},
+        ),
+        client.post(
+            "/api/ai/natural-search",
+            headers=admin_headers,
+            json={"query": "找乡土社会学图书"},
+        ),
+    ]
+
+    assert [response.status_code for response in responses] == [200] * 6
+    assert responses[0].json()["category_code"] == "C91"
+    assert responses[1].json()["tags"] == ["社会学"]
+    assert responses[2].json()["recommended"]["publisher"] == "三联书店"
+    assert responses[3].json()["summary"] == "整理后的简介"
+    assert responses[4].json()["is_duplicate"] is True
+    assert responses[5].json()["keyword"] == "乡土"
+    assert requested_models == ["saved-default-model"] * 6
+
+
+def test_ai_task_input_truncates_long_summary_and_never_stores_headers(
+    client: TestClient,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_generate_response(
+                {
+                    "recommended": {"publisher": "人民出版社"},
+                    "source_summary": "已核对",
+                    "confidence": 0.8,
+                    "reason": "候选信息一致",
+                }
+            ),
+        )
+
+    _mock_ollama(monkeypatch, handler)
+    secret = "must-never-be-audited"
+    response = client.post(
+        "/api/ai/recommend-book-content",
+        json={
+            "current": {"title": "资本论", "summary": "长" * 5000},
+            "candidates": [
+                {
+                    "source": "openlibrary",
+                    "summary": "候选" * 1000,
+                    "raw": {"headers": {"Authorization": secret}, "response": secret},
+                }
+            ],
+            "missing_fields": [f"field-{index}" for index in range(30)],
+        },
+    )
+
+    assert response.status_code == 200
+    audit = json.loads(db.query(AITask).one().input_data)
+    assert len(audit["current"]["summary"]) <= 512
+    assert len(audit["candidates"][0]["summary"]) <= 512
+    assert len(audit["missing_fields"]) == 20
+    serialized = json.dumps(audit, ensure_ascii=False).lower()
+    assert "headers" not in serialized
+    assert "authorization" not in serialized
+    assert secret not in serialized
+
+
+def test_ai_failure_does_not_modify_book_or_block_non_ai_health(
+    client: TestClient,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    book = Book(title="资本论", author="马克思", summary="原始简介")
+    db.add(book)
+    db.commit()
+    db.refresh(book)
+    original = (book.title, book.author, book.summary, book.category_id)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"response": "不是 JSON"})
+
+    _mock_ollama(monkeypatch, handler)
+    response = client.post(
+        "/api/ai/classify-book",
+        json={"title": book.title, "author": book.author, "summary": book.summary},
+    )
+
+    db.refresh(book)
+    task = db.query(AITask).one()
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "AI_RESPONSE_INVALID"
+    assert (book.title, book.author, book.summary, book.category_id) == original
+    assert task.status == "failed"
+    assert task.error_message == "response_invalid"
+    assert client.get("/api/health").json() == {"status": "ok"}
+
+
 def test_classify_book_accepts_valid_model_json(
     client: TestClient,
     db: Session,
@@ -735,11 +912,11 @@ def test_classify_book_rejects_invalid_model_json(
     response = client.post("/api/ai/classify-book", json=_classify_payload())
 
     assert response.status_code == 502
-    assert response.json()["error"]["code"] == "EXTERNAL_SERVICE_ERROR"
+    assert response.json()["error"]["code"] == "AI_RESPONSE_INVALID"
 
     task = db.query(AITask).one()
     assert task.status == "failed"
-    assert "JSON" in (task.error_message or "")
+    assert task.error_message == "response_invalid"
 
 
 def test_ollama_unavailable_returns_clear_error(
@@ -754,8 +931,8 @@ def test_ollama_unavailable_returns_clear_error(
 
     response = client.get("/api/ai/models")
 
-    assert response.status_code == 503
-    assert response.json()["error"]["code"] == "AI_SERVICE_UNAVAILABLE"
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "AI_UPSTREAM_ERROR"
 
     task = db.query(AITask).one()
     assert task.task_type == "models"
@@ -845,5 +1022,5 @@ def test_natural_search_records_failure_on_schema_error(
     response = client.post("/api/ai/natural-search", json={"query": "找 2010 年前后的书"})
 
     assert response.status_code == 502
-    assert response.json()["error"]["code"] == "EXTERNAL_SERVICE_ERROR"
+    assert response.json()["error"]["code"] == "AI_RESPONSE_INVALID"
     assert db.query(AITask).one().status == "failed"

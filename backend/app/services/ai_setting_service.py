@@ -27,11 +27,6 @@ class OllamaRuntimeConfig:
     access_client_id: str
     access_client_secret: str
 
-    def __iter__(self):
-        # Temporary compatibility for existing synchronous routes migrated in Task 2.
-        return iter((self.base_url, self.default_model))
-
-
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
 

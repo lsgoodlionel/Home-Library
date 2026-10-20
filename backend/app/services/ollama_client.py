@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, TypeVar
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -181,48 +182,56 @@ class OllamaClient:
         if not self.runtime.enabled:
             raise OllamaDisabledError("Ollama is disabled")
 
-        async with httpx.AsyncClient(
-            base_url=self.runtime.base_url.rstrip("/"),
-            headers=self._headers,
-            timeout=self._timeout,
-            verify=self.runtime.verify_tls,
-            transport=self._transport,
-        ) as client:
-            connect_attempts = 0
-            while True:
-                response_received = False
-                request_error: OllamaClientError | None = None
-                retry_connect = False
-                try:
-                    async with client.stream(method, path, **kwargs) as response:
-                        response_received = True
-                        if response.is_error:
-                            prefix = await _read_prefix(response, CF_ERROR_PREFIX_BYTES)
-                            self._raise_for_status(response.status_code, prefix)
-                        content = await _read_bounded(response, MAX_RESPONSE_BYTES)
-                        return httpx.Response(
-                            response.status_code,
-                            headers=response.headers,
-                            content=content,
-                            request=response.request,
-                        )
-                except httpx.ConnectTimeout:
-                    request_error = OllamaConnectTimeoutError("Ollama connection timed out")
-                except httpx.ReadTimeout:
-                    request_error = OllamaReadTimeoutError("Ollama response timed out")
-                except httpx.ConnectError:
-                    if not response_received and connect_attempts == 0:
-                        connect_attempts += 1
-                        retry_connect = True
-                    else:
-                        request_error = OllamaUpstreamError("Ollama connection failed")
-                except httpx.RequestError:
-                    request_error = OllamaUpstreamError("Ollama request failed")
+        base_urls = _candidate_base_urls(self.runtime.base_url)
+        for base_url_index, base_url in enumerate(base_urls):
+            headers = self._headers if base_url_index == 0 else {}
+            async with httpx.AsyncClient(
+                base_url=base_url,
+                headers=headers,
+                timeout=self._timeout,
+                verify=self.runtime.verify_tls,
+                transport=self._transport,
+            ) as client:
+                connect_attempts = 0
+                while True:
+                    response_received = False
+                    request_error: OllamaClientError | None = None
+                    retry_connect = False
+                    try:
+                        async with client.stream(method, path, **kwargs) as response:
+                            response_received = True
+                            if response.is_error:
+                                prefix = await _read_prefix(response, CF_ERROR_PREFIX_BYTES)
+                                self._raise_for_status(response.status_code, prefix)
+                            content = await _read_bounded(response, MAX_RESPONSE_BYTES)
+                            return httpx.Response(
+                                response.status_code,
+                                headers=response.headers,
+                                content=content,
+                                request=response.request,
+                            )
+                    except httpx.ConnectTimeout:
+                        request_error = OllamaConnectTimeoutError("Ollama connection timed out")
+                    except httpx.ReadTimeout:
+                        request_error = OllamaReadTimeoutError("Ollama response timed out")
+                    except httpx.ConnectError:
+                        has_fallback = base_url_index + 1 < len(base_urls)
+                        if not response_received and has_fallback:
+                            break
+                        if not response_received and connect_attempts == 0:
+                            connect_attempts += 1
+                            retry_connect = True
+                        else:
+                            request_error = OllamaUpstreamError("Ollama connection failed")
+                    except httpx.RequestError:
+                        request_error = OllamaUpstreamError("Ollama request failed")
 
-                if retry_connect:
-                    continue
-                if request_error is not None:
-                    raise request_error
+                    if retry_connect:
+                        continue
+                    if request_error is not None:
+                        raise request_error
+
+        raise OllamaUpstreamError("Ollama connection failed")
 
     @staticmethod
     def _validate_response(response: httpx.Response, model: type[T]) -> T:
@@ -272,3 +281,16 @@ async def _read_bounded(response: httpx.Response, limit: int) -> bytes:
             raise OllamaResponseInvalidError("Ollama response exceeds the maximum length")
         content.extend(chunk)
     return bytes(content)
+
+
+def _candidate_base_urls(base_url: str) -> list[str]:
+    normalized = base_url.rstrip("/")
+    candidates = [normalized]
+    parsed = urlsplit(normalized)
+    if parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        netloc = "host.docker.internal"
+        if parsed.port:
+            netloc = f"{netloc}:{parsed.port}"
+        docker_host_url = urlunsplit((parsed.scheme or "http", netloc, parsed.path, "", "")).rstrip("/")
+        candidates.append(docker_host_url)
+    return candidates
