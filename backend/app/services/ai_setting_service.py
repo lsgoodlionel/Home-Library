@@ -196,7 +196,11 @@ def normalize_ollama_origin(url: str) -> tuple[str, str, int | None] | None:
         parsed = httpx.URL(normalize_ollama_base_url(url))
     except (InvalidOllamaBaseURL, httpx.InvalidURL):
         return None
-    port = parsed.port or {"http": 80, "https": 443}.get(parsed.scheme)
+    port = (
+        parsed.port
+        if parsed.port is not None
+        else {"http": 80, "https": 443}.get(parsed.scheme)
+    )
     return parsed.scheme, parsed.host.lower(), port
 
 

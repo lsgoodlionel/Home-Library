@@ -121,6 +121,45 @@ def test_untrusted_origin_never_receives_access_headers() -> None:
 
 
 @pytest.mark.parametrize(
+    ("base_url", "trusted_base_url", "expect_access_headers"),
+    [
+        ("https://ollama.example.com:0", "https://ollama.example.com", False),
+        ("https://ollama.example.com", "https://ollama.example.com:0", False),
+        ("https://ollama.example.com:8443", "https://ollama.example.com", False),
+        ("https://ollama.example.com", "https://ollama.example.com:8443", False),
+        ("https://ollama.example.com:443", "https://ollama.example.com", True),
+        ("https://ollama.example.com", "https://ollama.example.com:443", True),
+        ("http://ollama.example.com:80", "http://ollama.example.com", True),
+        ("http://ollama.example.com", "http://ollama.example.com:80", True),
+        ("http://ollama.example.com:0", "http://ollama.example.com", False),
+        ("http://ollama.example.com", "http://ollama.example.com:0", False),
+        ("https://[::1]:443", "https://[::1]", True),
+        ("https://[::1]", "https://[::1]:443", True),
+        ("https://[::1]:8443", "https://[::1]", False),
+        ("https://[::1]", "https://[::1]:8443", False),
+    ],
+)
+def test_access_headers_require_exact_normalized_origin_ports(
+    base_url: str,
+    trusted_base_url: str,
+    expect_access_headers: bool,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert ("CF-Access-Client-Id" in request.headers) is expect_access_headers
+        assert ("CF-Access-Client-Secret" in request.headers) is expect_access_headers
+        return httpx.Response(200, json={"version": "0.6.2"})
+
+    client = OllamaClient(
+        _runtime(base_url=base_url, trusted_base_url=trusted_base_url),
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = _run(client.version())
+
+    assert response.version == "0.6.2"
+
+
+@pytest.mark.parametrize(
     "base_url",
     [
         "http://[",
