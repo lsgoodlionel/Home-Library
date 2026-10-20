@@ -143,12 +143,12 @@ def test_untrusted_origin_never_receives_access_headers() -> None:
         ("https://ollama.example.com", "https://ollama.example.com:8443", False),
         ("https://ollama.example.com:443", "https://ollama.example.com", True),
         ("https://ollama.example.com", "https://ollama.example.com:443", True),
-        ("http://ollama.example.com:80", "http://ollama.example.com", True),
-        ("http://ollama.example.com", "http://ollama.example.com:80", True),
+        ("http://ollama.example.com:80", "http://ollama.example.com", False),
+        ("http://ollama.example.com", "http://ollama.example.com:80", False),
         ("http://ollama.example.com:0", "http://ollama.example.com", False),
         ("http://ollama.example.com", "http://ollama.example.com:0", False),
-        ("https://[::1]:443", "https://[::1]", True),
-        ("https://[::1]", "https://[::1]:443", True),
+        ("https://[::1]:443", "https://[::1]", False),
+        ("https://[::1]", "https://[::1]:443", False),
         ("https://[::1]:8443", "https://[::1]", False),
         ("https://[::1]", "https://[::1]:8443", False),
     ],
@@ -364,10 +364,10 @@ def test_tunnel_502_503_and_1033_map_to_tunnel_error(status_code: int, body: str
         (500, ("x" * 8192) + " 1033 ", OllamaUpstreamError),
         (500, "error code 11033", OllamaUpstreamError),
         (500, "error code 10330", OllamaUpstreamError),
-        (400, "error code 1033", OllamaModelError),
+        (400, "error code 1033", OllamaTunnelError),
     ],
 )
-def test_1033_outside_prefix_adjacent_or_non_5xx_is_not_tunnel(
+def test_1033_is_bounded_and_detected_across_http_statuses(
     status_code: int,
     body: str,
     expected_error: type[Exception],
@@ -380,7 +380,7 @@ def test_1033_outside_prefix_adjacent_or_non_5xx_is_not_tunnel(
     with pytest.raises(expected_error) as caught:
         _run(client.version())
 
-    assert not isinstance(caught.value, OllamaTunnelError)
+    assert isinstance(caught.value, expected_error)
 
 
 @pytest.mark.parametrize("status_code", [400, 404, 429])
@@ -446,6 +446,33 @@ def test_generate_json_rejects_invalid_json_and_schema(response_body: bytes) -> 
     _assert_sensitive_exception_state_unreachable(
         caught.value,
         response_body.decode(),
+    )
+
+
+def test_generate_json_converts_deep_recursion_without_sensitive_traceback_state() -> None:
+    prompt_marker = "deep-json-prompt-sensitive-marker"
+    response_marker = "deep-json-response-sensitive-marker"
+    deep_json = ('{"nested":' * 1_100) + json.dumps(response_marker) + ('}' * 1_100)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"response": deep_json})
+
+    client = OllamaClient(_runtime(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(OllamaResponseInvalidError) as caught:
+        _run(
+            client.generate_json(
+                prompt=prompt_marker,
+                response_model=_GeneratedPayload,
+            )
+        )
+
+    _assert_sensitive_exception_state_unreachable(
+        caught.value,
+        prompt_marker,
+        response_marker,
+        "client-id-secret-marker",
+        "client-secret-marker",
     )
 
 

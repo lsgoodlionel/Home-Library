@@ -16,7 +16,7 @@ Cloudflare Access Service Token 的 Client ID 和 Client Secret 只允许通过�
 - 不使用 `VITE_*` 环境变量，不返回给浏览器。
 - 设置页只显示“已配置”或“未配置”。
 - 后端日志和任务记录不得保存请求头或凭据值。
-- Access 请求头只发送给服务器环境变量配置的可信 Ollama Origin。账号把 Base URL 改为其他地址时，不得携带 Cloudflare 凭据，防止凭据被发送到任意主机。
+- Access 请求头只发送给服务器环境变量 `OLLAMA_TRUSTED_BASE_URL` 配置的可信 HTTPS Ollama Origin。账号或 Docker 把请求 Base URL 改为其他地址时，不得携带 Cloudflare 凭据，防止凭据被发送到任意主机。
 - URL 比较以规范化后的 scheme、hostname 和有效端口为准；路径、查询参数和用户信息不能扩大可信范围。
 - TLS 默认启用验证，仅允许通过服务器环境变量调整，前端不提供关闭 TLS 验证的操作。
 
@@ -29,7 +29,8 @@ Cloudflare Access Service Token 的 Client ID 和 Client Secret 只允许通过�
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `OLLAMA_ENABLED` | `false` | 是否启用 Ollama AI 功能 |
-| `OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | 服务器默认 Ollama 地址和 Access 凭据可信 Origin |
+| `OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | 后端直接运行时的默认 Ollama 请求地址 |
+| `OLLAMA_TRUSTED_BASE_URL` | `https://openclaw.lsgood.cn` | 允许携带 Access 凭据的独立 HTTPS 可信 Origin；HTTP、本地名称和 IP 地址不受信任 |
 | `OLLAMA_DEFAULT_MODEL` | `qwen3.5:4b` | 默认模型 |
 | `OLLAMA_CONNECT_TIMEOUT_SECONDS` | `20` | 建立连接超时 |
 | `OLLAMA_READ_TIMEOUT_SECONDS` | `180` | 等待完整响应超时 |

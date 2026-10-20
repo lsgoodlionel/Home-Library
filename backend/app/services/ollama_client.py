@@ -17,7 +17,7 @@ from app.schemas.ai import (
     OllamaRunningModelsResponse,
     OllamaVersionResponse,
 )
-from app.services.ai_setting_service import OllamaRuntimeConfig, normalize_ollama_origin
+from app.services.ai_setting_service import OllamaRuntimeConfig, normalize_access_origin
 from app.services.ollama_service import parse_model_json
 
 T = TypeVar("T", bound=BaseModel)
@@ -94,9 +94,9 @@ class OllamaClient:
         credentials_complete = bool(runtime.access_client_id and runtime.access_client_secret)
         if (
             credentials_complete
-            and normalize_ollama_origin(runtime.base_url) is not None
-            and normalize_ollama_origin(runtime.base_url)
-            == normalize_ollama_origin(runtime.trusted_base_url)
+            and normalize_access_origin(runtime.base_url) is not None
+            and normalize_access_origin(runtime.base_url)
+            == normalize_access_origin(runtime.trusted_base_url)
         ):
             self._headers = {
                 "CF-Access-Client-Id": runtime.access_client_id,
@@ -282,7 +282,7 @@ async def _generate_json_result(
         data = parse_model_json(envelope.response)
         data.setdefault("model", selected_model)
         return response_model.model_validate(data)
-    except (ValueError, ValidationError):
+    except (ValueError, ValidationError, RecursionError):
         return _SafeFailure(
             OllamaResponseInvalidError,
             "Ollama generated an invalid response",
@@ -368,9 +368,9 @@ def _failure_for_status(status_code: int, prefix: bytes) -> _SafeFailure:
             "Ollama access was denied",
             status_code,
         )
-    if status_code in {502, 503}:
+    if _CF_1033_PATTERN.search(prefix):
         return _SafeFailure(OllamaTunnelError, "Ollama tunnel is unavailable", status_code)
-    if 500 <= status_code < 600 and _CF_1033_PATTERN.search(prefix):
+    if status_code in {502, 503}:
         return _SafeFailure(OllamaTunnelError, "Ollama tunnel is unavailable", status_code)
     if 400 <= status_code < 500:
         return _SafeFailure(OllamaModelError, "Ollama rejected the request", status_code)

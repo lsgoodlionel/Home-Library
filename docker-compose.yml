@@ -5,6 +5,7 @@ services:
       dockerfile: docker/Dockerfile.backend
       args:
         APP_VERSION: ${APP_VERSION:-0.1.0}
+        PYTHON_PACKAGE_INDEX_URL: ${PYTHON_PACKAGE_INDEX_URL:-https://pypi.org/simple}
     env_file:
       - .env
     environment:
@@ -16,6 +17,7 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       OLLAMA_ENABLED: ${OLLAMA_ENABLED:-false}
       OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-https://openclaw.lsgood.cn}
+      OLLAMA_TRUSTED_BASE_URL: ${OLLAMA_TRUSTED_BASE_URL:-https://openclaw.lsgood.cn}
       OLLAMA_DEFAULT_MODEL: ${OLLAMA_DEFAULT_MODEL:-qwen3.5:4b}
       OLLAMA_CONNECT_TIMEOUT_SECONDS: ${OLLAMA_CONNECT_TIMEOUT_SECONDS:-20}
       OLLAMA_READ_TIMEOUT_SECONDS: ${OLLAMA_READ_TIMEOUT_SECONDS:-180}

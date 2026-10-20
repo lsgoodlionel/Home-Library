@@ -230,7 +230,7 @@ ollama pull qwen3.5:4b
 
 然后在 `.env` 设置 `OLLAMA_ENABLED=true` 和 `OLLAMA_BASE_URL=http://127.0.0.1:11434`。Docker 访问宿主机或 Compose profile 时改用 `DOCKER_OLLAMA_BASE_URL`。
 
-远程模式当前默认地址为 `https://openclaw.lsgood.cn`。Cloudflare Access 的 Client ID/Secret 只允许写入服务器环境变量，禁止放入 `VITE_*`、前端设置或仓库；`ollama.lsgood.cn` 当前不可作为默认地址。管理员可在“设置 > AI 模型配置”检查连接，生成测试需要再次确认。
+远程模式当前默认地址为 `https://openclaw.lsgood.cn`。Cloudflare Access 的 Client ID/Secret 只允许写入服务器环境变量，禁止放入 `VITE_*`、前端设置或仓库；`OLLAMA_TRUSTED_BASE_URL` 独立限定可携带凭据的 HTTPS Origin，HTTP、本地名称和 IP 地址始终不携带凭据。`ollama.lsgood.cn` 当前不可作为默认地址。管理员可在“设置 > AI 模型配置”检查连接，生成测试需要再次确认。
 
 只读远程连通性验证（仅访问 version/tags/ps，不触发生成）。脚本只在
 `OLLAMA_BASE_URL` 与 `OLLAMA_TRUSTED_BASE_URL` 的规范化 Origin 完全一致时发送
@@ -260,7 +260,7 @@ npm run test:e2e
 
 | 检查项 | 结果 |
 |---|---|
-| 后端全量测试 | `359 passed, 0 failed`（2026-10-20） |
+| 后端全量测试 | `361 passed, 0 failed`（2026-10-20） |
 | AI 并发探针收尾 | 18 项回归通过：逐个探针失败、意外异常、调用方取消及取消清理异常；退出前取消并等待全部任务，取回异常 |
 | AI 健康错误 traceback | 14 项真实客户端回归通过：检查函数及两个健康入口、全部 7 个探针失败位置；遍历任务结果、异常帧和 coroutine 引用，合成凭据与响应体标记不可达 |
 | AI owner 取消 traceback | 16 项真实客户端回归通过：3/4 探针、单次/重复取消、清理正常/异常、owner 先取消/上游先失败后取消；全 frame locals、Task/Future、coroutine 和对象属性递归检查，runtime、client、Access headers/凭据不可达，缓存保持不变 |
@@ -269,7 +269,7 @@ npm run test:e2e
 | Vitest | `8 files / 42 tests passed` |
 | 发布脚本测试 | AI 超时层级、smoke Origin 安全矩阵和 SemVer tag 解析通过 |
 | Compose 配置 | 开发、生产配置均以临时 `.env` 普通展开通过 |
-| Docker 隔离流程 | 健康、登录、图书列表、AI 配置脱敏、权限和 AI 关闭降级通过 |
+| Docker 隔离流程 | 2026-10-20 在当前交付代码的回环端口隔离 Compose 项目中通过 12 项真实 HTTP 验收：前端首页、公共健康、管理员登录/账号、图书列表、AI 配置脱敏、登录要求、AI 关闭降级、成员健康可见/管理员测试禁止，以及 AI 失败后核心健康与图书功能继续可用 |
 
 2026-10-20 健康取消路径复验：持有敏感状态的内部函数完成取消与 drain 后，将原始取消转换为无敏感引用的安全标记；外层清除数据库和账号引用，再抛出无参、无原始异常链的 `CancelledError`。重复 owner 取消不会打断同一个受保护的 drain。预期上游错误仍使用既有中文分类与缓存逻辑；六个 AI 业务 route 的隔离回归通过。该结论覆盖已测的取消及预期上游失败路径，不代表任意 Python 反射和全局引用的形式化去敏证明；真实远程 Access 认证成功仍待凭据可用后验证。
 

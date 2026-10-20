@@ -14,8 +14,8 @@
 
 - Cloudflare Client ID and Secret may only come from backend environment variables or server secret management.
 - Never return, log, persist, document, or expose Cloudflare credentials through `VITE_*` variables.
-- Access headers may only be sent when the effective request origin exactly matches the normalized server `OLLAMA_BASE_URL` origin.
-- Defaults are `OLLAMA_ENABLED=false`, `OLLAMA_BASE_URL=https://openclaw.lsgood.cn`, `OLLAMA_DEFAULT_MODEL=qwen3.5:4b`, connect timeout `20`, read timeout `180`, and TLS verification enabled.
+- Access headers may only be sent when the effective HTTPS request origin exactly matches the normalized server `OLLAMA_TRUSTED_BASE_URL` origin; HTTP, local names, and IP literals never receive credentials.
+- Defaults are `OLLAMA_ENABLED=false`, `OLLAMA_BASE_URL=https://openclaw.lsgood.cn`, `OLLAMA_TRUSTED_BASE_URL=https://openclaw.lsgood.cn`, `OLLAMA_DEFAULT_MODEL=qwen3.5:4b`, connect timeout `20`, read timeout `180`, and TLS verification enabled.
 - Preserve account-level Ollama URL/model settings and existing AI business response schemas; no database migration.
 - Ollama failures must not affect `/api/health` or non-AI book, search, borrow, reading, statistics, and backup operations.
 - Do not change ssh08, Cloudflare Tunnel, or Cloudflare Access policies in this project.
@@ -44,7 +44,7 @@
 - Produces: `get_ollama_runtime_config(db: Session, user: User | None) -> OllamaRuntimeConfig`.
 - Produces: sanitized `AISettingsResponse.ollama_runtime` fields `enabled`, `base_url`, `default_model`, `connect_timeout_seconds`, `read_timeout_seconds`, `verify_tls`, `access_configured`, and `uses_access`.
 
-- [ ] **Step 1: Write failing configuration and account-compatibility tests**
+- [x] **Step 1: Write failing configuration and account-compatibility tests**
 
 Add tests named:
 
@@ -55,23 +55,23 @@ Add tests named:
 
 Use literal expected values from the spec. Assert that serialized API responses contain no Client ID or Secret keys or values.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `cd backend && pytest app/tests/test_ai.py -k "runtime or access_status or legacy_timeout" -v`
 
 Expected: FAIL because the new settings fields, runtime object, and sanitized response do not exist.
 
-- [ ] **Step 3: Implement settings fields and runtime resolution**
+- [x] **Step 3: Implement settings fields and runtime resolution**
 
 Add the exact environment aliases from the spec to `Settings`. Define `OllamaRuntimeConfig` in `ai_setting_service.py` as an immutable dataclass. Replace the tuple-returning `get_ollama_runtime_config` with the dataclass and derive `access_configured`/`uses_access` without returning credential values in schemas.
 
-- [ ] **Step 4: Run focused and existing AI configuration tests**
+- [x] **Step 4: Run focused and existing AI configuration tests**
 
 Run: `cd backend && pytest app/tests/test_ai.py -k "config or runtime or timeout" -v`
 
 Expected: PASS with no credential value in captured output.
 
-- [ ] **Step 5: Commit the configuration boundary**
+- [x] **Step 5: Commit the configuration boundary**
 
 ```bash
 git add backend/app/core/config.py backend/app/schemas/ai_setting.py backend/app/services/ai_setting_service.py backend/app/tests/test_ai.py
@@ -92,7 +92,7 @@ git commit -m "feat: add secure Ollama runtime configuration"
 - Produces async methods: `version() -> OllamaVersionResponse`, `list_models() -> OllamaModelsResponse`, `running_models() -> OllamaRunningModelsResponse`, `generate_json(...) -> T`, and `chat(...) -> str`.
 - Produces exceptions carrying safe metadata only: `OllamaDisabledError`, `OllamaAccessDeniedError`, `OllamaTunnelError`, `OllamaConnectTimeoutError`, `OllamaReadTimeoutError`, `OllamaModelError`, `OllamaUpstreamError`, and `OllamaResponseInvalidError`.
 
-- [ ] **Step 1: Write failing trusted-origin and timeout tests**
+- [x] **Step 1: Write failing trusted-origin and timeout tests**
 
 Use `httpx.MockTransport` against the real `OllamaClient`. Add tests named:
 
@@ -103,17 +103,17 @@ Use `httpx.MockTransport` against the real `OllamaClient`. Add tests named:
 
 Assert observable request headers and exception types; do not assert that a mock was called.
 
-- [ ] **Step 2: Run the focused client tests and verify RED**
+- [x] **Step 2: Run the focused client tests and verify RED**
 
 Run: `cd backend && pytest app/tests/test_ollama_client.py -k "origin or timeout" -v`
 
 Expected: FAIL because `OllamaClient` and exception types do not exist.
 
-- [ ] **Step 3: Implement origin normalization, AsyncClient timeouts, and safe headers**
+- [x] **Step 3: Implement origin normalization, AsyncClient timeouts, and safe headers**
 
 Normalize scheme, lowercase hostname, and effective port. Reject URL userinfo for Access matching. Attach both Access headers only when credentials are complete and effective origin equals `trusted_base_url` origin. Configure `httpx.Timeout(connect=..., read=..., write=..., pool=...)` and TLS verification from runtime configuration.
 
-- [ ] **Step 4: Write failing upstream and response-validation tests**
+- [x] **Step 4: Write failing upstream and response-validation tests**
 
 Add table-driven tests named:
 
@@ -127,23 +127,23 @@ Add table-driven tests named:
 
 Use literal error categories and include a fake secret/upstream body marker that must not appear in `str(exc)`.
 
-- [ ] **Step 5: Run the new tests and verify RED**
+- [x] **Step 5: Run the new tests and verify RED**
 
 Run: `cd backend && pytest app/tests/test_ollama_client.py -k "access or tunnel or model or upstream or invalid or disabled or retries" -v`
 
 Expected: FAIL on unimplemented classification and retry behavior.
 
-- [ ] **Step 6: Implement health methods, generation, classification, validation, and retry**
+- [x] **Step 6: Implement health methods, generation, classification, validation, and retry**
 
 Implement the interfaces above. Detect Cloudflare error code `1033` from a bounded response prefix without exposing the body. Retry one transient connect failure only before a response exists. Enforce bounded prompt and output lengths, `stream: false`, JSON format, and Pydantic validation. Keep prompt loading/parsing helpers in `ollama_service.py` if they remain business-oriented.
 
-- [ ] **Step 7: Run the complete async-client suite**
+- [x] **Step 7: Run the complete async-client suite**
 
 Run: `cd backend && pytest app/tests/test_ollama_client.py -v`
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit the client boundary**
+- [x] **Step 8: Commit the client boundary**
 
 ```bash
 git add backend/app/services/ollama_client.py backend/app/services/ollama_service.py backend/app/schemas/ai.py backend/app/tests/test_ollama_client.py
@@ -163,7 +163,7 @@ git commit -m "feat: add async Cloudflare-aware Ollama client"
 - Produces: `POST /api/ai/test-connection` accepting `{ "generate": bool }`; administrator-only; when true, performs a minimal generation with `keep_alive=0`.
 - Produces: stable API error codes defined in the spec through `_ai_error_from_ollama`.
 
-- [ ] **Step 1: Write failing health response and authorization tests**
+- [x] **Step 1: Write failing health response and authorization tests**
 
 Add tests named:
 
@@ -174,27 +174,27 @@ Add tests named:
 - `test_admin_generation_test_requires_explicit_true_and_uses_keep_alive_zero`
 - `test_health_failure_returns_chinese_classified_error_without_secret`
 
-- [ ] **Step 2: Run endpoint tests and verify RED**
+- [x] **Step 2: Run endpoint tests and verify RED**
 
 Run: `cd backend && pytest app/tests/test_ai.py -k "health or connection_test or generation_test" -v`
 
 Expected: FAIL with 404 or missing response schema.
 
-- [ ] **Step 3: Implement schemas, routes, permissions, and bounded last-health state**
+- [x] **Step 3: Implement schemas, routes, permissions, and bounded last-health state**
 
 Add Pydantic request/response schemas to `schemas/ai.py`. Use `get_current_user` for health and `require_admin` for test connection. Store only the latest sanitized status in a module-level bounded value; reset to “尚未检查” on process start. Do not change `/api/health`.
 
-- [ ] **Step 4: Implement stable Chinese error mapping**
+- [x] **Step 4: Implement stable Chinese error mapping**
 
 Map every Task 2 exception to the exact API error code and HTTP status from the spec. Details may include safe hostname/status/category only.
 
-- [ ] **Step 5: Run focused endpoint tests**
+- [x] **Step 5: Run focused endpoint tests**
 
 Run: `cd backend && pytest app/tests/test_ai.py -k "health or connection_test or generation_test or access_denied or tunnel or timeout" -v`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit operational APIs**
+- [x] **Step 6: Commit operational APIs**
 
 ```bash
 git add backend/app/schemas/ai.py backend/app/api/routes/ai.py backend/app/tests/test_ai.py
@@ -213,7 +213,7 @@ git commit -m "feat: add Ollama health and admin test APIs"
 - Preserves: existing `/models`, `/classify-book`, `/generate-tags`, `/recommend-book-content`, `/summarize-book`, `/detect-duplicate`, and `/natural-search` response schemas.
 - Produces: `sanitize_ai_task_input(input_data: dict[str, Any]) -> dict[str, Any]` for bounded audit data.
 
-- [ ] **Step 1: Convert test transport support and write failing audit-sanitization tests**
+- [x] **Step 1: Convert test transport support and write failing audit-sanitization tests**
 
 Update the existing Ollama test helper to use `httpx.AsyncClient` plus `MockTransport`. Add tests named:
 
@@ -223,27 +223,27 @@ Update the existing Ollama test helper to use `httpx.AsyncClient` plus `MockTran
 
 Retain all existing schema assertions for category, tags, content recommendation, summary, duplicates, and natural search.
 
-- [ ] **Step 2: Run the full AI suite and verify RED**
+- [x] **Step 2: Run the full AI suite and verify RED**
 
 Run: `cd backend && pytest app/tests/test_ai.py -v`
 
 Expected: FAIL because routes still call the synchronous service and audit inputs are unbounded.
 
-- [ ] **Step 3: Convert route helpers and endpoints to async**
+- [x] **Step 3: Convert route helpers and endpoints to async**
 
 Change `_run_json_task` and all Ollama-calling route functions to `async def` and `await OllamaClient`. Preserve endpoint paths and response models. Use the account runtime object consistently so the saved default model is not replaced by the first model returned from `/api/tags`.
 
-- [ ] **Step 4: Bound AI task audit input and failure details**
+- [x] **Step 4: Bound AI task audit input and failure details**
 
 Implement `sanitize_ai_task_input` in `ai_task_service.py` with field whitelisting and bounded strings/lists. Store structured output only after Pydantic validation. Store classified safe error text on failure.
 
-- [ ] **Step 5: Run AI and non-AI regression tests**
+- [x] **Step 5: Run AI and non-AI regression tests**
 
 Run: `cd backend && pytest app/tests/test_ai.py app/tests/test_books.py app/tests/test_search.py app/tests/test_system.py -v`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit workflow migration**
+- [x] **Step 6: Commit workflow migration**
 
 ```bash
 git add backend/app/api/routes/ai.py backend/app/services/ai_task_service.py backend/app/tests/test_ai.py
@@ -269,21 +269,21 @@ git commit -m "refactor: route AI workflows through async Ollama client"
 - Produces: `fetchAIHealth()`, `testAIConnection(generate: boolean)`, and `getAIErrorMessage(error: unknown) -> string`.
 - Produces: `OllamaConnectionStatus` component props `status`, `isAdmin`, `loading`; emits `check`, `test`, and `test-generate`.
 
-- [ ] **Step 1: Write failing API normalization and error mapping tests**
+- [x] **Step 1: Write failing API normalization and error mapping tests**
 
 Add table-driven tests for every stable backend AI error code. Assert literal Chinese messages and that unknown errors use a bounded generic fallback. Add API normalization tests proving credential values are absent and `accessConfigured`/`usesAccess` booleans are retained.
 
-- [ ] **Step 2: Run focused frontend tests and verify RED**
+- [x] **Step 2: Run focused frontend tests and verify RED**
 
 Run: `cd frontend && npm test -- src/utils/aiErrors.spec.ts src/api/settings.spec.ts`
 
 Expected: FAIL because helpers and normalized health types do not exist.
 
-- [ ] **Step 3: Implement frontend types, API methods, and Chinese error mapping**
+- [x] **Step 3: Implement frontend types, API methods, and Chinese error mapping**
 
 Map snake_case API fields to camelCase. Use `API_TIMEOUTS.aiGeneration` for explicit generation tests. Keep both `aiHealth` and `aiGeneration` at 240 seconds so the backend 180-second read timeout expires first and the Nginx 300-second proxy timeout remains the outer limit. Never define Client ID or Secret fields in frontend types.
 
-- [ ] **Step 4: Write failing status-component tests**
+- [x] **Step 4: Write failing status-component tests**
 
 Mount the real component and add tests named:
 
@@ -292,17 +292,17 @@ Mount the real component and add tests named:
 - `hides_admin_test_actions_for_members`
 - `emits_separate_check_test_and_generate_actions_for_admin`
 
-- [ ] **Step 5: Run component tests and verify RED**
+- [x] **Step 5: Run component tests and verify RED**
 
 Run: `cd frontend && npm test -- src/components/ai/OllamaConnectionStatus.spec.ts`
 
 Expected: FAIL because the component does not exist.
 
-- [ ] **Step 6: Implement the status component and integrate SettingsPage**
+- [x] **Step 6: Implement the status component and integrate SettingsPage**
 
 Render enabled state, effective URL/model, connect/read timeout, TLS state, Access configured status, Access-use warning, last health message, version, and model counts. Use `useAuthStore().isAdmin` for administrator actions. Require `ElMessageBox.confirm` before `generate=true`; model refresh and ordinary health checks must never generate.
 
-- [ ] **Step 7: Run frontend tests, type check, and build**
+- [x] **Step 7: Run frontend tests, type check, and build**
 
 Run: `cd frontend && npm test`
 
@@ -312,7 +312,7 @@ Run: `cd frontend && npm run build`
 
 Expected: all commands exit 0.
 
-- [ ] **Step 8: Commit the settings UI**
+- [x] **Step 8: Commit the settings UI**
 
 ```bash
 git add frontend/src/types frontend/src/api frontend/src/components/ai frontend/src/utils frontend/src/pages/settings/SettingsPage.vue
@@ -340,23 +340,23 @@ git commit -m "feat: add Ollama connection status and admin tests"
 - Produces: development and production Compose mappings plus a read-only smoke script for `/api/version`, `/api/tags`, and `/api/ps`.
 - Produces: GitHub tag-release automation that gates on backend tests and frontend tests/build, then publishes both multi-architecture GHCR images and creates the GitHub Release with deployment assets.
 
-- [ ] **Step 1: Add environment and Compose mappings**
+- [x] **Step 1: Add environment and Compose mappings**
 
 Document and map all spec variables. Keep secrets as empty placeholders. Do not add any `VITE_OLLAMA_*` or credential build arguments. Preserve the optional local Ollama Compose profile.
 
-- [ ] **Step 2: Add the sanitized smoke script**
+- [x] **Step 2: Add the sanitized smoke script**
 
 Adapt the verified handoff script so it reads credentials from environment, never echoes them, defaults to `https://openclaw.lsgood.cn`, checks version/tags/ps only, and does not generate unless a future separately reviewed change adds that behavior.
 
-- [ ] **Step 3: Update existing documentation and roadmap**
+- [x] **Step 3: Update existing documentation and roadmap**
 
 Replace local-only wording with local-or-remote behavior, list new variables and endpoints, document Chinese error categories and core-feature degradation, and state that `ollama.lsgood.cn` is not the current default. Add the spec and plan to `DOCS_INDEX.md`; do not create another top-level status document.
 
-- [ ] **Step 4: Gate GitHub Release image generation on backend and frontend validation**
+- [x] **Step 4: Gate GitHub Release image generation on backend and frontend validation**
 
 Extend the existing `.github/workflows/release.yml` instead of creating another workflow. For `v*` tags, require successful backend pytest plus frontend Vitest and production build before publishing both `home-library-backend` and `home-library-frontend` multi-architecture GHCR images. Create the GitHub Release only after both images succeed, retaining generated release notes and the existing production Compose, environment template, deploy script, and update script assets. Main-branch image publishing may remain for `latest`, but a failed validation must block image publication.
 
-- [ ] **Step 5: Validate shell, Compose, and workflow files**
+- [x] **Step 5: Validate shell, Compose, and workflow files**
 
 Run: `bash -n scripts/ollama-cloudflare-smoke-test.sh`
 
@@ -366,7 +366,7 @@ Run: `docker compose -f docker-compose.prod.yml config --quiet`
 
 Expected: all commands exit 0 and rendered Compose contains no non-empty credential value from tracked files.
 
-- [ ] **Step 6: Run complete backend and frontend verification**
+- [x] **Step 6: Run complete backend and frontend verification**
 
 Run: `cd backend && pytest -v`
 
@@ -378,23 +378,25 @@ Run: `cd frontend && npm run build`
 
 Expected: all commands exit 0 with zero failed tests.
 
-- [ ] **Step 7: Run Docker application verification**
+- [x] **Step 7: Run Docker application verification**
 
 Run: `docker compose up -d --build`
 
 Verify `/api/health`, login, non-AI book listing, AI config sanitization, disabled/no-credential degradation, and the health/test authorization behavior through the running stack. Do not display credentials in command output.
 
-- [ ] **Step 8: Run the real remote smoke test when credentials are present**
+- [x] **Step 8: Run the real remote smoke test when credentials are present**
+
+Credential availability was checked without printing values. Neither server-side Access credential was present, so authenticated remote success verification was not executable and remains an external deployment acceptance item; it is not recorded as a successful smoke test.
 
 First check only whether both credential environment variables are present, without printing values. If present, run `scripts/ollama-cloudflare-smoke-test.sh` and require HTTP 200 for version/tags/ps. If absent, record that authenticated real-interface verification was not executable; an unauthenticated 401/403 check may confirm Access protection but does not count as success.
 
-- [ ] **Step 9: Review the complete diff for secret leakage and scope**
+- [x] **Step 9: Review the complete diff for secret leakage and scope**
 
 Run: `git diff --check`
 
 Run a secret-name and suspicious-value scan across tracked changes, report only filenames/findings, and confirm no unrelated files are staged.
 
-- [ ] **Step 10: Commit deployment, release automation, and documentation**
+- [x] **Step 10: Commit deployment, release automation, and documentation**
 
 ```bash
 git add .github/workflows/release.yml .env.example docker-compose.yml docker-compose.prod.yml scripts/ollama-cloudflare-smoke-test.sh README.md backend/README.md docs

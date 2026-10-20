@@ -57,13 +57,14 @@ DATABASE_URL=sqlite:////data/home_library.sqlite3
 | `HTTP_PORT` | `80` | Nginx 对外端口 |
 | `APP_ENV` | `production` | 运行环境 |
 | `APP_SECRET_KEY` | 随机长字符串 | JWT 签名密钥，生产必须修改 |
+| `PYTHON_PACKAGE_INDEX_URL` | `https://pypi.org/simple` | 仅用于 Docker 后端构建；构建前在实际环境测速并按次覆盖，官方源保留为默认回退 |
 | `DATABASE_URL` | `sqlite:////data/home_library.sqlite3` | 数据库连接 |
 | `CORS_ORIGINS` | `http://localhost` | 允许访问的前端地址 |
 | `INITIAL_ADMIN_USERNAME` | `admin` | 首次初始化管理员 |
 | `INITIAL_ADMIN_PASSWORD` | `change-me` | 首次初始化管理员密码 |
 | `OLLAMA_ENABLED` | `false` | AI 总开关，关闭时不发出 Ollama 请求 |
 | `OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | 后端直接运行时的本地或远程地址 |
-| `OLLAMA_TRUSTED_BASE_URL` | `https://openclaw.lsgood.cn` | smoke 脚本允许携带 Access 凭据的严格 Origin |
+| `OLLAMA_TRUSTED_BASE_URL` | `https://openclaw.lsgood.cn` | 后端与 smoke 允许携带 Access 凭据的独立 HTTPS 信任 Origin |
 | `DOCKER_OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | Compose 后端容器实际使用的地址 |
 | `OLLAMA_DEFAULT_MODEL` | `qwen3.5:4b` | 默认模型 |
 | `OLLAMA_CONNECT_TIMEOUT_SECONDS` | `20` | 建立连接超时秒数 |
@@ -155,7 +156,7 @@ OLLAMA_CF_ACCESS_CLIENT_ID=
 OLLAMA_CF_ACCESS_CLIENT_SECRET=
 ```
 
-两项 Access 凭据必须同时由服务器秘密管理填入，不得写入仓库、前端 `VITE_*`、镜像 build args 或运维日志。后端只在请求 origin 与服务器受信任 URL 完全一致时附加 Access headers。smoke 脚本独立比较 `OLLAMA_BASE_URL` 与 `OLLAMA_TRUSTED_BASE_URL`：协议、主机和有效端口必须一致，HTTP 80/HTTPS 443 的显式端口与默认端口等价，路径可不同；用户信息、控制字符、非 HTTP(S) 或第三方 Origin 会在调用 curl 前被拒绝。
+两项 Access 凭据必须同时由服务器秘密管理填入，不得写入仓库、前端 `VITE_*`、镜像 build args 或运维日志。后端只在请求 HTTPS origin 与独立的 `OLLAMA_TRUSTED_BASE_URL` 完全一致时附加 Access headers；HTTP、本地名称和 IP 地址始终不携带凭据。smoke 脚本独立比较 `OLLAMA_BASE_URL` 与 `OLLAMA_TRUSTED_BASE_URL`：协议、主机和有效端口必须一致，HTTP 80/HTTPS 443 的显式端口与默认端口等价，路径可不同；用户信息、控制字符、非 HTTP(S) 或第三方 Origin 会在调用 curl 前被拒绝。
 
 确认环境中已经安全注入两项凭据后，可执行只读 smoke；脚本不会调用生成接口，也不会打印凭据或响应正文：
 

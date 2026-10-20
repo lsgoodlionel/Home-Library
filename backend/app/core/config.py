@@ -88,6 +88,13 @@ class Settings(BaseSettings):
         default="https://openclaw.lsgood.cn",
         validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_BASE_URL", "OLLAMA_BASE_URL"),
     )
+    ollama_trusted_base_url: str = Field(
+        default="https://openclaw.lsgood.cn",
+        validation_alias=AliasChoices(
+            "HOME_LIBRARY_OLLAMA_TRUSTED_BASE_URL",
+            "OLLAMA_TRUSTED_BASE_URL",
+        ),
+    )
     ollama_default_model: str = Field(
         default="qwen3.5:4b",
         validation_alias=AliasChoices("HOME_LIBRARY_OLLAMA_DEFAULT_MODEL", "OLLAMA_DEFAULT_MODEL"),

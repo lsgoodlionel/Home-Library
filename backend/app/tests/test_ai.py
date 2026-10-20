@@ -52,6 +52,8 @@ OLLAMA_ENVIRONMENT_VARIABLES = (
     "OLLAMA_ENABLED",
     "HOME_LIBRARY_OLLAMA_BASE_URL",
     "OLLAMA_BASE_URL",
+    "HOME_LIBRARY_OLLAMA_TRUSTED_BASE_URL",
+    "OLLAMA_TRUSTED_BASE_URL",
     "HOME_LIBRARY_OLLAMA_DEFAULT_MODEL",
     "OLLAMA_DEFAULT_MODEL",
     "HOME_LIBRARY_OLLAMA_CONNECT_TIMEOUT_SECONDS",
@@ -1320,6 +1322,28 @@ def test_ollama_runtime_uses_saved_account_url_without_access_headers(
     assert runtime.base_url == "http://remote-ollama.local:11434"
     assert runtime.default_model == "saved-model"
     assert response.json()["ollama_runtime"]["uses_access"] is False
+
+
+def test_ollama_runtime_keeps_remote_trust_anchor_when_default_target_is_local(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_ollama_environment(monkeypatch)
+    monkeypatch.setenv("OLLAMA_ENABLED", "true")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+    monkeypatch.setenv("OLLAMA_TRUSTED_BASE_URL", "https://openclaw.lsgood.cn")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_ID", "runtime-client-id")
+    monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_SECRET", "runtime-client-secret")
+    get_settings.cache_clear()
+
+    runtime = get_ollama_runtime_config(db, None)
+    effective = get_effective_ai_settings(db, None)
+    get_settings.cache_clear()
+
+    assert runtime.base_url == "http://host.docker.internal:11434"
+    assert runtime.trusted_base_url == "https://openclaw.lsgood.cn"
+    assert effective.ollama_runtime.access_configured is True
+    assert effective.ollama_runtime.uses_access is False
 
 
 def test_ai_config_exposes_access_status_without_credentials(

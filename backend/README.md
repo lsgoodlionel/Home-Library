@@ -59,7 +59,7 @@ cp ../.env.example ../.env
 | `INITIAL_ADMIN_PASSWORD` | `change-me` | 初始管理员密码 |
 | `OLLAMA_ENABLED` | `false` | AI 总开关；关闭时不会请求 Ollama |
 | `OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | 本地或远程 Ollama 地址 |
-| `OLLAMA_TRUSTED_BASE_URL` | `https://openclaw.lsgood.cn` | smoke 脚本可携带 Access 凭据的严格 Origin |
+| `OLLAMA_TRUSTED_BASE_URL` | `https://openclaw.lsgood.cn` | 后端与 smoke 可携带 Access 凭据的独立 HTTPS 信任 Origin |
 | `OLLAMA_DEFAULT_MODEL` | `qwen3.5:4b` | AI 接口默认使用的模型 |
 | `OLLAMA_CONNECT_TIMEOUT_SECONDS` | `20` | 建立连接超时（秒） |
 | `OLLAMA_READ_TIMEOUT_SECONDS` | `180` | 模型读取/生成超时（秒） |

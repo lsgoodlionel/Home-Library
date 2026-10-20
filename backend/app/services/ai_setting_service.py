@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 from copy import deepcopy
 from dataclasses import dataclass
@@ -181,7 +182,7 @@ def get_ollama_runtime_config(db: Session, user: User | None) -> OllamaRuntimeCo
     return OllamaRuntimeConfig(
         enabled=runtime.enabled,
         base_url=runtime.base_url,
-        trusted_base_url=settings.ollama_base_url,
+        trusted_base_url=settings.ollama_trusted_base_url,
         default_model=runtime.default_model,
         connect_timeout_seconds=runtime.connect_timeout_seconds,
         read_timeout_seconds=runtime.read_timeout_seconds,
@@ -204,6 +205,29 @@ def normalize_ollama_origin(url: str) -> tuple[str, str, int | None] | None:
     return parsed.scheme, parsed.host.lower(), port
 
 
+def normalize_access_origin(url: str) -> tuple[str, str, int | None] | None:
+    origin = normalize_ollama_origin(url)
+    if origin is None:
+        return None
+    scheme, hostname, port = origin
+    hostname = hostname.rstrip(".")
+    if scheme != "https":
+        return None
+    try:
+        ipaddress.ip_address(hostname)
+        return None
+    except ValueError:
+        pass
+    if (
+        "." not in hostname
+        or hostname == "localhost"
+        or hostname == "host.docker.internal"
+        or hostname.endswith(".local")
+    ):
+        return None
+    return scheme, hostname, port
+
+
 def _runtime_status(
     active_provider: str,
     default_model: str,
@@ -221,11 +245,11 @@ def _runtime_status(
     access_configured = bool(
         settings.ollama_cf_access_client_id and settings.ollama_cf_access_client_secret
     )
-    trusted_origin = normalize_ollama_origin(settings.ollama_base_url)
+    trusted_origin = normalize_access_origin(settings.ollama_trusted_base_url)
     uses_access = (
         access_configured
         and trusted_origin is not None
-        and normalize_ollama_origin(base_url) == trusted_origin
+        and normalize_access_origin(base_url) == trusted_origin
     )
     return OllamaRuntimeStatus(
         enabled=settings.ollama_enabled,
