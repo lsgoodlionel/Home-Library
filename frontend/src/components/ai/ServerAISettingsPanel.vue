@@ -138,6 +138,8 @@ async function openSaveDialog() {
       );
       confirmInsecureTls.value = true;
     } catch {
+      clearSensitiveRefs();
+      confirmInsecureTls.value = false;
       return;
     }
   }
@@ -157,6 +159,8 @@ async function openResetDialog() {
       },
     );
   } catch {
+    clearSensitiveRefs();
+    confirmInsecureTls.value = false;
     return;
   }
   pendingAction.value = 'reset';
@@ -167,6 +171,19 @@ function cancelAuthDialog() {
   clearSensitiveRefs();
   confirmInsecureTls.value = false;
   authDialogVisible.value = false;
+}
+
+function handleAuthDialogVisibility(visible: boolean) {
+  authDialogVisible.value = visible;
+  if (!visible) {
+    clearSensitiveRefs();
+    confirmInsecureTls.value = false;
+  }
+}
+
+function handleAuthDialogBeforeClose(done: () => void) {
+  handleAuthDialogVisibility(false);
+  done();
 }
 
 async function runFollowUpTest(operation: '保存' | '恢复') {
@@ -361,10 +378,12 @@ onMounted(loadConfig);
     </el-form>
 
     <el-dialog
-      v-model="authDialogVisible"
+      :model-value="authDialogVisible"
+      @update:model-value="handleAuthDialogVisibility"
+      :before-close="handleAuthDialogBeforeClose"
       data-testid="auth-dialog"
       :title="authTitle"
-      width="480px"
+      width="min(480px, calc(100vw - 32px))"
       destroy-on-close
       :close-on-click-modal="false"
       @close="clearSensitiveRefs"

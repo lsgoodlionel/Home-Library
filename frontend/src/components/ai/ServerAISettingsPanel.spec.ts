@@ -75,6 +75,32 @@ async function fillAuth(wrapper: VueWrapper) {
   await input(wrapper, 'upgrade-password').setValue('server-upgrade-password');
 }
 
+function nonSensitiveFormState(wrapper: VueWrapper) {
+  const urls = wrapper.findAll('input[placeholder="https://ollama.example.com"]');
+  const timeouts = wrapper.findAll('input[role="spinbutton"]');
+  return {
+    enabled: wrapper.get('[data-testid="enabled"] input').attributes('aria-checked'),
+    verifyTls: wrapper.get('[data-testid="verify-tls"] input').attributes('aria-checked'),
+    defaultBaseUrl: (urls[0].element as HTMLInputElement).value,
+    trustedBaseUrl: (urls[1].element as HTMLInputElement).value,
+    defaultModel: (wrapper.get('input[placeholder="qwen3.5:4b"]').element as HTMLInputElement).value,
+    connectTimeout: (timeouts[0].element as HTMLInputElement).value,
+    readTimeout: (timeouts[1].element as HTMLInputElement).value,
+  };
+}
+
+function expectAllSensitiveInputsEmpty(wrapper: VueWrapper) {
+  expect((input(wrapper, 'access-client-id').element as HTMLInputElement).value).toBe('');
+  expect((input(wrapper, 'access-client-secret').element as HTMLInputElement).value).toBe('');
+  expect((input(wrapper, 'admin-password').element as HTMLInputElement).value).toBe('');
+  expect((input(wrapper, 'upgrade-password').element as HTMLInputElement).value).toBe('');
+}
+
+async function closeAuthThroughDialog(wrapper: VueWrapper) {
+  await wrapper.get('.el-dialog__headerbtn').trigger('click');
+  await flushPromises();
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.fetchSystemAIConfig.mockResolvedValue(config);
@@ -186,7 +212,53 @@ describe('ServerAISettingsPanel', () => {
     }));
   });
 
-  it('clears every sensitive ref after success failure and dialog close', async () => {
+  it('clears all sensitive refs when TLS warning or reset pre-confirm is cancelled without changing config fields', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm');
+    const wrapper = await mountPanel();
+
+    await input(wrapper, 'access-client-id').setValue('pending-client');
+    await input(wrapper, 'access-client-secret').setValue('pending-secret');
+    await openSaveAuth(wrapper);
+    await fillAuth(wrapper);
+    await wrapper.get('[data-testid="verify-tls"]').trigger('click');
+    const tlsFormState = nonSensitiveFormState(wrapper);
+    confirm.mockRejectedValueOnce('cancel');
+
+    await openSaveAuth(wrapper);
+
+    expectAllSensitiveInputsEmpty(wrapper);
+    expect(nonSensitiveFormState(wrapper)).toEqual(tlsFormState);
+
+    await input(wrapper, 'access-client-id').setValue('reset-client');
+    await input(wrapper, 'access-client-secret').setValue('reset-secret');
+    await fillAuth(wrapper);
+    const resetFormState = nonSensitiveFormState(wrapper);
+    confirm.mockRejectedValueOnce('cancel');
+
+    await button(wrapper, '恢复环境变量配置').trigger('click');
+    await flushPromises();
+
+    expectAllSensitiveInputsEmpty(wrapper);
+    expect(nonSensitiveFormState(wrapper)).toEqual(resetFormState);
+    expect(mocks.saveSystemAIConfig).not.toHaveBeenCalled();
+    expect(mocks.resetSystemAIConfig).not.toHaveBeenCalled();
+  });
+
+  it('clears all four sensitive inputs through the actual el-dialog close hook before reopen', async () => {
+    const wrapper = await mountPanel();
+
+    await input(wrapper, 'access-client-id').setValue('closed-client');
+    await input(wrapper, 'access-client-secret').setValue('closed-secret');
+    await openSaveAuth(wrapper);
+    await fillAuth(wrapper);
+
+    await closeAuthThroughDialog(wrapper);
+    await openSaveAuth(wrapper);
+
+    expectAllSensitiveInputsEmpty(wrapper);
+  });
+
+  it('does not repopulate authentication inputs after save failure or success', async () => {
     const errorMessage = vi.spyOn(ElMessage, 'error');
     const wrapper = await mountPanel();
     mocks.saveSystemAIConfig.mockRejectedValueOnce({
@@ -200,8 +272,9 @@ describe('ServerAISettingsPanel', () => {
     await button(wrapper, '确认保存').trigger('click');
     await flushPromises();
     expect(errorMessage).toHaveBeenCalledWith('管理员密码错误');
-    expect((input(wrapper, 'access-client-id').element as HTMLInputElement).value).toBe('');
-    expect((input(wrapper, 'access-client-secret').element as HTMLInputElement).value).toBe('');
+    await openSaveAuth(wrapper);
+    expectAllSensitiveInputsEmpty(wrapper);
+    await closeAuthThroughDialog(wrapper);
 
     await input(wrapper, 'access-client-id').setValue('success-client');
     await input(wrapper, 'access-client-secret').setValue('success-secret');
@@ -209,18 +282,23 @@ describe('ServerAISettingsPanel', () => {
     await fillAuth(wrapper);
     await button(wrapper, '确认保存').trigger('click');
     await flushPromises();
-    expect((input(wrapper, 'access-client-id').element as HTMLInputElement).value).toBe('');
-    expect((input(wrapper, 'access-client-secret').element as HTMLInputElement).value).toBe('');
-
-    await input(wrapper, 'access-client-id').setValue('closed-client');
-    await input(wrapper, 'access-client-secret').setValue('closed-secret');
     await openSaveAuth(wrapper);
-    await fillAuth(wrapper);
-    await button(wrapper, '取消').trigger('click');
-    await flushPromises();
-    expect((input(wrapper, 'access-client-id').element as HTMLInputElement).value).toBe('');
-    expect((input(wrapper, 'access-client-secret').element as HTMLInputElement).value).toBe('');
-    expect(wrapper.find('.el-dialog').isVisible()).toBe(false);
+    expectAllSensitiveInputsEmpty(wrapper);
+  });
+
+  it('uses a viewport-bounded authentication dialog width on narrow screens', async () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 320 });
+    try {
+      const wrapper = await mountPanel();
+      await openSaveAuth(wrapper);
+
+      const style = wrapper.get('.el-dialog').attributes('style');
+      expect(style).toContain('--el-dialog-width: min(480px, calc(100vw - 32px))');
+      expect(style).not.toContain('--el-dialog-width: 480px;');
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+    }
   });
 
   it('requires confirmation and both passwords before environment reset', async () => {
