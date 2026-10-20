@@ -7,6 +7,7 @@
 #   bash update.sh --version 0.1.50   # 升级到指定版本
 #   bash update.sh --check      # 仅检查当前运行版本
 #   bash update.sh --source     # 从源码构建（传统方式，速度慢）
+#   bash update.sh --install-dir /opt/home-library
 #
 # 环境变量（可在 .env 中设置）：
 #   UPDATE_NOTIFY_URL   Webhook 通知地址（企业微信 / 钉钉 / Slack）
@@ -14,27 +15,74 @@
 # =============================================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="$(dirname "$SCRIPT_DIR")"
-PROD_COMPOSE="$INSTALL_DIR/docker-compose.prod.yml"
-SRC_COMPOSE="$INSTALL_DIR/docker-compose.yml"
-LOG_DIR="$INSTALL_DIR/logs"
-LOG_FILE="$LOG_DIR/update.log"
 LOCK_FILE="/tmp/home-library-update.lock"
 
 # ---------- 参数 ----------
 TARGET_VERSION="latest"
 CHECK_ONLY=false
 SOURCE_BUILD=false
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
 
-for arg in "$@"; do
-  case $arg in
-    --check)   CHECK_ONLY=true ;;
-    --source)  SOURCE_BUILD=true ;;
-    --version) shift; TARGET_VERSION="$1" ;;
-    --version=*) TARGET_VERSION="${arg#--version=}" ;;
+case "$SCRIPT_SOURCE" in
+  /dev/fd/*|/proc/*/fd/*)
+    DEFAULT_INSTALL_DIR="$HOME/home-library"
+    ;;
+  *)
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+    DEFAULT_INSTALL_DIR="$(dirname "$SCRIPT_DIR")"
+    ;;
+esac
+
+INSTALL_DIR="$DEFAULT_INSTALL_DIR"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check)
+      CHECK_ONLY=true
+      shift
+      ;;
+    --source)
+      SOURCE_BUILD=true
+      shift
+      ;;
+    --auto)
+      shift
+      ;;
+    --version)
+      [[ $# -ge 2 ]] || { echo "错误：--version 缺少版本号" >&2; exit 2; }
+      TARGET_VERSION="$2"
+      shift 2
+      ;;
+    --version=*)
+      TARGET_VERSION="${1#--version=}"
+      [[ -n "$TARGET_VERSION" ]] || { echo "错误：--version 缺少版本号" >&2; exit 2; }
+      shift
+      ;;
+    --install-dir)
+      [[ $# -ge 2 ]] || { echo "错误：--install-dir 缺少路径" >&2; exit 2; }
+      INSTALL_DIR="$2"
+      shift 2
+      ;;
+    --install-dir=*)
+      INSTALL_DIR="${1#--install-dir=}"
+      [[ -n "$INSTALL_DIR" ]] || { echo "错误：--install-dir 缺少路径" >&2; exit 2; }
+      shift
+      ;;
+    -h|--help)
+      echo "用法：bash update.sh [--check] [--source] [--version VERSION] [--install-dir PATH]"
+      exit 0
+      ;;
+    *)
+      echo "错误：未知参数 $1" >&2
+      exit 2
+      ;;
   esac
 done
+
+PROD_COMPOSE="$INSTALL_DIR/docker-compose.prod.yml"
+SRC_COMPOSE="$INSTALL_DIR/docker-compose.yml"
+LOG_DIR="$INSTALL_DIR/logs"
+LOG_FILE="$LOG_DIR/update.log"
 
 # ---------- 颜色 ----------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'

@@ -135,14 +135,16 @@ irm https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/dep
 ### 手动一键更新
 
 ```bash
-# Linux / macOS / 群晖
-bash ~/home-library/scripts/update.sh
+# Linux / macOS / 群晖：更新部署配置并拉取 GitHub main 最新镜像
+git -C "$HOME/home-library" pull --ff-only origin main && \
+  bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh) \
+  --install-dir "$HOME/home-library" --version latest
 
 # Windows
 .\scripts\update.ps1
 ```
 
-更新流程：检查新版本 → 备份数据库 → 拉取代码 → 重建镜像 → 健康检查（失败自动回滚）
+当前仓库尚无正式 Release/tag；GitHub `main` 验证成功后发布 `latest` 前后端镜像，因此一键安装和上述升级命令默认使用 `latest`。自定义安装目录时，将两处 `$HOME/home-library` 替换为实际路径。升级流程为：拉取最新部署配置 → 备份数据库 → 拉取镜像 → 重启 → 健康检查。
 
 ### 配置自动更新（定时）
 

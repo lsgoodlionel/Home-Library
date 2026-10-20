@@ -227,7 +227,18 @@ A：在应用前部署反向代理，推荐 [Nginx Proxy Manager](https://nginxp
 
 **Linux / macOS / 群晖：**
 ```bash
-bash ~/home-library/scripts/update.sh
+git -C "$HOME/home-library" pull --ff-only origin main && \
+  bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh) \
+  --install-dir "$HOME/home-library" --version latest
+```
+
+当前仓库尚无正式 Release/tag；GitHub `main` 验证成功后发布 `latest` 镜像，上述命令会先更新部署配置，再备份数据库、拉取最新镜像并重启。直接通过 `curl` 执行升级脚本时默认安装目录为 `~/home-library`，也可以显式指定：
+
+```bash
+INSTALL_DIR=/opt/home-library
+git -C "$INSTALL_DIR" pull --ff-only origin main && \
+  bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh) \
+  --install-dir "$INSTALL_DIR" --version latest
 ```
 
 **Windows（PowerShell）：**
@@ -237,16 +248,18 @@ cd $env:USERPROFILE\home-library
 ```
 
 更新流程：
-1. 检查 GitHub 是否有新版本（无新版本则直接退出）
+1. 以 fast-forward 方式拉取最新部署配置
 2. 自动备份数据库（保留最近 7 天）
-3. 拉取最新代码
-4. 后台重建镜像，重启服务
-5. 健康检查失败时自动回滚
+3. 拉取指定版本或 `latest` 预构建镜像
+4. 重启服务并等待后端健康检查
 
 **其他选项：**
 ```bash
-bash update.sh --check    # 仅检查新版本，不执行更新
-bash update.sh --force    # 强制重建（即使无新版本）
+bash scripts/update.sh --check                         # 仅显示当前运行版本
+bash scripts/update.sh --version latest                # 升级到 main 最新成功镜像
+bash scripts/update.sh --version 1.2.3                 # 正式 Release 存在后锁定版本
+bash scripts/update.sh --install-dir /opt/home-library # 指定安装目录
+bash scripts/update.sh --source                        # 从源码构建升级
 ```
 
 ---

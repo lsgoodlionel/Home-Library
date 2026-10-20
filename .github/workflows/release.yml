@@ -68,6 +68,7 @@ jobs:
           bash scripts/tests/test-ollama-cloudflare-smoke-test.sh
           bash scripts/tests/test-ai-timeout-contract.sh
           bash scripts/tests/test-resolve-release-version.sh
+          bash scripts/tests/test-update-script-remote.sh
       - name: Validate Compose configuration
         run: |
           cp .env.example .env
