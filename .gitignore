@@ -20,6 +20,7 @@ coverage/
 # Local AI worktrees and tool caches
 .claude/
 .claire/
+.worktrees/
 
 # Environment
 .env
