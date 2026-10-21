@@ -3,7 +3,7 @@ import { ArrowDown, ArrowUp, RefreshLeft } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { computed, onMounted, reactive, ref } from 'vue';
 
-import { classifyBook, fetchAIHealth, testAIConnection } from '@/api/ai';
+import { classifyBook } from '@/api/ai';
 import { bookDetailToForm, getBook, getBooks, getCategoryOptions, updateBook } from '@/api/books';
 import {
   DEFAULT_EXTERNAL_PROVIDER_ORDER,
@@ -11,9 +11,7 @@ import {
   fetchAppVersion,
   fetchExternalSearchSettings,
   fetchAIModelSettings,
-  fetchAvailableModels,
   loadLocalSettings,
-  saveAIModelSettings,
   saveExternalSearchSettings,
   saveLocalSettings,
   validateExternalProvider,
@@ -26,36 +24,27 @@ import {
   type BackupFormat,
   type ImportPreviewResult,
 } from '@/api/importExport';
-import OllamaConnectionStatus from '@/components/ai/OllamaConnectionStatus.vue';
+import AIProviderSettingsPanel from '@/components/ai/AIProviderSettingsPanel.vue';
+import CurrentAIStatus from '@/components/ai/CurrentAIStatus.vue';
 import ServerAISettingsPanel from '@/components/ai/ServerAISettingsPanel.vue';
 import { useAuthStore } from '@/stores/auth';
-import type {
-  AIModel,
-  AIProviderHealthStatus,
-  ClassifyBookResponse,
-  OllamaHealthStatus,
-} from '@/types/ai';
+import type { ClassifyBookResponse } from '@/types/ai';
 import type { BookListItem, CategoryOption } from '@/types/book';
-import { AI_PROVIDER_LABELS } from '@/types/settings';
 import type {
   AIModelSettings,
-  AIProviderConfig,
-  AIProviderKey,
   AppVersionInfo,
   ExternalSearchProviderConfig,
   ExternalSearchProviderKey,
   ExternalSearchSettings,
   OllamaRuntimeStatus,
 } from '@/types/settings';
-import { getAIErrorMessage } from '@/utils/aiErrors';
 
 const authStore = useAuthStore();
 
-const models = ref<AIModel[]>([]);
-const loadingModels = ref(false);
 const savingSettings = ref(false);
 const loadingAISettings = ref(false);
-const loadingAIStatus = ref(false);
+const aiSettingsReady = ref(false);
+const aiStatusRevision = ref(0);
 const loadingExternalSettings = ref(false);
 const loadingVersion = ref(false);
 const validatingExternalProvider = ref<ExternalSearchProviderKey | ''>('');
@@ -69,7 +58,6 @@ const autoClassifying = ref(false);
 const stopAutoClassifyRequested = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const versionInfo = ref<AppVersionInfo | null>(null);
-const aiHealth = ref<OllamaHealthStatus | null>(null);
 const runtimeNeedsSync = ref(false);
 
 const emptyOllamaRuntime: OllamaRuntimeStatus = {
@@ -99,94 +87,18 @@ const orderedProviders = computed(() =>
     .map((key) => EXTERNAL_BOOK_PROVIDERS.find((provider) => provider.key === key))
     .filter((provider): provider is (typeof EXTERNAL_BOOK_PROVIDERS)[number] => Boolean(provider)),
 );
-const activeAIProvider = computed(() =>
-  aiSettings.providers.find((provider) => provider.provider === aiSettings.activeProvider),
-);
-const ollamaConnectionStatus = computed<OllamaHealthStatus>(() => {
-  const currentRuntime = aiSettings.ollamaRuntime;
-  const cached = aiHealth.value;
-  if (cached && ollamaRuntimesMatch(cached.ollamaRuntime, currentRuntime)) {
-    return { ...cached, ollamaRuntime: currentRuntime };
-  }
-  return createUncheckedAIHealth(currentRuntime);
-});
-const modelOptions = computed(() => {
-  const names = models.value.map((model) => model.name).filter(Boolean);
-  if (aiSettings.defaultModel && !names.includes(aiSettings.defaultModel)) {
-    names.unshift(aiSettings.defaultModel);
-  }
-  return names;
-});
-const aiProviderLabels = AI_PROVIDER_LABELS;
 const externalProviderLabels: Record<ExternalSearchProviderKey, string> = {
   google_books: 'Google Books',
   isbn_work: 'ISBN Work',
   douban: '豆瓣读书',
 };
 
-async function loadModels() {
-  loadingModels.value = true;
-  try {
-    models.value = await fetchAvailableModels();
-  } catch (err: unknown) {
-    models.value = [];
-    ElMessage.warning(getAIErrorMessage(err));
-  } finally {
-    loadingModels.value = false;
-  }
-}
-
-async function loadAIHealth(refresh = false) {
-  loadingAIStatus.value = true;
-  try {
-    const providerStatus = await fetchAIHealth(refresh);
-    aiHealth.value = providerStatusMatchesRuntime(providerStatus)
-      ? providerHealthToLegacy(providerStatus)
-      : createUncheckedAIHealth(aiSettings.ollamaRuntime);
-    if (refresh) ElMessage.success(aiHealth.value.message);
-  } catch (err: unknown) {
-    if (refresh) {
-      await syncAIHealthFailure(err);
-    } else {
-      aiHealth.value = createLocalAIHealthError(err);
-    }
-    ElMessage.error(getAIErrorMessage(err));
-  } finally {
-    loadingAIStatus.value = false;
-  }
-}
-
-async function handleAIConnectionTest(generate: boolean) {
-  if (generate) {
-    try {
-      await ElMessageBox.confirm(
-        '生成测试会调用当前默认模型执行一次最小生成，并在完成后释放模型。确认继续吗？',
-        '确认生成测试',
-        { type: 'warning', confirmButtonText: '开始测试', cancelButtonText: '取消' },
-      );
-    } catch (err: unknown) {
-      if (isCancelError(err)) return;
-      throw err;
-    }
-  }
-
-  loadingAIStatus.value = true;
-  try {
-    aiHealth.value = await testAIConnection(generate);
-    ElMessage.success(generate ? '生成测试成功' : '连接测试成功');
-  } catch (err: unknown) {
-    await syncAIHealthFailure(err);
-    ElMessage.error(getAIErrorMessage(err));
-  } finally {
-    loadingAIStatus.value = false;
-  }
-}
-
 async function loadAISettings(): Promise<boolean> {
   loadingAISettings.value = true;
   try {
     const data = await fetchAIModelSettings();
     applyAISettings(data);
+    aiSettingsReady.value = true;
     return true;
   } catch {
     ElMessage.error('AI 模型配置加载失败');
@@ -199,11 +111,10 @@ async function loadAISettings(): Promise<boolean> {
 async function handleServerAIRuntimeChanged() {
   runtimeNeedsSync.value = true;
   const aiSettingsLoaded = await loadAISettings();
-  aiHealth.value = null;
   if (!aiSettingsLoaded) return;
 
   runtimeNeedsSync.value = false;
-  await loadAIHealth(true);
+  aiStatusRevision.value += 1;
 }
 
 async function loadExternalSettings() {
@@ -220,12 +131,14 @@ async function loadExternalSettings() {
 
 onMounted(async () => {
   const ancillaryLoads = Promise.all([loadVersionInfo(), loadExternalSettings()]);
-  const aiSettingsLoaded = await loadAISettings();
-  if (aiSettingsLoaded && aiSettings.aiEnabled) {
-    await loadAIHealth(false);
-  }
+  await loadAISettings();
   await ancillaryLoads;
 });
+
+function handleAccountAISaved(saved: AIModelSettings) {
+  applyAISettings(saved);
+  aiStatusRevision.value += 1;
+}
 
 async function loadVersionInfo() {
   loadingVersion.value = true;
@@ -247,113 +160,15 @@ function applyAISettings(data: AIModelSettings) {
   aiSettings.ollamaRuntime = { ...data.ollamaRuntime };
 }
 
-function ollamaRuntimesMatch(
-  cached: OllamaRuntimeStatus | null | undefined,
-  current: OllamaRuntimeStatus,
-): boolean {
-  return Boolean(
-    cached
-    && cached.baseUrl === current.baseUrl
-    && cached.defaultModel === current.defaultModel
-    && cached.enabled === current.enabled
-    && cached.connectTimeoutSeconds === current.connectTimeoutSeconds
-    && cached.readTimeoutSeconds === current.readTimeoutSeconds
-    && cached.verifyTls === current.verifyTls
-    && cached.accessConfigured === current.accessConfigured
-    && cached.usesAccess === current.usesAccess,
-  );
-}
-
-function createUncheckedAIHealth(runtime: OllamaRuntimeStatus): OllamaHealthStatus {
-  return {
-    status: 'unchecked',
-    message: '尚未检查',
-    checkedAt: null,
-    version: null,
-    installedModelCount: 0,
-    runningModelCount: 0,
-    generated: false,
-    ollamaRuntime: runtime,
-  };
-}
-
-function providerHealthToLegacy(status: AIProviderHealthStatus): OllamaHealthStatus {
-  return {
-    status: status.status === 'available' ? 'healthy' : status.status === 'unavailable' ? 'error' : 'unchecked',
-    message: status.message,
-    checkedAt: status.checkedAt,
-    version: typeof status.details.version === 'string' ? status.details.version : null,
-    installedModelCount: status.details.installedModelCount ?? 0,
-    runningModelCount: status.details.runningModelCount ?? 0,
-    generated: false,
-    ollamaRuntime: { ...aiSettings.ollamaRuntime },
-  };
-}
-
-function providerStatusMatchesRuntime(status: AIProviderHealthStatus): boolean {
-  return status.provider === 'ollama'
-    && status.safeBaseUrl === aiSettings.ollamaRuntime.baseUrl
-    && status.effectiveModel === aiSettings.ollamaRuntime.defaultModel;
-}
-
-function createLocalAIHealthError(error: unknown): OllamaHealthStatus {
-  return {
-    status: 'error',
-    message: getAIErrorMessage(error),
-    checkedAt: new Date().toISOString(),
-    version: null,
-    installedModelCount: 0,
-    runningModelCount: 0,
-    generated: false,
-    ollamaRuntime: { ...aiSettings.ollamaRuntime },
-  };
-}
-
-async function syncAIHealthFailure(error: unknown) {
-  try {
-    const latest = await fetchAIHealth(false);
-    if (latest.status === 'unavailable') {
-      aiHealth.value = providerHealthToLegacy(latest);
-      return;
-    }
-  } catch {
-    // Fall back to a local sanitized error below.
-  }
-  aiHealth.value = createLocalAIHealthError(error);
-}
-
 async function handleSave() {
   savingSettings.value = true;
   try {
-    let aiSaved = false;
-    let externalSaved = false;
-    const aiSave = (async () => {
-      const savedAI = await saveAIModelSettings({
-        aiEnabled: aiSettings.aiEnabled,
-        activeProvider: aiSettings.activeProvider,
-        defaultModel: aiSettings.defaultModel,
-        providers: aiSettings.providers,
-        ollamaRuntime: aiSettings.ollamaRuntime,
-      });
-      applyAISettings(savedAI);
-      aiHealth.value = null;
-      settings.ollamaBaseUrl = getProvider('ollama')?.baseUrl
-        || savedAI.ollamaRuntime.baseUrl
-        || settings.ollamaBaseUrl;
-      settings.defaultModel = savedAI.defaultModel;
-      aiSaved = true;
-    })();
-    const externalSave = (async () => {
-      const savedExternal = await saveExternalSearchSettings(externalSearchSettings);
-      externalSearchSettings.providers = savedExternal.providers.map((provider) => ({
-        ...provider,
-        apiKey: '',
-        extra: '',
-      }));
-      externalSaved = true;
-    })();
-
-    await Promise.allSettled([aiSave, externalSave]);
+    const savedExternal = await saveExternalSearchSettings(externalSearchSettings);
+    externalSearchSettings.providers = savedExternal.providers.map((provider) => ({
+      ...provider,
+      apiKey: '',
+      extra: '',
+    }));
     let localPreferencesSaved = true;
     try {
       saveLocalSettings({
@@ -366,18 +181,12 @@ async function handleSave() {
       localPreferencesSaved = false;
     }
 
-    if (aiSaved && externalSaved) {
-      ElMessage.success('设置已保存到当前账号');
-    } else if (aiSaved) {
-      ElMessage.warning('AI 配置已保存，外部检索设置保存失败');
-    } else if (externalSaved) {
-      ElMessage.warning('外部检索设置已保存，AI 配置保存失败');
-    } else {
-      ElMessage.error('AI 配置和外部检索设置均保存失败');
-    }
+    ElMessage.success('外部检索设置已保存');
     if (!localPreferencesSaved) {
-      ElMessage.warning('服务器设置已处理，但本地偏好保存失败');
+      ElMessage.warning('外部检索设置已保存，但本地偏好保存失败');
     }
+  } catch {
+    ElMessage.error('外部检索设置保存失败');
   } finally {
     savingSettings.value = false;
   }
@@ -399,10 +208,6 @@ async function handleValidateExternalProvider(provider: ExternalSearchProviderCo
   }
 }
 
-function handleRefreshModels() {
-  loadModels();
-}
-
 function moveProvider(index: number, direction: -1 | 1) {
   const targetIndex = index + direction;
   if (targetIndex < 0 || targetIndex >= settings.externalProviderOrder.length) {
@@ -416,25 +221,6 @@ function moveProvider(index: number, direction: -1 | 1) {
 
 function resetProviderOrder() {
   settings.externalProviderOrder = [...DEFAULT_EXTERNAL_PROVIDER_ORDER];
-}
-
-function getProvider(provider: AIProviderKey): AIProviderConfig | undefined {
-  return aiSettings.providers.find((item) => item.provider === provider);
-}
-
-function handleProviderChange(provider: AIProviderKey) {
-  const selected = getProvider(provider);
-  if (selected?.defaultModel) {
-    setDefaultModel(selected.defaultModel);
-  }
-}
-
-function setDefaultModel(model: string) {
-  aiSettings.defaultModel = model;
-  const provider = getProvider(aiSettings.activeProvider);
-  if (provider) {
-    provider.defaultModel = model;
-  }
 }
 
 async function handleDownloadTemplate() {
@@ -741,8 +527,7 @@ function getErrorMessage(err: unknown): string {
           <ServerAISettingsPanel @runtime-changed="handleServerAIRuntimeChanged" />
         </section>
 
-        <section class="ai-settings-section" aria-labelledby="runtime-status-heading">
-          <h3 id="runtime-status-heading" class="ai-section-title">当前运行状态</h3>
+        <section class="ai-settings-section" aria-label="当前 AI 运行状态">
           <div v-if="runtimeNeedsSync" class="runtime-sync-warning">
             <el-alert
               :title="loadingAISettings ? '正在同步运行配置，尚未检查连接' : '运行配置未同步，尚未检查连接'"
@@ -755,116 +540,18 @@ function getErrorMessage(err: unknown): string {
               重新同步运行配置
             </el-button>
           </div>
-          <OllamaConnectionStatus
-            v-else
-            :status="ollamaConnectionStatus"
-            :is-admin="authStore.isAdmin"
-            :loading="loadingAIStatus"
-            @check="loadAIHealth(true)"
-            @test="handleAIConnectionTest(false)"
-            @test-generate="handleAIConnectionTest(true)"
+          <CurrentAIStatus
+            :key="aiStatusRevision"
+            v-else-if="aiSettingsReady"
+            :ai-enabled="aiSettings.aiEnabled"
+            :provider="aiSettings.activeProvider"
+            :model="aiSettings.defaultModel"
           />
+          <el-skeleton v-else :rows="3" animated />
         </section>
 
-        <section class="ai-settings-section" aria-labelledby="account-ai-heading">
-          <h3 id="account-ai-heading" class="ai-section-title">当前账号 AI 偏好</h3>
-          <p class="field-hint">账号偏好仅调整服务商、Ollama 地址和默认模型；服务器 AI 总开关、可信地址、Access 凭据、TLS 和超时由管理员统一管理。</p>
-          <el-form v-loading="loadingAISettings" label-width="140px">
-
-        <el-form-item label="当前服务商">
-          <el-select
-            v-model="aiSettings.activeProvider"
-            style="max-width: 320px"
-            @change="handleProviderChange"
-          >
-            <el-option
-              v-for="provider in aiSettings.providers"
-              :key="provider.provider"
-              :label="aiProviderLabels[provider.provider]"
-              :value="provider.provider"
-            />
-          </el-select>
-          <div class="field-hint">
-            当前仅 Ollama 接入实际调用；其他服务商先保存接口地址、API Key 与默认模型，后续接入调用层。
-          </div>
-        </el-form-item>
-
-        <el-form-item label="默认模型">
-          <el-select
-            v-model="aiSettings.defaultModel"
-            allow-create
-            clearable
-            filterable
-            placeholder="刷新后选择模型，或手动输入模型名"
-            style="max-width: 360px"
-            @change="setDefaultModel"
-          >
-            <el-option
-              v-for="model in modelOptions"
-              :key="model"
-              :label="model"
-              :value="model"
-            />
-          </el-select>
-          <el-button
-            v-if="aiSettings.activeProvider === 'ollama'"
-            :loading="loadingModels"
-            style="margin-left: 8px"
-            @click="handleRefreshModels"
-          >
-            刷新模型列表
-          </el-button>
-          <div class="field-hint">
-            <template v-if="models.length === 0 && !loadingModels">
-              未能获取模型列表，请确认当前 Ollama 地址可由后端访问。
-            </template>
-            <template v-else-if="models.length > 0">
-              共 {{ models.length }} 个可用模型，可在左侧下拉框中选择。
-            </template>
-          </div>
-        </el-form-item>
-
-        <el-divider />
-
-        <div class="provider-config-list">
-          <div
-            v-for="provider in aiSettings.providers"
-            :key="provider.provider"
-            class="ai-provider-panel"
-          >
-            <div class="provider-panel-header">
-              <div>
-                <div class="provider-name">{{ aiProviderLabels[provider.provider] }}</div>
-                <div class="provider-desc">{{ provider.note }}</div>
-              </div>
-              <el-switch
-                v-model="provider.enabled"
-                active-text="启用"
-                inactive-text="停用"
-                :disabled="provider.provider === 'ollama'"
-              />
-            </div>
-
-            <el-form-item :label="provider.provider === 'ollama' ? 'Ollama 地址' : 'API 地址'">
-              <el-input
-                v-model="provider.baseUrl"
-                :placeholder="provider.provider === 'ollama' ? 'http://localhost:11434 或远程 Ollama 地址' : 'https://...'"
-              />
-            </el-form-item>
-            <el-form-item v-if="provider.provider !== 'ollama'" label="API Key">
-              <el-input
-                v-model="provider.apiKey"
-                show-password
-                placeholder="留空表示保持已保存的 Key"
-              />
-              <div v-if="provider.hasApiKey" class="field-hint">当前账号已有已保存 Key；输入新值会覆盖。</div>
-            </el-form-item>
-            <el-form-item label="服务商默认模型">
-              <el-input v-model="provider.defaultModel" placeholder="例如 qwen2.5、gpt-4.1-mini、gemini-2.5-flash" />
-            </el-form-item>
-          </div>
-        </div>
-          </el-form>
+        <section class="ai-settings-section">
+          <AIProviderSettingsPanel @saved="handleAccountAISaved" />
         </section>
       </div>
     </el-card>

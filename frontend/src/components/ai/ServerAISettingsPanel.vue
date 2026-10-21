@@ -317,10 +317,10 @@ onMounted(loadConfig);
 </script>
 
 <template>
-  <section v-loading="loading" class="server-ai-settings" aria-label="服务器 AI 配置">
+  <section v-loading="loading" class="server-ai-settings" aria-label="服务器 Ollama 网关">
     <div class="section-heading">
       <div>
-        <h3>服务器 AI 配置</h3>
+        <h3>服务器 Ollama 网关</h3>
         <p>全局运行参数与 Cloudflare Access 凭据状态</p>
       </div>
       <el-tag :type="config?.configurationSource === 'database' ? 'success' : 'info'">
@@ -328,13 +328,9 @@ onMounted(loadConfig);
       </el-tag>
     </div>
 
-    <el-descriptions :column="3" border class="runtime-summary">
-      <el-descriptions-item label="服务器 AI">{{ config?.enabled ? '已启用' : '未启用' }}</el-descriptions-item>
-      <el-descriptions-item label="TLS 验证">{{ config?.verifyTls ? '已启用' : '未启用' }}</el-descriptions-item>
+    <el-descriptions :column="2" border class="runtime-summary">
+      <el-descriptions-item label="配置来源">{{ sourceLabel }}</el-descriptions-item>
       <el-descriptions-item label="Access 凭据">{{ credentialLabel }}</el-descriptions-item>
-      <el-descriptions-item label="当前地址">{{ config?.defaultBaseUrl || '未配置' }}</el-descriptions-item>
-      <el-descriptions-item label="默认模型">{{ config?.defaultModel || '未配置' }}</el-descriptions-item>
-      <el-descriptions-item label="连接测试">{{ testStatus }}</el-descriptions-item>
     </el-descriptions>
 
     <el-alert
@@ -363,11 +359,12 @@ onMounted(loadConfig);
         <el-form-item label="TLS 证书验证">
           <el-switch v-model="form.verifyTls" data-testid="verify-tls" active-text="启用" inactive-text="停用" />
         </el-form-item>
-        <el-form-item label="默认 Ollama 地址" class="wide-field">
+        <el-form-item label="默认 Ollama 服务地址" class="wide-field">
           <el-input v-model="form.defaultBaseUrl" placeholder="https://ollama.example.com" />
         </el-form-item>
-        <el-form-item label="Access 可信地址" class="wide-field">
+        <el-form-item label="允许携带 Access 凭据的可信 Origin" class="wide-field">
           <el-input v-model="form.trustedBaseUrl" placeholder="https://ollama.example.com" />
+          <div class="field-hint">该地址不是备用服务地址，只用于限制 Access 凭据发送目标。</div>
         </el-form-item>
         <el-form-item label="默认模型">
           <div class="model-field">

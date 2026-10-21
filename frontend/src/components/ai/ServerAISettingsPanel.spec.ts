@@ -119,6 +119,17 @@ afterEach(() => {
 });
 
 describe('ServerAISettingsPanel', () => {
+  it('uses the server Ollama gateway wording and explains trusted Origin without runtime summary duplication', async () => {
+    const wrapper = await mountPanel();
+
+    expect(wrapper.text()).toContain('服务器 Ollama 网关');
+    expect(wrapper.text()).toContain('默认 Ollama 服务地址');
+    expect(wrapper.text()).toContain('允许携带 Access 凭据的可信 Origin');
+    expect(wrapper.text()).toContain('该地址不是备用服务地址，只用于限制 Access 凭据发送目标');
+    expect(wrapper.text()).not.toContain('连接超时20 秒');
+    expect(wrapper.text()).not.toContain('读取超时180 秒');
+  });
+
   it('rejects an Ollama API endpoint where a service root is required', async () => {
     const warning = vi.spyOn(ElMessage, 'warning');
     const wrapper = await mountPanel();
@@ -164,7 +175,8 @@ describe('ServerAISettingsPanel', () => {
 
     expect(wrapper.text()).toContain('环境变量');
     expect(wrapper.text()).toContain('凭据完整且可用');
-    expect(wrapper.text()).toContain(config.defaultBaseUrl);
+    expect((wrapper.findAll('input[placeholder="https://ollama.example.com"]')[0].element as HTMLInputElement).value)
+      .toBe(config.defaultBaseUrl);
     expect(wrapper.text()).not.toContain('saved-client-must-not-render');
     expect(wrapper.text()).not.toContain('saved-secret-must-not-render');
     expect((input(wrapper, 'access-client-id').element as HTMLInputElement).value).toBe('');
