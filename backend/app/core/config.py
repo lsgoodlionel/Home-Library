@@ -5,6 +5,9 @@ from typing import Annotated
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.services.ai_provider_url import normalize_cloud_provider_origin
+from app.services.ai_providers.base import AIProviderInvalidConfigurationError
+
 
 def _read_git_version(fallback: str = "0.1.0") -> str:
     """
@@ -66,6 +69,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "HOME_LIBRARY_SERVER_CONFIG_TRUSTED_PROXY_IPS",
             "SERVER_CONFIG_TRUSTED_PROXY_IPS",
+        ),
+    )
+    ai_provider_allowed_private_origins: Annotated[set[str], NoDecode] = Field(
+        default_factory=set,
+        validation_alias=AliasChoices(
+            "HOME_LIBRARY_AI_PROVIDER_ALLOWED_PRIVATE_ORIGINS",
+            "AI_PROVIDER_ALLOWED_PRIVATE_ORIGINS",
         ),
     )
     database_url: str = Field(
@@ -173,6 +183,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     @field_validator("cors_origins", mode="before")
@@ -198,6 +209,22 @@ class Settings(BaseSettings):
             if normalized not in trusted:
                 trusted.append(normalized)
         return trusted
+
+    @field_validator("ai_provider_allowed_private_origins", mode="before")
+    @classmethod
+    def parse_ai_provider_allowed_private_origins(
+        cls,
+        value: str | set[str] | list[str],
+    ) -> set[str]:
+        candidates = value.split(",") if isinstance(value, str) else value
+        try:
+            return {
+                normalize_cloud_provider_origin(candidate.strip())
+                for candidate in candidates
+                if candidate.strip()
+            }
+        except AIProviderInvalidConfigurationError:
+            raise ValueError("私有 AI 服务 Origin 必须是有效的 HTTPS Origin") from None
 
 
 @lru_cache

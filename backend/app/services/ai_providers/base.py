@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from typing import Any, Literal, Protocol, TypeVar, runtime_checkable
+
+import httpx
+from pydantic import BaseModel
+
+T = TypeVar("T", bound=BaseModel)
+CredentialState = Literal["missing", "configured", "unusable"]
+ProviderHealthStatus = Literal["available", "unavailable", "unchecked"]
+
+
+@dataclass(frozen=True, slots=True)
+class AIProviderRuntime:
+    provider: str
+    enabled: bool
+    base_url: str
+    default_model: str
+    credential_state: CredentialState
+    credential: str | None = field(default=None, repr=False, compare=False)
+    connect_timeout_seconds: float = 20.0
+    read_timeout_seconds: float = 180.0
+    verify_tls: bool = True
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        safe = asdict(self)
+        safe.pop("credential", None)
+        return safe
+
+
+@dataclass(frozen=True, slots=True)
+class AIProviderModel:
+    provider: str
+    id: str
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class AIProviderHealth:
+    provider: str
+    status: ProviderHealthStatus
+    message: str
+    checked_at: datetime
+    effective_model: str
+    safe_base_url: str
+    credential_state: CredentialState
+
+
+@runtime_checkable
+class AIProviderClient(Protocol):
+    async def test_connection(self) -> AIProviderHealth: ...
+
+    async def list_models(self) -> list[AIProviderModel]: ...
+
+    async def generate_text(self, prompt: str, model: str | None = None) -> str: ...
+
+    async def generate_json(
+        self,
+        prompt: str,
+        response_model: type[T],
+        model: str | None = None,
+    ) -> T: ...
+
+
+_SAFE_REASONS = {
+    "connection_failed",
+    "dns_failure",
+    "redirect_not_allowed",
+    "request_failed",
+    "target_not_allowed",
+}
+
+
+class AIProviderError(Exception):
+    category = "provider_error"
+    default_message = "AI 服务调用失败"
+
+    def __init__(
+        self,
+        *,
+        status_code: int | None = None,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(self.default_message)
+        self.status_code = status_code if isinstance(status_code, int) else None
+        self.reason = reason if reason in _SAFE_REASONS else None
+
+
+class AIProviderDisabledError(AIProviderError):
+    category = "disabled"
+    default_message = "AI 服务已停用"
+
+
+class AIProviderInvalidConfigurationError(AIProviderError):
+    category = "invalid_configuration"
+    default_message = "AI 服务配置无效"
+
+
+class AIProviderAuthenticationError(AIProviderError):
+    category = "authentication"
+    default_message = "AI 服务认证失败"
+
+
+class AIProviderQuotaError(AIProviderError):
+    category = "quota"
+    default_message = "AI 服务额度不足"
+
+
+class AIProviderRateLimitError(AIProviderError):
+    category = "rate_limit"
+    default_message = "AI 服务请求过于频繁"
+
+
+class AIProviderModelError(AIProviderError):
+    category = "model"
+    default_message = "AI 模型不可用"
+
+
+class AIProviderConnectTimeoutError(AIProviderError):
+    category = "connect_timeout"
+    default_message = "连接 AI 服务超时"
+
+
+class AIProviderReadTimeoutError(AIProviderError):
+    category = "read_timeout"
+    default_message = "等待 AI 服务响应超时"
+
+
+class AIProviderUpstreamError(AIProviderError):
+    category = "upstream"
+    default_message = "上游 AI 服务异常"
+
+
+class AIProviderInvalidResponseError(AIProviderError):
+    category = "invalid_response"
+    default_message = "AI 服务返回内容无效"
+
+
+def map_provider_exception(exc: Exception) -> AIProviderError:
+    if isinstance(exc, AIProviderError):
+        return exc
+    if isinstance(exc, httpx.ConnectTimeout):
+        return AIProviderConnectTimeoutError()
+    if isinstance(exc, httpx.ReadTimeout):
+        return AIProviderReadTimeoutError()
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        if status_code in {401, 403}:
+            return AIProviderAuthenticationError(status_code=status_code)
+        if status_code == 402:
+            return AIProviderQuotaError(status_code=status_code)
+        if status_code == 429:
+            return AIProviderRateLimitError(status_code=status_code)
+        if status_code in {400, 404, 422}:
+            return AIProviderModelError(status_code=status_code)
+        return AIProviderUpstreamError(status_code=status_code)
+    if isinstance(exc, (httpx.ConnectError, httpx.RequestError)):
+        return AIProviderUpstreamError(reason="request_failed")
+    if isinstance(exc, (ValueError, TypeError)):
+        return AIProviderInvalidResponseError()
+    return AIProviderUpstreamError()
+
+
+__all__ = [
+    "AIProviderAuthenticationError",
+    "AIProviderClient",
+    "AIProviderConnectTimeoutError",
+    "AIProviderDisabledError",
+    "AIProviderError",
+    "AIProviderHealth",
+    "AIProviderInvalidConfigurationError",
+    "AIProviderInvalidResponseError",
+    "AIProviderModel",
+    "AIProviderModelError",
+    "AIProviderQuotaError",
+    "AIProviderRateLimitError",
+    "AIProviderReadTimeoutError",
+    "AIProviderRuntime",
+    "AIProviderUpstreamError",
+    "CredentialState",
+    "ProviderHealthStatus",
+    "map_provider_exception",
+]
