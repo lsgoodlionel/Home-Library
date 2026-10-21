@@ -5,7 +5,7 @@ import json
 import socket
 import types
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_type_hints
 
 import httpx
 import pytest
@@ -14,10 +14,12 @@ from pydantic import BaseModel
 from app.services.ai_provider_url import PinnedAsyncHTTPTransport, ValidatedCloudProviderTarget
 from app.services.ai_providers.base import (
     AIProviderAuthenticationError,
+    AIProviderClient,
     AIProviderConnectTimeoutError,
     AIProviderInvalidConfigurationError,
     AIProviderInvalidResponseError,
     AIProviderModelError,
+    AIProviderModelList,
     AIProviderQuotaError,
     AIProviderRateLimitError,
     AIProviderReadTimeoutError,
@@ -106,6 +108,14 @@ def _client_with_transport(
         ),
         targets,
     )
+
+
+def test_list_models_static_contract_uses_the_public_capability_result() -> None:
+    protocol_return = get_type_hints(AIProviderClient.list_models)["return"]
+    concrete_return = get_type_hints(OpenAICompatibleProviderClient.list_models)["return"]
+
+    assert protocol_return is AIProviderModelList
+    assert concrete_return is AIProviderModelList
 
 
 @pytest.mark.parametrize(
@@ -499,6 +509,94 @@ def test_declared_oversized_response_is_rejected_before_body_read(
     assert stream.iterated is False
 
 
+@pytest.mark.parametrize(
+    ("status_code", "expected_error"),
+    [
+        (401, AIProviderAuthenticationError),
+        (403, AIProviderAuthenticationError),
+        (402, AIProviderQuotaError),
+        (429, AIProviderRateLimitError),
+        (404, AIProviderModelError),
+        (422, AIProviderModelError),
+        (500, AIProviderUpstreamError),
+        (503, AIProviderUpstreamError),
+    ],
+)
+def test_explicit_error_status_precedes_oversized_body_without_reading_it(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    expected_error: type[Exception],
+) -> None:
+    stream = _BodyReadProbe()
+    client, _ = _client_with_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            status_code,
+            headers={"Content-Length": str(MAX_RESPONSE_BYTES + 1)},
+            stream=stream,
+        ),
+    )
+
+    with pytest.raises(expected_error):
+        _run(client.generate_text("prompt"))
+    assert stream.iterated is False
+
+
+@pytest.mark.parametrize("status_code", [404, 405])
+def test_model_listing_unsupported_precedes_oversized_body_without_reading_it(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    stream = _BodyReadProbe()
+    client, _ = _client_with_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            status_code,
+            headers={"Content-Length": str(MAX_RESPONSE_BYTES + 1)},
+            stream=stream,
+        ),
+        provider="custom",
+    )
+
+    result = _run(client.list_models())
+
+    assert result == AIProviderModelList(capability="unsupported")
+    assert stream.iterated is False
+
+
+def test_ambiguous_400_uses_bounded_body_for_quota_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client_with_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            400,
+            json={"error": {"type": "insufficient_quota"}},
+        ),
+    )
+
+    with pytest.raises(AIProviderQuotaError):
+        _run(client.generate_text("prompt"))
+
+
+def test_ambiguous_oversized_400_is_rejected_without_body_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = _BodyReadProbe()
+    client, _ = _client_with_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            400,
+            headers={"Content-Length": str(MAX_RESPONSE_BYTES + 1)},
+            stream=stream,
+        ),
+    )
+
+    with pytest.raises(AIProviderInvalidResponseError):
+        _run(client.generate_text("prompt"))
+    assert stream.iterated is False
+
+
 def test_redirect_response_is_not_followed_and_returns_safe_redirect_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -515,6 +613,29 @@ def test_redirect_response_is_not_followed_and_returns_safe_redirect_error(
 
     assert captured.value.reason == "redirect_not_allowed"
     assert len(requests) == 1
+
+
+def test_redirect_precedes_oversized_body_without_reading_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = _BodyReadProbe()
+    client, _ = _client_with_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            307,
+            headers={
+                "Content-Length": str(MAX_RESPONSE_BYTES + 1),
+                "Location": "https://other.example.test/v1/chat",
+            },
+            stream=stream,
+        ),
+    )
+
+    with pytest.raises(AIProviderInvalidConfigurationError) as captured:
+        _run(client.generate_text("prompt"))
+
+    assert captured.value.reason == "redirect_not_allowed"
+    assert stream.iterated is False
 
 
 @pytest.mark.parametrize(

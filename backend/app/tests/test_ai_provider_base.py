@@ -24,6 +24,7 @@ from app.services.ai_providers.base import (
     AIProviderInvalidConfigurationError,
     AIProviderInvalidResponseError,
     AIProviderModel,
+    AIProviderModelList,
     AIProviderModelError,
     AIProviderQuotaError,
     AIProviderRateLimitError,
@@ -43,8 +44,8 @@ class _CompleteClient:
     async def test_connection(self) -> AIProviderHealth:
         raise NotImplementedError
 
-    async def list_models(self) -> list[AIProviderModel]:
-        raise NotImplementedError
+    async def list_models(self) -> AIProviderModelList:
+        return AIProviderModelList(capability="supported")
 
     async def generate_text(self, prompt: str, model: str | None = None) -> str:
         raise NotImplementedError
@@ -66,6 +67,19 @@ class _IncompleteClient:
 def test_provider_client_protocol_is_runtime_checkable() -> None:
     assert isinstance(_CompleteClient(), AIProviderClient)
     assert not isinstance(_IncompleteClient(), AIProviderClient)
+
+
+def test_public_model_list_result_distinguishes_capability_and_is_immutable() -> None:
+    supported = AIProviderModelList(
+        capability="supported",
+        models=(AIProviderModel(provider="openai", id="model-1", name="Model 1"),),
+    )
+    unsupported = AIProviderModelList(capability="unsupported")
+
+    assert supported.models[0].provider == "openai"
+    assert unsupported.models == ()
+    with pytest.raises(FrozenInstanceError):
+        supported.capability = "unsupported"  # type: ignore[misc]
 
 
 def test_provider_data_structures_are_immutable_and_runtime_repr_is_safe() -> None:

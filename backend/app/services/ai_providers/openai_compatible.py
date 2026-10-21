@@ -24,6 +24,7 @@ from app.services.ai_providers.base import (
     AIProviderInvalidConfigurationError,
     AIProviderInvalidResponseError,
     AIProviderModel,
+    AIProviderModelList,
     AIProviderQuotaError,
     AIProviderRuntime,
     map_provider_exception,
@@ -81,12 +82,6 @@ OPENAI_COMPATIBLE_DESCRIPTORS: dict[str, OpenAICompatibleProviderDescriptor] = {
         supports_model_listing=True,
     ),
 }
-
-
-@dataclass(frozen=True, slots=True)
-class AIProviderModelList:
-    capability: Literal["supported", "unsupported"]
-    models: tuple[AIProviderModel, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +231,13 @@ class OpenAICompatibleProviderClient(Generic[ResponseT]):
             headers=headers,
         ) as client:
             async with client.stream(method, target.url, json=payload) as response:
+                if 300 <= response.status_code < 400:
+                    raise AIProviderInvalidConfigurationError(reason="redirect_not_allowed")
+                if model_listing and response.status_code in {404, 405}:
+                    return "unsupported", None
+                if response.status_code in {401, 402, 403, 404, 422, 429} or response.status_code >= 500:
+                    response.raise_for_status()
+
                 content_length = response.headers.get("Content-Length")
                 if content_length is not None:
                     try:
@@ -243,10 +245,6 @@ class OpenAICompatibleProviderClient(Generic[ResponseT]):
                             raise AIProviderInvalidResponseError()
                     except ValueError:
                         raise AIProviderInvalidResponseError() from None
-                if 300 <= response.status_code < 400:
-                    raise AIProviderInvalidConfigurationError(reason="redirect_not_allowed")
-                if model_listing and response.status_code in {404, 405}:
-                    return "unsupported", None
 
                 body = bytearray()
                 async for chunk in response.aiter_bytes(chunk_size=64 * 1024):

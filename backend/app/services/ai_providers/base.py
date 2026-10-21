@@ -46,6 +46,12 @@ class AIProviderModel:
 
 
 @dataclass(frozen=True, slots=True)
+class AIProviderModelList:
+    capability: Literal["supported", "unsupported"]
+    models: tuple[AIProviderModel, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class AIProviderHealth:
     provider: str
     status: ProviderHealthStatus
@@ -60,7 +66,7 @@ class AIProviderHealth:
 class AIProviderClient(Protocol):
     async def test_connection(self) -> AIProviderHealth: ...
 
-    async def list_models(self) -> list[AIProviderModel]: ...
+    async def list_models(self) -> AIProviderModelList: ...
 
     async def generate_text(self, prompt: str, model: str | None = None) -> str: ...
 
@@ -234,6 +240,7 @@ __all__ = [
     "AIProviderInvalidConfigurationError",
     "AIProviderInvalidResponseError",
     "AIProviderModel",
+    "AIProviderModelList",
     "AIProviderModelError",
     "AIProviderQuotaError",
     "AIProviderRateLimitError",
