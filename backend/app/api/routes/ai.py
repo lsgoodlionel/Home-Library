@@ -36,6 +36,7 @@ from app.schemas.ai import (
     SummarizeBookRequest,
     SummarizeBookResponse,
 )
+from app.schemas.ai_provider import AIProviderStatusResponse
 from app.schemas.ai_setting import AISettingsResponse, AISettingsUpdate, OllamaRuntimeStatus
 from app.services.ai_setting_service import (
     OllamaRuntimeConfig,
@@ -482,16 +483,15 @@ async def _run_json_task(
     return result
 
 
-@router.get("/health", response_model=AIHealthResponse)
+@router.get("/health", response_model=AIProviderStatusResponse)
 async def get_ai_health(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     refresh: Annotated[bool, Query()] = False,
-) -> AIHealthResponse:
-    if not refresh:
-        runtime = await run_in_threadpool(get_ollama_runtime_config, db, current_user)
-        return _health_status_cache.get(current_user.id, _runtime_fingerprint(runtime))
-    return await _check_ollama(db, current_user, generate=False)
+) -> AIProviderStatusResponse:
+    from app.api.routes.ai_providers import get_active_provider_health
+
+    return await get_active_provider_health(db, current_user, refresh=refresh)
 
 
 @router.post("/test-connection", response_model=AIHealthResponse)
@@ -519,6 +519,9 @@ def update_ai_config(
 ) -> AISettingsResponse:
     response = update_user_ai_settings(db, current_user, payload)
     _health_status_cache.invalidate_user(current_user.id)
+    from app.services.ai_health_status_cache import provider_health_cache
+
+    provider_health_cache.invalidate_user(current_user.id)
     return response
 
 
@@ -527,9 +530,10 @@ async def list_models(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> OllamaModelsResponse:
-    runtime = await run_in_threadpool(get_ollama_runtime_config, db, current_user)
-    operation = _list_models_for_runtime(db, current_user, runtime)
-    del runtime, db, current_user
+    from app.api.routes.ai_providers import list_active_provider_models_compatibility
+
+    operation = list_active_provider_models_compatibility(db, current_user)
+    del db, current_user
     return await operation
 
 

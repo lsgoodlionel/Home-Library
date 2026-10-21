@@ -23,7 +23,12 @@ from app.schemas.ai import (
     OllamaVersionResponse,
 )
 from app.schemas.ai_setting import OllamaRuntimeStatus
-from app.services.ai_health_status_cache import AIHealthStatusCache
+from app.services.ai_health_status_cache import (
+    AIHealthStatusCache,
+    provider_health_cache,
+    provider_model_cache,
+)
+from app.services.ai_providers import ollama as ollama_provider
 from app.services.ai_setting_service import OllamaRuntimeConfig, get_ollama_runtime_config
 from app.services.ollama_client import OllamaUpstreamError
 from app.tests.conftest import make_user
@@ -44,8 +49,12 @@ def configured_ai_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None
     monkeypatch.setenv("OLLAMA_DEFAULT_MODEL", "environment-model")
     get_settings.cache_clear()
     ai_routes._health_status_cache.invalidate_all()
+    provider_health_cache.invalidate_all()
+    provider_model_cache.invalidate_all()
     yield
     ai_routes._health_status_cache.invalidate_all()
+    provider_health_cache.invalidate_all()
+    provider_model_cache.invalidate_all()
     get_settings.cache_clear()
 
 
@@ -85,7 +94,8 @@ def _save_server_config(
 
 
 class _HealthyClient:
-    def __init__(self, runtime) -> None:
+    def __init__(self, runtime, transport=None) -> None:
+        del transport
         self.runtime = runtime
 
     async def version(self) -> OllamaVersionResponse:
@@ -106,6 +116,7 @@ def test_server_save_invalidates_all_cached_health_states(
     admin_headers, _ = _headers_for(db, role="admin")
     member_headers, _ = _headers_for(db, role="member")
     monkeypatch.setattr(ai_routes, "OllamaClient", _HealthyClient)
+    monkeypatch.setattr(ollama_provider, "OllamaClient", _HealthyClient)
 
     assert client.get("/api/ai/health?refresh=true", headers=admin_headers).status_code == 200
     assert client.get("/api/ai/health?refresh=true", headers=member_headers).status_code == 200
@@ -126,6 +137,7 @@ def test_failed_server_mutations_preserve_runtime_and_health_cache(
     admin = db.get(User, admin_id)
     assert admin is not None
     monkeypatch.setattr(ai_routes, "OllamaClient", _HealthyClient)
+    monkeypatch.setattr(ollama_provider, "OllamaClient", _HealthyClient)
     assert client.get("/api/ai/health?refresh=true", headers=admin_headers).status_code == 200
     original_runtime = get_ollama_runtime_config(db, admin)
 
@@ -134,7 +146,7 @@ def test_failed_server_mutations_preserve_runtime_and_health_cache(
         _save_server_config(client, admin_headers, admin_password="wrong-password"),
     )
     assert [response.status_code for response in rejected] == [422, 403]
-    assert client.get("/api/ai/health", headers=admin_headers).json()["status"] == "healthy"
+    assert client.get("/api/ai/health", headers=admin_headers).json()["status"] == "available"
 
     monkeypatch.setenv("APP_SECRET_KEY", "dev-secret-change-me-in-production")
     get_settings.cache_clear()
@@ -146,7 +158,7 @@ def test_failed_server_mutations_preserve_runtime_and_health_cache(
         access_client_secret="synthetic-client-secret",
     )
     assert encryption_failure.status_code == 400
-    assert client.get("/api/ai/health", headers=weak_key_headers).json()["status"] == "healthy"
+    assert client.get("/api/ai/health", headers=weak_key_headers).json()["status"] == "available"
 
     monkeypatch.setenv("APP_SECRET_KEY", _STRONG_APP_KEY)
     get_settings.cache_clear()
@@ -157,7 +169,7 @@ def test_failed_server_mutations_preserve_runtime_and_health_cache(
     monkeypatch.setattr(system_ai_routes, "update_server_ai_config", fail_database_write)
     database_failure = _save_server_config(client, admin_headers)
     assert database_failure.status_code == 500
-    assert client.get("/api/ai/health", headers=admin_headers).json()["status"] == "healthy"
+    assert client.get("/api/ai/health", headers=admin_headers).json()["status"] == "available"
     assert get_ollama_runtime_config(db, admin) == original_runtime
     assert db.query(SystemAISetting).count() == 0
     assert db.query(SystemConfigAudit).count() == 0
@@ -172,11 +184,12 @@ def test_server_reset_changes_next_ai_request_without_process_restart(
     seen_base_urls: list[str] = []
 
     class CapturingClient(_HealthyClient):
-        def __init__(self, runtime) -> None:
-            super().__init__(runtime)
+        def __init__(self, runtime, transport=None) -> None:
+            super().__init__(runtime, transport=transport)
             seen_base_urls.append(runtime.base_url)
 
     monkeypatch.setattr(ai_routes, "OllamaClient", CapturingClient)
+    monkeypatch.setattr(ollama_provider, "OllamaClient", CapturingClient)
     saved = _save_server_config(
         client,
         admin_headers,
@@ -218,6 +231,7 @@ def test_saved_disabled_state_prevents_ollama_client_construction(
         raise AssertionError(f"disabled runtime constructed client for {runtime.base_url}")
 
     monkeypatch.setattr(ai_routes, "OllamaClient", fail_if_constructed)
+    monkeypatch.setattr(ollama_provider, "OllamaClient", fail_if_constructed)
     responses = (
         client.get("/api/ai/health?refresh=true", headers=admin_headers),
         client.get("/api/ai/models", headers=admin_headers),
@@ -382,6 +396,7 @@ def test_non_ai_health_and_book_api_survive_server_ai_failure(
             raise OllamaUpstreamError("synthetic upstream failure", status_code=503)
 
     monkeypatch.setattr(ai_routes, "OllamaClient", FailingClient)
+    monkeypatch.setattr(ollama_provider, "OllamaClient", FailingClient)
     ai_response = client.get("/api/ai/models", headers=admin_headers)
     health_response = client.get("/api/health")
     books_response = client.get("/api/books")

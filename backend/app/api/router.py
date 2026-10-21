@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     ai,
+    ai_providers,
     auth,
     books,
     borrow,
@@ -22,6 +23,7 @@ api_router.include_router(system_ai_settings.router)
 api_router.include_router(auth.router, tags=["auth"])
 api_router.include_router(users.router, tags=["users"])
 api_router.include_router(ai.router)
+api_router.include_router(ai_providers.router)
 api_router.include_router(import_export.router)
 api_router.include_router(borrow.router)
 api_router.include_router(books.router)

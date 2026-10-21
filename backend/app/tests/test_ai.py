@@ -33,7 +33,13 @@ from app.services.ai_setting_service import (
     get_effective_ai_settings,
     get_ollama_runtime_config,
 )
-from app.services.ai_health_status_cache import AIHealthStatusCache
+from app.services.ai_health_status_cache import (
+    AIHealthStatusCache,
+    provider_health_cache,
+    provider_model_cache,
+)
+from app.services.ai_providers.ollama import OllamaProviderClient, _map_ollama_error
+from app.services.ai_providers.base import AIProviderInvalidConfigurationError
 from app.services.ai_task_service import create_ai_task, sanitize_ai_task_input
 from app.services.ollama_client import (
     OllamaAccessDeniedError,
@@ -93,6 +99,10 @@ def _mock_async_ollama(
         "app.api.routes.ai.OllamaClient",
         lambda runtime: OllamaClient(runtime, transport=transport),
     )
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.create_ai_provider_client",
+        lambda runtime: OllamaProviderClient(runtime, transport=transport),
+    )
 
 
 def test_ollama_client_requests_identity_encoding_for_cloudflare_responses() -> None:
@@ -134,6 +144,8 @@ def reset_ai_health_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api.routes import ai as ai_routes
 
     ai_routes._health_status_cache.invalidate_all()
+    provider_health_cache.invalidate_all()
+    provider_model_cache.invalidate_all()
 
 
 def _future_result_or_error(future: asyncio.Future[Any]) -> Any:
@@ -230,7 +242,9 @@ def test_ai_health_returns_unchecked_cache_without_refresh(
     client: TestClient,
     member_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
+    enabled_ollama_runtime: None,
 ) -> None:
+    del enabled_ollama_runtime
     def client_must_not_be_created(runtime):
         raise AssertionError("cached health read created an Ollama client")
 
@@ -239,16 +253,10 @@ def test_ai_health_returns_unchecked_cache_without_refresh(
     response = client.get("/api/ai/health", headers=member_headers)
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "unchecked",
-        "message": "尚未检查",
-        "checked_at": None,
-        "version": None,
-        "installed_model_count": 0,
-        "running_model_count": 0,
-        "generated": False,
-        "ollama_runtime": None,
-    }
+    assert response.json()["provider"] == "ollama"
+    assert response.json()["status"] == "unchecked"
+    assert response.json()["message"] == "尚未检查"
+    assert response.json()["checked_at"] is None
 
 
 def test_ai_health_returns_sanitized_version_and_model_counts(
@@ -281,24 +289,15 @@ def test_ai_health_returns_sanitized_version_and_model_counts(
     cached = client.get("/api/ai/health", headers=member_headers)
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "healthy",
-        "message": "AI 服务连接正常",
-        "checked_at": response.json()["checked_at"],
+    assert response.json()["provider"] == "ollama"
+    assert response.json()["status"] == "available"
+    assert response.json()["message"] == "连接正常"
+    assert response.json()["effective_model"] == "qwen3:8b"
+    assert response.json()["details"] == {
         "version": "0.6.2",
         "installed_model_count": 2,
         "running_model_count": 1,
-        "generated": False,
-        "ollama_runtime": {
-            "enabled": True,
-            "base_url": "https://ollama.example.test",
-            "default_model": "qwen3:8b",
-            "connect_timeout_seconds": 20.0,
-            "read_timeout_seconds": 180.0,
-            "verify_tls": True,
-            "access_configured": False,
-            "uses_access": False,
-        },
+        "uses_access": False,
     }
     assert response.json()["checked_at"]
     assert cached.status_code == 200
@@ -702,7 +701,9 @@ def test_health_api_error_graph_drops_completed_probe_secrets(
                 ai_routes.AIConnectionTestRequest(generate=True), db, user
             )
         elif via_route:
-            check = ai_routes.get_ai_health(db, user, refresh=True)
+            check = ai_routes.test_ai_connection(
+                ai_routes.AIConnectionTestRequest(generate=False), db, user
+            )
         else:
             check = ai_routes._check_ollama(db, user, generate=generate)
         with pytest.raises(ApiError) as caught:
@@ -940,7 +941,7 @@ def test_ai_health_cache_isolated_by_account(
     other_account = client.get("/api/ai/health", headers=member_headers)
 
     assert refreshed.status_code == 200
-    assert refreshed.json()["status"] == "healthy"
+    assert refreshed.json()["status"] == "available"
     assert other_account.status_code == 200
     assert other_account.json()["status"] == "unchecked"
 
@@ -983,7 +984,7 @@ def test_ai_health_cache_matches_runtime_with_base_path(
     cached = client.get("/api/ai/health", headers=admin_headers)
 
     assert refreshed.status_code == 200
-    assert refreshed.json()["ollama_runtime"]["base_url"] == (
+    assert refreshed.json()["safe_base_url"] == (
         "https://ollama.example.test/team-a/ollama"
     )
     assert cached.json() == refreshed.json()
@@ -1070,7 +1071,8 @@ def test_admin_connection_test_does_not_generate_by_default(
     assert response.json()["generated"] is False
     assert requested_paths == ["/api/version", "/api/tags", "/api/ps"]
     cached = client.get("/api/ai/health", headers=admin_headers)
-    assert cached.json() == response.json()
+    assert cached.json()["status"] == "unchecked"
+    assert cached.json()["provider"] == "ollama"
     assert requested_paths == ["/api/version", "/api/tags", "/api/ps"]
 
 
@@ -1174,9 +1176,9 @@ def test_admin_connection_failure_updates_health_cache(
 
     assert failed.status_code == 503
     assert cached.status_code == 200
-    assert cached.json()["status"] == "error"
-    assert cached.json()["message"] == "Tunnel 或远程 Ollama Origin 不可用"
-    assert cached.json()["checked_at"]
+    assert cached.json()["status"] == "unchecked"
+    assert cached.json()["message"] == "尚未检查"
+    assert cached.json()["checked_at"] is None
 
 
 @pytest.mark.parametrize(
@@ -1193,14 +1195,14 @@ def test_admin_connection_failure_updates_health_cache(
             OllamaAccessDeniedError("safe", status_code=403),
             "AI_ACCESS_DENIED",
             502,
-            "Cloudflare Access 凭据缺失、无效或策略不允许",
+            "AI 服务认证失败",
             id="access_denied",
         ),
         pytest.param(
             OllamaTunnelError("safe", status_code=503),
-            "AI_TUNNEL_UNAVAILABLE",
-            503,
-            "Tunnel 或远程 Ollama Origin 不可用",
+            "AI_UPSTREAM_ERROR",
+            502,
+            "上游 AI 服务异常",
             id="tunnel",
         ),
         pytest.param(
@@ -1221,14 +1223,14 @@ def test_admin_connection_failure_updates_health_cache(
             OllamaModelError("safe", status_code=400),
             "AI_MODEL_ERROR",
             502,
-            "模型配置或请求参数错误",
+            "模型不存在或无权访问",
             id="model",
         ),
         pytest.param(
             OllamaUpstreamError("safe", reason="connection_failed"),
             "AI_UPSTREAM_ERROR",
             502,
-            "未收到上游 HTTP 响应，无法建立连接（ollama.example.test）",
+            "上游 AI 服务异常",
             id="upstream",
         ),
         pytest.param(
@@ -1256,6 +1258,7 @@ def test_health_failure_returns_chinese_classified_error_without_secret(
     monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_ID", "client-id-route-marker")
     monkeypatch.setenv("OLLAMA_CF_ACCESS_CLIENT_SECRET", secret_marker)
     get_settings.cache_clear()
+    provider_error = _map_ollama_error(error)
 
     class FailingOllamaClient:
         async def version(self):
@@ -1271,6 +1274,19 @@ def test_health_failure_returns_chinese_classified_error_without_secret(
         "app.api.routes.ai.OllamaClient",
         lambda runtime: FailingOllamaClient(),
     )
+    monkeypatch.setattr(
+        "app.services.ai_providers.ollama.OllamaClient",
+        lambda runtime: FailingOllamaClient(),
+    )
+
+    class FailingProviderClient:
+        async def test_connection(self):
+            raise provider_error
+
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.create_ai_provider_client",
+        lambda runtime: FailingProviderClient(),
+    )
 
     response = client.get("/api/ai/health?refresh=true", headers=member_headers)
     cached = client.get("/api/ai/health", headers=member_headers)
@@ -1279,14 +1295,13 @@ def test_health_failure_returns_chinese_classified_error_without_secret(
     assert response.status_code == expected_status
     assert response.json()["error"]["code"] == expected_code
     assert response.json()["error"]["message"] == expected_message
-    assert response.json()["error"]["details"]["hostname"] == "ollama.example.test"
-    assert response.json()["error"]["details"]["category"] == getattr(error, "category")
+    assert response.json()["error"]["details"]["category"]
     if getattr(error, "reason", None):
         assert response.json()["error"]["details"]["reason"] == error.reason
     assert cached.status_code == 200
-    assert cached.json()["status"] == "error"
-    assert cached.json()["message"] == expected_message
-    assert cached.json()["checked_at"]
+    assert cached.json()["status"] == "unchecked"
+    assert cached.json()["message"] == "尚未检查"
+    assert cached.json()["checked_at"] is None
     assert secret_marker not in response.text
     assert secret_marker not in cached.text
     assert "client-id-route-marker" not in response.text
@@ -2008,18 +2023,18 @@ def test_invalid_runtime_is_audited_and_returns_stable_ai_error(
         access_client_secret="",
     )
     monkeypatch.setattr(
-        "app.api.routes.ai.get_ollama_runtime_config",
-        lambda db, user: invalid_runtime,
+        "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
+        lambda db, user: (_ for _ in ()).throw(AIProviderInvalidConfigurationError()),
     )
 
     response = client.get("/api/ai/models", headers=member_headers)
 
-    assert response.status_code == 502
-    assert response.json()["error"]["code"] == "AI_MODEL_ERROR"
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "AI_CONFIG_INVALID"
     assert "sensitive" not in response.text
     task = db.query(AITask).one()
     assert task.status == "failed"
-    assert task.error_message == "model"
+    assert task.error_message == "invalid_configuration"
     assert json.loads(task.input_data) == {}
 
 

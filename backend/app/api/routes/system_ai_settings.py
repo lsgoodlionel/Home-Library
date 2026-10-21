@@ -22,7 +22,7 @@ from app.schemas.system_ai_setting import (
     SystemAIConfigUpdateRequest,
 )
 from app.services.credential_crypto import CredentialCryptoError
-from app.services.ai_health_status_cache import ai_health_status_cache
+from app.services.ai_health_status_cache import ai_health_status_cache, provider_health_cache
 from app.services.ai_setting_service import get_server_ollama_runtime_config
 from app.services.system_ai_setting_service import (
     ServerAIConfigConflictError,
@@ -85,6 +85,7 @@ def put_system_ai_config(
         )
     else:
         ai_health_status_cache.invalidate_all()
+        provider_health_cache.invalidate_all()
         return SystemAIConfigResponse.from_config(config)
     del request, payload, db, admin
     raise error from None
@@ -115,6 +116,7 @@ def delete_system_ai_config(
         )
     else:
         ai_health_status_cache.invalidate_all()
+        provider_health_cache.invalidate_all()
         return SystemAIConfigResponse.from_config(config)
     del request, payload, db, admin
     raise error from None

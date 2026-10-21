@@ -6,6 +6,7 @@ from time import monotonic
 from typing import Callable
 
 from app.schemas.ai import AIHealthResponse
+from app.schemas.ai_provider import AIProviderStatusResponse
 from app.services.ai_providers.base import AIProviderModelList
 
 
@@ -108,3 +109,46 @@ class ProviderModelCache:
 
 
 provider_model_cache = ProviderModelCache()
+
+
+class ProviderHealthCache:
+    def __init__(self, *, max_entries: int = 128) -> None:
+        self._max_entries = max_entries
+        self._entries: OrderedDict[
+            tuple[int, str],
+            AIProviderStatusResponse,
+        ] = OrderedDict()
+        self._lock = Lock()
+
+    def get(self, user_id: int, fingerprint: str) -> AIProviderStatusResponse | None:
+        key = (user_id, fingerprint)
+        with self._lock:
+            value = self._entries.get(key)
+            if value is not None:
+                self._entries.move_to_end(key)
+            return value
+
+    def put(
+        self,
+        user_id: int,
+        fingerprint: str,
+        status: AIProviderStatusResponse,
+    ) -> None:
+        key = (user_id, fingerprint)
+        with self._lock:
+            self._entries[key] = status
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+
+    def invalidate_user(self, user_id: int) -> None:
+        with self._lock:
+            for key in [key for key in self._entries if key[0] == user_id]:
+                del self._entries[key]
+
+    def invalidate_all(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+
+provider_health_cache = ProviderHealthCache()
