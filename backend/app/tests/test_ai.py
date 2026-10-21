@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
 from app.core.config import Settings, get_settings
-from app.models import AITask, Book
+from app.models import AITask, Book, UserAISetting
 from app.models.user import User
 from app.schemas.ai import (
     ClassifyBookRequest,
@@ -1438,11 +1438,21 @@ def test_models_reads_ollama_tags(
     assert response.json()["models"][0]["name"] == "qwen2.5"
 
 
-def test_ai_config_is_persisted_per_account(client: TestClient, admin_headers: dict[str, str]) -> None:
+def test_ai_config_is_persisted_per_account(
+    client: TestClient,
+    db: Session,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "HOME_LIBRARY_SECRET_KEY",
+        "ai-config-api-strong-key-value-00001",
+    )
     response = client.get("/api/ai/config", headers=admin_headers)
 
     assert response.status_code == 200
     data = response.json()
+    assert data["ai_enabled"] is True
     assert data["active_provider"] == "ollama"
     assert any(provider["provider"] == "openai" for provider in data["providers"])
 
@@ -1450,6 +1460,7 @@ def test_ai_config_is_persisted_per_account(client: TestClient, admin_headers: d
         "/api/ai/config",
         headers=admin_headers,
         json={
+            "ai_enabled": True,
             "active_provider": "ollama",
             "default_model": "remote-qwen",
             "providers": [
@@ -1478,8 +1489,15 @@ def test_ai_config_is_persisted_per_account(client: TestClient, admin_headers: d
     ollama = next(provider for provider in saved["providers"] if provider["provider"] == "ollama")
     assert ollama["base_url"] == "http://192.168.1.10:11434"
     openai = next(provider for provider in saved["providers"] if provider["provider"] == "openai")
-    assert openai["api_key"] == ""
+    assert "api_key" not in openai
+    assert openai["credential_state"] == "configured"
     assert openai["has_api_key"] is True
+
+    stored = db.query(UserAISetting.provider_configs).filter_by(user_id=db.query(User).one().id).scalar()
+    assert stored is not None
+    assert "api_key" not in stored
+    assert "sk-test" not in stored
+    assert "sk-test" not in updated.text
 
 
 @pytest.mark.parametrize(

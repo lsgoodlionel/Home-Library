@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 from app.core.ollama_url import InvalidOllamaBaseURL, normalize_ollama_base_url
 
@@ -12,10 +12,14 @@ class AIProviderConfig(BaseModel):
     provider: AIProvider
     enabled: bool = False
     base_url: str = ""
-    api_key: str = ""
     default_model: str = ""
     note: str = ""
-    has_api_key: bool = False
+    credential_state: Literal["missing", "configured", "unusable"] = "missing"
+
+    @computed_field
+    @property
+    def has_api_key(self) -> bool:
+        return self.credential_state == "configured"
 
 
 class OllamaRuntimeStatus(BaseModel):
@@ -30,6 +34,7 @@ class OllamaRuntimeStatus(BaseModel):
 
 
 class AISettingsResponse(BaseModel):
+    ai_enabled: bool = True
     active_provider: AIProvider = "ollama"
     default_model: str = ""
     providers: list[AIProviderConfig] = Field(default_factory=list)
@@ -41,6 +46,7 @@ class AIProviderConfigUpdate(BaseModel):
     enabled: bool = False
     base_url: str = ""
     api_key: str | None = None
+    clear_api_key: bool = False
     default_model: str = ""
     note: str = ""
 
@@ -64,8 +70,15 @@ class AIProviderConfigUpdate(BaseModel):
         except InvalidOllamaBaseURL:
             raise ValueError("服务地址必须是包含主机名的 HTTP 或 HTTPS URL")
 
+    @model_validator(mode="after")
+    def reject_api_key_replace_and_clear(self) -> AIProviderConfigUpdate:
+        if self.clear_api_key and self.api_key not in (None, ""):
+            raise ValueError("不能同时提交新 API Key 和清除 API Key")
+        return self
+
 
 class AISettingsUpdate(BaseModel):
+    ai_enabled: bool = True
     active_provider: AIProvider = "ollama"
     default_model: str = ""
     providers: list[AIProviderConfigUpdate] = Field(default_factory=list)

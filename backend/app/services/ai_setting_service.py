@@ -11,11 +11,21 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.core.errors import ApiError
 from app.core.ollama_url import InvalidOllamaBaseURL, normalize_ollama_base_url
 from app.models.user import User
+from app.models.user_ai_provider_credential import UserAIProviderCredential
 from app.models.user_ai_setting import UserAISetting
 from app.schemas.ai_setting import AIProviderConfig, AISettingsResponse, AISettingsUpdate, OllamaRuntimeStatus
+from app.services.ai_provider_credential_service import (
+    ProviderCredentialState,
+    _cipher as _account_credential_cipher,
+    get_provider_credential_state,
+)
 from app.services.system_ai_setting_service import _get_effective_server_ai_state
+
+
+_CLOUD_PROVIDERS = {"openai", "gemini", "deepseek", "moonshot", "qwen", "custom"}
 
 
 @dataclass(frozen=True)
@@ -41,7 +51,6 @@ def default_provider_configs() -> dict[str, dict[str, Any]]:
             "provider": "ollama",
             "enabled": True,
             "base_url": settings.ollama_base_url,
-            "api_key": "",
             "default_model": settings.ollama_default_model,
             "note": "本地或远程 Ollama 服务，兼容现有本地模型调用。",
         },
@@ -49,7 +58,6 @@ def default_provider_configs() -> dict[str, dict[str, Any]]:
             "provider": "openai",
             "enabled": False,
             "base_url": "https://api.openai.com/v1",
-            "api_key": "",
             "default_model": "",
             "note": "预留 OpenAI Chat Completions / Responses API 配置。",
         },
@@ -57,7 +65,6 @@ def default_provider_configs() -> dict[str, dict[str, Any]]:
             "provider": "gemini",
             "enabled": False,
             "base_url": "https://generativelanguage.googleapis.com",
-            "api_key": "",
             "default_model": "",
             "note": "预留 Google Gemini API 配置。",
         },
@@ -65,7 +72,6 @@ def default_provider_configs() -> dict[str, dict[str, Any]]:
             "provider": "deepseek",
             "enabled": False,
             "base_url": "https://api.deepseek.com",
-            "api_key": "",
             "default_model": "",
             "note": "预留 DeepSeek API 配置。",
         },
@@ -73,7 +79,6 @@ def default_provider_configs() -> dict[str, dict[str, Any]]:
             "provider": "moonshot",
             "enabled": False,
             "base_url": "https://api.moonshot.cn/v1",
-            "api_key": "",
             "default_model": "",
             "note": "预留 Kimi / Moonshot API 配置。",
         },
@@ -81,7 +86,6 @@ def default_provider_configs() -> dict[str, dict[str, Any]]:
             "provider": "qwen",
             "enabled": False,
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "api_key": "",
             "default_model": "",
             "note": "预留通义千问 DashScope OpenAI 兼容接口配置。",
         },
@@ -89,7 +93,6 @@ def default_provider_configs() -> dict[str, dict[str, Any]]:
             "provider": "custom",
             "enabled": False,
             "base_url": "",
-            "api_key": "",
             "default_model": "",
             "note": "预留自定义 OpenAI 兼容接口。",
         },
@@ -110,13 +113,86 @@ def _decode_configs(raw: str | None) -> dict[str, dict[str, Any]]:
     for provider, value in saved.items():
         if provider not in configs or not isinstance(value, dict):
             continue
-        configs[provider].update(value)
+        sanitized = {key: item for key, item in value.items() if key != "api_key"}
+        configs[provider].update(sanitized)
         configs[provider]["provider"] = provider
     return configs
 
 
 def _encode_configs(configs: dict[str, dict[str, Any]]) -> str:
-    return json.dumps(configs, ensure_ascii=False, sort_keys=True)
+    sanitized = {
+        provider: {key: value for key, value in config.items() if key != "api_key"}
+        for provider, config in configs.items()
+    }
+    return json.dumps(sanitized, ensure_ascii=False, sort_keys=True)
+
+
+def validate_account_ai_selection(
+    ai_enabled: bool,
+    active_provider: str,
+    configs: dict[str, dict[str, Any]],
+    credential_states: dict[str, ProviderCredentialState],
+) -> None:
+    if not ai_enabled:
+        return
+
+    active = configs.get(active_provider)
+    if active is None:
+        raise ApiError("AI_CONFIG_INVALID", "当前 AI 服务商配置不存在", 422)
+    if not bool(active.get("enabled")):
+        raise ApiError("AI_CONFIG_INVALID", "当前 AI 服务商未启用", 422)
+    if not str(active.get("default_model") or "").strip():
+        raise ApiError("AI_CONFIG_INVALID", "当前 AI 服务商默认模型不能为空", 422)
+    if active_provider in _CLOUD_PROVIDERS:
+        state = credential_states.get(active_provider, "missing")
+        if state == "missing":
+            raise ApiError("AI_CONFIG_INVALID", "当前 AI 服务商 API Key 未配置", 422)
+        if state == "unusable":
+            raise ApiError("AI_CONFIG_INVALID", "当前 AI 服务商 API Key 不可用", 422)
+
+
+def _credential_states(
+    db: Session,
+    user_id: int,
+    configs: dict[str, dict[str, Any]],
+) -> dict[str, ProviderCredentialState]:
+    return {
+        provider: get_provider_credential_state(db, user_id, provider)
+        for provider in configs
+    }
+
+
+def _stage_provider_api_key(
+    db: Session,
+    user_id: int,
+    provider: str,
+    api_key: str | None,
+    clear_api_key: bool,
+) -> None:
+    credential = db.query(UserAIProviderCredential).filter_by(
+        user_id=user_id,
+        provider=provider,
+    ).first()
+    if clear_api_key:
+        if credential is not None:
+            db.delete(credential)
+        return
+    if api_key in (None, ""):
+        return
+
+    try:
+        ciphertext = _account_credential_cipher().encrypt(api_key)
+    except Exception:
+        raise ApiError("AI_CREDENTIAL_ERROR", "账号供应商凭据保存失败", 422) from None
+    if credential is None:
+        credential = UserAIProviderCredential(
+            user_id=user_id,
+            provider=provider,
+            api_key_ciphertext=ciphertext,
+        )
+    else:
+        credential.api_key_ciphertext = ciphertext
+    db.add(credential)
 
 
 def get_or_create_user_ai_setting(db: Session, user: User) -> UserAISetting:
@@ -127,6 +203,7 @@ def get_or_create_user_ai_setting(db: Session, user: User) -> UserAISetting:
     defaults = default_provider_configs()
     setting = UserAISetting(
         user_id=user.id,
+        ai_enabled=True,
         active_provider="ollama",
         default_model=defaults["ollama"]["default_model"],
         provider_configs=_encode_configs(defaults),
@@ -142,7 +219,7 @@ def get_or_create_user_ai_setting(db: Session, user: User) -> UserAISetting:
 def get_effective_ai_settings(db: Session, user: User | None) -> AISettingsResponse:
     if user is None:
         defaults = default_provider_configs()
-        return _to_response("ollama", defaults["ollama"]["default_model"], defaults)
+        return _to_response(True, "ollama", defaults["ollama"]["default_model"], defaults)
 
     setting = db.query(UserAISetting).filter_by(user_id=user.id).first()
     if setting is None:
@@ -150,18 +227,39 @@ def get_effective_ai_settings(db: Session, user: User | None) -> AISettingsRespo
         runtime = get_ollama_runtime_config(db, user)
         defaults["ollama"]["base_url"] = runtime.base_url
         defaults["ollama"]["default_model"] = runtime.default_model
-        return _to_response("ollama", runtime.default_model, defaults, runtime)
+        return _to_response(
+            True,
+            "ollama",
+            runtime.default_model,
+            defaults,
+            _credential_states(db, user.id, defaults),
+            runtime,
+        )
     runtime = get_ollama_runtime_config(db, user)
     return _to_response(
+        setting.ai_enabled,
         setting.active_provider,
         setting.default_model,
         _decode_configs(setting.provider_configs),
+        _credential_states(db, user.id, _decode_configs(setting.provider_configs)),
         runtime,
     )
 
 
 def update_user_ai_settings(db: Session, user: User, payload: AISettingsUpdate) -> AISettingsResponse:
-    setting = get_or_create_user_ai_setting(db, user)
+    setting = db.query(UserAISetting).filter_by(user_id=user.id).first()
+    if setting is None:
+        defaults = default_provider_configs()
+        setting = UserAISetting(
+            user_id=user.id,
+            ai_enabled=True,
+            active_provider="ollama",
+            default_model=defaults["ollama"]["default_model"],
+            provider_configs=_encode_configs(defaults),
+            created_at=_now(),
+            updated_at=_now(),
+        )
+        db.add(setting)
     configs = _decode_configs(setting.provider_configs)
 
     for incoming in payload.providers:
@@ -170,21 +268,57 @@ def update_user_ai_settings(db: Session, user: User, payload: AISettingsUpdate) 
         current["base_url"] = incoming.base_url
         current["default_model"] = incoming.default_model
         current["note"] = incoming.note
-        if incoming.api_key is not None and incoming.api_key != "":
-            current["api_key"] = incoming.api_key
         configs[incoming.provider] = current
 
+    credential_states = _credential_states(db, user.id, configs)
+    for incoming in payload.providers:
+        if incoming.clear_api_key:
+            credential_states[incoming.provider] = "missing"
+        elif incoming.api_key not in (None, ""):
+            credential_states[incoming.provider] = "configured"
+
+    validate_account_ai_selection(
+        payload.ai_enabled,
+        payload.active_provider,
+        configs,
+        credential_states,
+    )
+    active_model = str(configs[payload.active_provider].get("default_model") or "").strip()
+    if payload.ai_enabled and payload.default_model != active_model:
+        raise ApiError(
+            "AI_CONFIG_INVALID",
+            "账号默认模型必须与当前 AI 服务商默认模型一致",
+            422,
+        )
+
+    for incoming in payload.providers:
+        _stage_provider_api_key(
+            db,
+            user.id,
+            incoming.provider,
+            incoming.api_key,
+            incoming.clear_api_key,
+        )
+
+    setting.ai_enabled = payload.ai_enabled
     setting.active_provider = payload.active_provider
-    setting.default_model = payload.default_model or configs[payload.active_provider].get("default_model", "")
+    setting.default_model = payload.default_model
     setting.provider_configs = _encode_configs(configs)
     setting.updated_at = _now()
     db.add(setting)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise ApiError("AI_CONFIG_SAVE_FAILED", "AI 配置保存失败", 500) from None
     db.refresh(setting)
+    credential_states = _credential_states(db, user.id, configs)
     return _to_response(
+        setting.ai_enabled,
         setting.active_provider,
         setting.default_model,
         configs,
+        credential_states,
         get_ollama_runtime_config(db, user),
     )
 
@@ -309,27 +443,28 @@ def _runtime_status(
 
 
 def _to_response(
+    ai_enabled: bool,
     active_provider: str,
     default_model: str,
     configs: dict[str, dict[str, Any]],
+    credential_states: dict[str, ProviderCredentialState] | None = None,
     runtime_config: OllamaRuntimeConfig | None = None,
 ) -> AISettingsResponse:
     settings = get_settings()
     providers: list[AIProviderConfig] = []
     for key, config in configs.items():
-        api_key = str(config.get("api_key") or "")
         providers.append(
             AIProviderConfig(
                 provider=key,  # type: ignore[arg-type]
                 enabled=bool(config.get("enabled")),
                 base_url=str(config.get("base_url") or ""),
-                api_key="",
                 default_model=str(config.get("default_model") or ""),
                 note=str(config.get("note") or ""),
-                has_api_key=bool(api_key),
+                credential_state=(credential_states or {}).get(key, "missing"),
             )
         )
     return AISettingsResponse(
+        ai_enabled=ai_enabled,
         active_provider=active_provider,  # type: ignore[arg-type]
         default_model=default_model,
         providers=providers,
