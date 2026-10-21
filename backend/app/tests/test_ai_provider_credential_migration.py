@@ -244,17 +244,15 @@ def test_upgrade_write_failure_hides_ciphertext_and_original_parameters(
     source_key = "migration-write-plaintext-marker"
     ciphertext_marker = "v1:migration-write-ciphertext-marker"
     raw_parameter_marker = "migration-write-original-parameter-marker"
+    original_configs = {
+        "openai": {
+            "api_key": source_key,
+            "base_url": f"https://{raw_parameter_marker}.example.test",
+        }
+    }
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("HOME_LIBRARY_SECRET_KEY", _STRONG_SECRET_KEY)
-    _seed_revision_0002(
-        database_url,
-        {
-            "openai": {
-                "api_key": source_key,
-                "base_url": f"https://{raw_parameter_marker}.example.test",
-            }
-        },
-    )
+    _seed_revision_0002(database_url, original_configs)
 
     real_encrypt = CredentialCipher.encrypt
     real_decrypt = CredentialCipher.decrypt
@@ -290,12 +288,13 @@ def test_upgrade_write_failure_hides_ciphertext_and_original_parameters(
             )
         return real_execute(connection, statement, parameters, *args, **kwargs)
 
-    monkeypatch.setattr(CredentialCipher, "encrypt", synthetic_encrypt)
-    monkeypatch.setattr(CredentialCipher, "decrypt", synthetic_decrypt)
-    monkeypatch.setattr(sa.engine.Connection, "execute", fail_credential_insert)
+    with monkeypatch.context() as injected_failure:
+        injected_failure.setattr(CredentialCipher, "encrypt", synthetic_encrypt)
+        injected_failure.setattr(CredentialCipher, "decrypt", synthetic_decrypt)
+        injected_failure.setattr(sa.engine.Connection, "execute", fail_credential_insert)
 
-    with pytest.raises(RuntimeError) as caught:
-        command.upgrade(_alembic_config(database_url), "head")
+        with pytest.raises(RuntimeError) as caught:
+            command.upgrade(_alembic_config(database_url), "head")
 
     failure = caught.value
     with caplog.at_level(logging.ERROR):
@@ -314,4 +313,41 @@ def test_upgrade_write_failure_hides_ciphertext_and_original_parameters(
     engine = sa.create_engine(database_url)
     with engine.connect() as connection:
         assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0002"
+        inspector = sa.inspect(connection)
+        assert "ai_enabled" not in {
+            column["name"] for column in inspector.get_columns("user_ai_settings")
+        }
+        assert "user_ai_provider_credentials" not in inspector.get_table_names()
+        assert json.loads(
+            connection.scalar(
+                sa.text("SELECT provider_configs FROM user_ai_settings WHERE id = 1")
+            )
+        ) == original_configs
     engine.dispose()
+
+    command.upgrade(_alembic_config(database_url), "head")
+
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        assert connection.scalar(sa.text("SELECT version_num FROM alembic_version")) == "0003"
+        migrated_configs = json.loads(
+            connection.scalar(
+                sa.text("SELECT provider_configs FROM user_ai_settings WHERE id = 1")
+            )
+        )
+        migrated_ciphertext = connection.scalar(
+            sa.text(
+                """
+                SELECT api_key_ciphertext
+                FROM user_ai_provider_credentials
+                WHERE user_id = 1 AND provider = 'openai'
+                """
+            )
+        )
+    engine.dispose()
+
+    assert "api_key" not in migrated_configs["openai"]
+    assert CredentialCipher.from_secret_key(
+        _STRONG_SECRET_KEY,
+        purpose=_ACCOUNT_KEY_PURPOSE,
+    ).decrypt(migrated_ciphertext) == source_key

@@ -82,6 +82,44 @@ def _prepare_upgrades(
     return prepared
 
 
+def _cleanup_failed_sqlite_upgrade(
+    connection: sa.Connection,
+    original_configs: list[tuple[int, str]],
+) -> bool:
+    try:
+        connection.rollback()
+        inspector = sa.inspect(connection)
+        if "user_ai_provider_credentials" in inspector.get_table_names():
+            op.drop_table("user_ai_provider_credentials")
+
+        inspector = sa.inspect(connection)
+        columns = {
+            column["name"] for column in inspector.get_columns("user_ai_settings")
+        }
+        if "ai_enabled" in columns:
+            op.drop_column("user_ai_settings", "ai_enabled")
+
+        for setting_id, provider_configs in original_configs:
+            connection.execute(
+                sa.text(
+                    """
+                    UPDATE user_ai_settings
+                    SET provider_configs = :provider_configs
+                    WHERE id = :setting_id
+                    """
+                ),
+                {"provider_configs": provider_configs, "setting_id": setting_id},
+            )
+        connection.commit()
+        return True
+    except Exception:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        return False
+
+
 def _run_upgrade() -> None:
     connection = op.get_bind()
     rows = list(
@@ -90,58 +128,64 @@ def _run_upgrade() -> None:
         ).mappings()
     )
     prepared = _prepare_upgrades(rows)
+    original_configs = [(row.id, row.provider_configs) for row in rows]
 
-    op.add_column(
-        "user_ai_settings",
-        sa.Column("ai_enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
-    )
-    op.create_table(
-        "user_ai_provider_credentials",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("user_id", sa.Integer(), nullable=False),
-        sa.Column("provider", sa.String(40), nullable=False),
-        sa.Column("api_key_ciphertext", sa.Text(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "user_id",
-            "provider",
-            name="uq_user_ai_provider_credentials_user_provider",
-        ),
-    )
+    try:
+        op.add_column(
+            "user_ai_settings",
+            sa.Column("ai_enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
+        )
+        op.create_table(
+            "user_ai_provider_credentials",
+            sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+            sa.Column("user_id", sa.Integer(), nullable=False),
+            sa.Column("provider", sa.String(40), nullable=False),
+            sa.Column("api_key_ciphertext", sa.Text(), nullable=False),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+            sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
+            sa.PrimaryKeyConstraint("id"),
+            sa.UniqueConstraint(
+                "user_id",
+                "provider",
+                name="uq_user_ai_provider_credentials_user_provider",
+            ),
+        )
 
-    now = datetime.now(timezone.utc)
-    for setting_id, user_id, provider_configs, encrypted_keys in prepared:
-        for provider, ciphertext in encrypted_keys:
+        now = datetime.now(timezone.utc)
+        for setting_id, user_id, provider_configs, encrypted_keys in prepared:
+            for provider, ciphertext in encrypted_keys:
+                connection.execute(
+                    sa.text(
+                        """
+                        INSERT INTO user_ai_provider_credentials (
+                            user_id, provider, api_key_ciphertext, created_at, updated_at
+                        ) VALUES (
+                            :user_id, :provider, :ciphertext, :now, :now
+                        )
+                        """
+                    ),
+                    {
+                        "user_id": user_id,
+                        "provider": provider,
+                        "ciphertext": ciphertext,
+                        "now": now,
+                    },
+                )
             connection.execute(
                 sa.text(
                     """
-                    INSERT INTO user_ai_provider_credentials (
-                        user_id, provider, api_key_ciphertext, created_at, updated_at
-                    ) VALUES (
-                        :user_id, :provider, :ciphertext, :now, :now
-                    )
+                    UPDATE user_ai_settings
+                    SET provider_configs = :provider_configs
+                    WHERE id = :setting_id
                     """
                 ),
-                {
-                    "user_id": user_id,
-                    "provider": provider,
-                    "ciphertext": ciphertext,
-                    "now": now,
-                },
+                {"provider_configs": provider_configs, "setting_id": setting_id},
             )
-        connection.execute(
-            sa.text(
-                """
-                UPDATE user_ai_settings
-                SET provider_configs = :provider_configs
-                WHERE id = :setting_id
-                """
-            ),
-            {"provider_configs": provider_configs, "setting_id": setting_id},
-        )
+    except Exception:
+        if connection.dialect.name == "sqlite":
+            _cleanup_failed_sqlite_upgrade(connection, original_configs)
+        raise
 
 
 def _upgrade_outcome() -> AccountCredentialMigrationError | None:
