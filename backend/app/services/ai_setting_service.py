@@ -16,7 +16,13 @@ from app.core.ollama_url import InvalidOllamaBaseURL, normalize_ollama_base_url
 from app.models.user import User
 from app.models.user_ai_provider_credential import UserAIProviderCredential
 from app.models.user_ai_setting import UserAISetting
-from app.schemas.ai_setting import AIProviderConfig, AISettingsResponse, AISettingsUpdate, OllamaRuntimeStatus
+from app.schemas.ai_setting import (
+    AIProviderConfig,
+    AIProviderConfigUpdate,
+    AISettingsResponse,
+    AISettingsUpdate,
+    OllamaRuntimeStatus,
+)
 from app.services.ai_provider_credential_service import (
     ProviderCredentialState,
     _cipher as _account_credential_cipher,
@@ -162,11 +168,55 @@ def _credential_states(
     }
 
 
-def _stage_provider_api_key(
+def _encrypt_and_clear_provider_api_key(
+    incoming: AIProviderConfigUpdate,
+) -> str | ApiError | None:
+    plaintext = incoming.api_key
+    incoming.api_key = None
+    if plaintext in (None, ""):
+        return None
+    try:
+        return _account_credential_cipher().encrypt(plaintext)
+    except Exception:
+        return ApiError("AI_CREDENTIAL_ERROR", "账号供应商凭据保存失败", 422)
+    finally:
+        plaintext = None
+
+
+def _consume_provider_api_keys(
+    payload: AISettingsUpdate,
+) -> list[tuple[str, str | None, bool]] | ApiError:
+    updates: list[tuple[str, str | None, bool]] = []
+    failure: ApiError | None = None
+    for incoming in payload.providers:
+        if failure is not None:
+            incoming.api_key = None
+            continue
+        encrypted = _encrypt_and_clear_provider_api_key(incoming)
+        if isinstance(encrypted, ApiError):
+            failure = encrypted
+            continue
+        updates.append(
+            (
+                incoming.provider,
+                encrypted,
+                (
+                    incoming.clear_api_key
+                    if "clear_api_key" in incoming.model_fields_set
+                    else False
+                ),
+            )
+        )
+    if failure is not None:
+        return failure
+    return updates
+
+
+def _stage_provider_api_key_ciphertext(
     db: Session,
     user_id: int,
     provider: str,
-    api_key: str | None,
+    ciphertext: str | None,
     clear_api_key: bool,
 ) -> None:
     credential = db.query(UserAIProviderCredential).filter_by(
@@ -177,13 +227,8 @@ def _stage_provider_api_key(
         if credential is not None:
             db.delete(credential)
         return
-    if api_key in (None, ""):
+    if ciphertext is None:
         return
-
-    try:
-        ciphertext = _account_credential_cipher().encrypt(api_key)
-    except Exception:
-        raise ApiError("AI_CREDENTIAL_ERROR", "账号供应商凭据保存失败", 422) from None
     if credential is None:
         credential = UserAIProviderCredential(
             user_id=user_id,
@@ -193,6 +238,19 @@ def _stage_provider_api_key(
     else:
         credential.api_key_ciphertext = ciphertext
     db.add(credential)
+
+
+def _safe_ai_setting_update_failure(db: Session, error: Exception) -> ApiError:
+    try:
+        db.rollback()
+    except Exception:
+        try:
+            db.invalidate()
+        except Exception:
+            pass
+    if isinstance(error, ApiError):
+        return ApiError(error.code, error.message, error.status_code)
+    return ApiError("AI_CONFIG_SAVE_FAILED", "AI 配置保存失败", 500)
 
 
 def get_or_create_user_ai_setting(db: Session, user: User) -> UserAISetting:
@@ -246,70 +304,69 @@ def get_effective_ai_settings(db: Session, user: User | None) -> AISettingsRespo
     )
 
 
-def update_user_ai_settings(db: Session, user: User, payload: AISettingsUpdate) -> AISettingsResponse:
-    setting = db.query(UserAISetting).filter_by(user_id=user.id).first()
-    if setting is None:
-        defaults = default_provider_configs()
-        setting = UserAISetting(
-            user_id=user.id,
-            ai_enabled=True,
-            active_provider="ollama",
-            default_model=defaults["ollama"]["default_model"],
-            provider_configs=_encode_configs(defaults),
-            created_at=_now(),
-            updated_at=_now(),
-        )
-    configs = _decode_configs(setting.provider_configs)
-
-    for incoming in payload.providers:
-        current = deepcopy(configs[incoming.provider])
-        for field in ("enabled", "base_url", "default_model", "note"):
-            if field in incoming.model_fields_set:
-                current[field] = getattr(incoming, field)
-        configs[incoming.provider] = current
-
-    ai_enabled = (
-        payload.ai_enabled
-        if "ai_enabled" in payload.model_fields_set
-        else setting.ai_enabled
-    )
-    credential_states = _credential_states(db, user.id, configs)
-    for incoming in payload.providers:
-        if "clear_api_key" in incoming.model_fields_set and incoming.clear_api_key:
-            credential_states[incoming.provider] = "missing"
-        elif (
-            "api_key" in incoming.model_fields_set
-            and incoming.api_key not in (None, "")
-        ):
-            credential_states[incoming.provider] = "configured"
-
-    validate_account_ai_selection(
-        ai_enabled,
-        payload.active_provider,
-        configs,
-        credential_states,
-    )
-    active_model = str(configs[payload.active_provider].get("default_model") or "").strip()
-    if ai_enabled and payload.default_model != active_model:
-        raise ApiError(
-            "AI_CONFIG_INVALID",
-            "账号默认模型必须与当前 AI 服务商默认模型一致",
-            422,
-        )
-
-    phase = "prepare"
+def _update_user_ai_settings_outcome(
+    db: Session,
+    user: User,
+    payload: AISettingsUpdate,
+    credential_updates: list[tuple[str, str | None, bool]],
+) -> AISettingsResponse | ApiError:
     try:
+        setting = db.query(UserAISetting).filter_by(user_id=user.id).first()
+        if setting is None:
+            defaults = default_provider_configs()
+            setting = UserAISetting(
+                user_id=user.id,
+                ai_enabled=True,
+                active_provider="ollama",
+                default_model=defaults["ollama"]["default_model"],
+                provider_configs=_encode_configs(defaults),
+                created_at=_now(),
+                updated_at=_now(),
+            )
+        configs = _decode_configs(setting.provider_configs)
+
         for incoming in payload.providers:
-            _stage_provider_api_key(
+            current = deepcopy(configs[incoming.provider])
+            for field in ("enabled", "base_url", "default_model", "note"):
+                if field in incoming.model_fields_set:
+                    current[field] = getattr(incoming, field)
+            configs[incoming.provider] = current
+
+        ai_enabled = (
+            payload.ai_enabled
+            if "ai_enabled" in payload.model_fields_set
+            else setting.ai_enabled
+        )
+        credential_states = _credential_states(db, user.id, configs)
+        for provider, ciphertext, clear_api_key in credential_updates:
+            if clear_api_key:
+                credential_states[provider] = "missing"
+            elif ciphertext is not None:
+                credential_states[provider] = "configured"
+
+        validate_account_ai_selection(
+            ai_enabled,
+            payload.active_provider,
+            configs,
+            credential_states,
+        )
+        active_model = str(
+            configs[payload.active_provider].get("default_model") or ""
+        ).strip()
+        if ai_enabled and payload.default_model != active_model:
+            raise ApiError(
+                "AI_CONFIG_INVALID",
+                "账号默认模型必须与当前 AI 服务商默认模型一致",
+                422,
+            )
+
+        for provider, ciphertext, clear_api_key in credential_updates:
+            _stage_provider_api_key_ciphertext(
                 db,
                 user.id,
-                incoming.provider,
-                incoming.api_key if "api_key" in incoming.model_fields_set else None,
-                (
-                    incoming.clear_api_key
-                    if "clear_api_key" in incoming.model_fields_set
-                    else False
-                ),
+                provider,
+                ciphertext,
+                clear_api_key,
             )
 
         setting.ai_enabled = ai_enabled
@@ -331,14 +388,33 @@ def update_user_ai_settings(db: Session, user: User, payload: AISettingsUpdate) 
             runtime,
         )
 
-        phase = "commit"
         db.commit()
-    except Exception:
-        db.rollback()
-        if phase == "commit":
-            raise ApiError("AI_CONFIG_SAVE_FAILED", "AI 配置保存失败", 500) from None
-        raise
-    return response
+        return response
+    except Exception as error:
+        return _safe_ai_setting_update_failure(db, error)
+
+
+def update_user_ai_settings(
+    db: Session,
+    user: User,
+    payload: AISettingsUpdate,
+) -> AISettingsResponse:
+    consumed = _consume_provider_api_keys(payload)
+    if isinstance(consumed, ApiError):
+        del db, user, payload
+        raise consumed from None
+
+    credential_updates = consumed
+    outcome = _update_user_ai_settings_outcome(
+        db,
+        user,
+        payload,
+        credential_updates,
+    )
+    del db, user, payload, credential_updates, consumed
+    if isinstance(outcome, ApiError):
+        raise outcome from None
+    return outcome
 
 
 def get_ollama_runtime_config(db: Session, user: User | None) -> OllamaRuntimeConfig:

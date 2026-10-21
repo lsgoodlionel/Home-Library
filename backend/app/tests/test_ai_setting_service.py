@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+from types import FrameType, FunctionType, ModuleType, TracebackType
+from typing import Any
 
 import pytest
 from sqlalchemy.orm import Session
@@ -19,6 +21,50 @@ from app.services.ai_provider_credential_service import (
 
 
 _SECRET_KEY = "ai-setting-service-strong-key-value-00001"
+
+
+def _assert_exception_state_excludes(
+    error: BaseException,
+    *markers: str,
+) -> None:
+    pending: list[Any] = [error]
+    seen: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if value is None or id(value) in seen:
+            continue
+        seen.add(id(value))
+
+        if isinstance(value, bytes):
+            text = value.decode("utf-8", errors="replace")
+            assert all(marker not in text for marker in markers)
+            continue
+        if isinstance(value, str):
+            assert all(marker not in value for marker in markers)
+            continue
+        if isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+            continue
+        if isinstance(value, (list, tuple, set, frozenset)):
+            pending.extend(value)
+            continue
+        if isinstance(value, BaseException):
+            pending.extend(value.args)
+            pending.extend([value.__cause__, value.__context__, value.__traceback__])
+        if isinstance(value, TracebackType):
+            pending.extend([value.tb_frame, value.tb_next])
+            continue
+        if isinstance(value, FrameType):
+            filename = value.f_code.co_filename
+            if "/app/" in filename and "/app/tests/" not in filename:
+                pending.append(value.f_locals)
+            continue
+        if not isinstance(value, (type, FunctionType, ModuleType)):
+            try:
+                pending.append(vars(value))
+            except TypeError:
+                pass
 
 
 def _user(db: Session, username: str) -> User:
@@ -356,13 +402,85 @@ def test_account_ai_config_precommit_failure_rolls_back_config_and_api_key(
     target = "get_ollama_runtime_config" if failure_point == "runtime" else "_to_response"
     monkeypatch.setattr(service, target, fail_after_flush)
 
-    with pytest.raises(RuntimeError, match=f"synthetic {failure_point} failure"):
+    with pytest.raises(ApiError) as exc_info:
         service.update_user_ai_settings(
             db,
             user,
             _payload(api_key="replacement-provider-key"),
         )
+    assert exc_info.value.message == "AI 配置保存失败"
 
+    db.expire_all()
+    saved = db.query(UserAISetting).filter_by(user_id=user.id).one()
+    assert saved.active_provider == "openai"
+    assert saved.default_model == "gpt-test"
+    assert json.loads(saved.provider_configs) == _configs()
+    assert get_provider_api_key(db, user.id, "openai") == "original-provider-key"
+
+
+@pytest.mark.parametrize("failure_point", ["encryption", "runtime", "commit"])
+def test_account_ai_config_failure_traceback_drops_all_secret_state(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure_point: str,
+) -> None:
+    plaintext_marker = f"plaintext-{failure_point}-unique-secret-marker"
+    ciphertext_marker = f"v1:ciphertext-{failure_point}-unique-secret-marker"
+    application_key_marker = f"application-{failure_point}-unique-secret-marker-00000001"
+    monkeypatch.setenv("HOME_LIBRARY_SECRET_KEY", application_key_marker)
+    user = _user(db, f"settings-traceback-{failure_point}-user")
+    set_provider_api_key(db, user.id, "openai", "original-provider-key")
+    original = UserAISetting(
+        user_id=user.id,
+        ai_enabled=True,
+        active_provider="openai",
+        default_model="gpt-test",
+        provider_configs=json.dumps(_configs()),
+    )
+    db.add(original)
+    db.commit()
+    payload = _payload(api_key=plaintext_marker)
+    original_commit = db.commit
+
+    class SyntheticCipher:
+        def encrypt(self, plaintext: str) -> str:
+            if failure_point == "encryption":
+                raise RuntimeError("synthetic encryption failure")
+            return ciphertext_marker
+
+    monkeypatch.setattr(service, "_account_credential_cipher", SyntheticCipher)
+    if failure_point == "runtime":
+        monkeypatch.setattr(
+            service,
+            "get_ollama_runtime_config",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("synthetic runtime failure")
+            ),
+        )
+    elif failure_point == "commit":
+        monkeypatch.setattr(
+            db,
+            "commit",
+            lambda: (_ for _ in ()).throw(RuntimeError("synthetic commit failure")),
+        )
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(Exception) as exc_info:
+            service.update_user_ai_settings(db, user, payload)
+        logging.getLogger("test.ai-setting-sanitized").error(
+            "AI setting update failed",
+            exc_info=(type(exc_info.value), exc_info.value, exc_info.value.__traceback__),
+        )
+
+    markers = (plaintext_marker, ciphertext_marker, application_key_marker)
+    assert all(item.api_key in (None, "") for item in payload.providers)
+    assert all(marker not in str(exc_info.value) for marker in markers)
+    assert all(marker not in repr(exc_info.value) for marker in markers)
+    assert all(marker not in caplog.text for marker in markers)
+    _assert_exception_state_excludes(exc_info.value, *markers)
+
+    monkeypatch.setattr(db, "commit", original_commit)
     db.expire_all()
     saved = db.query(UserAISetting).filter_by(user_id=user.id).one()
     assert saved.active_provider == "openai"
