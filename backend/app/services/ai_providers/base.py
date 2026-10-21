@@ -146,9 +146,34 @@ class AIProviderInvalidResponseError(AIProviderError):
     default_message = "AI 服务返回内容无效"
 
 
+_TRUSTED_PROVIDER_ERROR_TYPES = (
+    AIProviderError,
+    AIProviderDisabledError,
+    AIProviderInvalidConfigurationError,
+    AIProviderAuthenticationError,
+    AIProviderQuotaError,
+    AIProviderRateLimitError,
+    AIProviderModelError,
+    AIProviderConnectTimeoutError,
+    AIProviderReadTimeoutError,
+    AIProviderUpstreamError,
+    AIProviderInvalidResponseError,
+)
+
+
 def map_provider_exception(exc: Exception) -> AIProviderError:
     if isinstance(exc, AIProviderError):
-        return exc
+        # Reusing the source retains context, notes and arbitrary diagnostic state.
+        # Choose a trusted constructor even for subclasses, preserving its taxonomy.
+        error_type = next(cls for cls in type(exc).__mro__ if cls in _TRUSTED_PROVIDER_ERROR_TYPES)
+        status_code = exc.status_code
+        if isinstance(status_code, int):
+            status_code = status_code if type(status_code) is bool else int.__int__(status_code)
+        else:
+            status_code = None
+        reason = exc.reason
+        reason = str.__str__(reason) if isinstance(reason, str) else None
+        return error_type(status_code=status_code, reason=reason)
     if isinstance(exc, httpx.ConnectTimeout):
         return AIProviderConnectTimeoutError()
     if isinstance(exc, httpx.ReadTimeout):
