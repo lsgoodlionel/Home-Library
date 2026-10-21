@@ -132,6 +132,45 @@ describe('SettingsPage AI composition', () => {
     expect(mocks.saveAIModelSettings).not.toHaveBeenCalled();
     expect(mocks.saveLocalSettings).toHaveBeenCalledTimes(1);
     expect(wrapper.text()).toContain('已保存');
-    expect(success).toHaveBeenCalledWith('外部检索设置已保存');
+    expect(success).toHaveBeenCalledWith('外部检索设置和本地偏好已保存');
+  });
+
+  it('saves edited local preferences even when external-search persistence fails', async () => {
+    const warning = vi.spyOn(ElMessage, 'warning');
+    mocks.saveExternalSearchSettings.mockRejectedValueOnce(new Error('external unavailable'));
+    const wrapper = await mountPage();
+    const externalSection = wrapper.findAll('.settings-card').find((card) => card.text().includes('外部检索'))!;
+    await externalSection.get('.el-switch').trigger('click');
+    const firstProviderActions = externalSection.findAll('.provider-actions')[0];
+    await firstProviderActions.findAll('button')[1].trigger('click');
+
+    await button(wrapper, '保存设置').trigger('click');
+    await flushPromises();
+
+    expect(mocks.saveLocalSettings).toHaveBeenCalledWith(expect.objectContaining({
+      externalSearchEnabled: false,
+      externalProviderOrder: ['isbn_work', 'nlc', 'douban', 'google_books', 'open_library'],
+    }));
+    expect(warning).toHaveBeenCalledWith('本地偏好已保存，外部检索设置保存失败');
+  });
+
+  it('syncs a successfully saved account provider model to legacy local consumers without secrets', async () => {
+    const wrapper = await mountPage();
+    const saved = {
+      ...accountSettings,
+      activeProvider: 'openai' as const,
+      defaultModel: 'gpt-new-model',
+      providers: [{
+        provider: 'openai' as const, enabled: true, baseUrl: 'https://api.openai.test/v1',
+        defaultModel: 'gpt-new-model', note: '', hasApiKey: true, credentialState: 'configured' as const,
+      }],
+    };
+
+    wrapper.findComponent(AIProviderSettingsPanel).vm.$emit('saved', saved);
+    await flushPromises();
+
+    expect(mocks.saveLocalSettings).toHaveBeenCalledWith(expect.objectContaining({ defaultModel: 'gpt-new-model' }));
+    expect(JSON.stringify(mocks.saveLocalSettings.mock.calls)).not.toContain('apiKey');
+    expect(JSON.stringify(mocks.saveLocalSettings.mock.calls)).not.toContain('api_key');
   });
 });

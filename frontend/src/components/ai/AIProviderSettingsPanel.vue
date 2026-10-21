@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Connection, Promotion, Refresh } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 
 import { fetchAIProviderModels, generateAIProviderTest, testAIProvider } from '@/api/ai';
 import { fetchAIModelSettings, saveAIModelSettings } from '@/api/settings';
@@ -37,6 +37,7 @@ const activeProvider = ref<AIProviderKey>('ollama');
 const ollamaRuntime = ref<OllamaRuntimeStatus>({ ...emptyRuntime });
 const providers = reactive<ProviderDraftState[]>([]);
 const requestSequences = new Map<AIProviderKey, number>();
+const generationLocks = new Set<AIProviderKey>();
 let mounted = true;
 
 const validActiveProviders = computed(() => providers.filter((provider) => {
@@ -86,8 +87,26 @@ function nextSequence(provider: AIProviderKey): number {
   return next;
 }
 
+function operationSnapshot(provider: ProviderDraftState): string {
+  return JSON.stringify([
+    provider.enabled,
+    provider.baseUrl,
+    provider.apiKey,
+    provider.defaultModel,
+    provider.clearApiKey,
+  ]);
+}
+
+function invalidateProvider(provider: ProviderDraftState): void {
+  nextSequence(provider.provider);
+  provider.loading = '';
+  provider.result = '';
+  provider.models = [];
+}
+
 async function runOperation(provider: ProviderDraftState, operation: 'test' | 'models' | 'generate'): Promise<void> {
   const sequence = nextSequence(provider.provider);
+  const snapshot = `${aiEnabled.value}:${operationSnapshot(provider)}`;
   provider.loading = operation;
   try {
     const draft = operationDraft(provider);
@@ -96,7 +115,12 @@ async function runOperation(provider: ProviderDraftState, operation: 'test' | 'm
       : operation === 'models'
         ? await fetchAIProviderModels(provider.provider, draft)
         : await generateAIProviderTest(provider.provider, draft);
-    if (!mounted || requestSequences.get(provider.provider) !== sequence || result.provider !== provider.provider) return;
+    if (
+      !mounted
+      || requestSequences.get(provider.provider) !== sequence
+      || result.provider !== provider.provider
+      || snapshot !== `${aiEnabled.value}:${operationSnapshot(provider)}`
+    ) return;
     provider.result = result.message;
     if (operation === 'models') provider.models = result.models.map((model) => ({ ...model }));
     ElMessage.success(operation === 'models' ? '模型列表已刷新' : operation === 'generate' ? '生成测试成功' : '连接测试成功');
@@ -110,17 +134,22 @@ async function runOperation(provider: ProviderDraftState, operation: 'test' | 'm
 }
 
 async function confirmGenerate(provider: ProviderDraftState): Promise<void> {
+  if (generationLocks.has(provider.provider)) return;
+  generationLocks.add(provider.provider);
+  provider.loading = 'generate';
   try {
     await ElMessageBox.confirm(
       '生成测试会调用当前服务商执行一次最小生成，可能产生费用或消耗账号额度。确认继续吗？',
       '确认生成测试',
       { type: 'warning', confirmButtonText: '继续生成测试', cancelButtonText: '取消' },
     );
+    await runOperation(provider, 'generate');
   } catch (error) {
-    if (error === 'cancel' || error === 'close') return;
-    throw error;
+    if (error !== 'cancel' && error !== 'close') ElMessage.error('生成测试确认失败');
+  } finally {
+    generationLocks.delete(provider.provider);
+    if (provider.loading === 'generate') provider.loading = '';
   }
-  await runOperation(provider, 'generate');
 }
 
 function savePayload(): AIModelSettings {
@@ -161,8 +190,21 @@ function credentialLabel(provider: ProviderDraftState): string {
 }
 
 onMounted(() => void load());
+watch(aiEnabled, () => {
+  providers.forEach(invalidateProvider);
+}, { flush: 'sync' });
+watch(
+  () => providers.map(operationSnapshot),
+  (current, previous = []) => {
+    current.forEach((snapshot, index) => {
+      if (snapshot !== previous[index] && providers[index]) invalidateProvider(providers[index]);
+    });
+  },
+  { flush: 'sync' },
+);
 onBeforeUnmount(() => {
   mounted = false;
+  generationLocks.clear();
   providers.forEach((provider) => nextSequence(provider.provider));
 });
 </script>

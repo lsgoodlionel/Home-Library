@@ -75,7 +75,11 @@ function health(providerKey: AIProviderConfig['provider'], models: string[] = []
 }
 
 interface ButtonContainer {
-  findAll(selector: string): Array<{ text(): string; trigger(event: string): Promise<void> }>;
+  findAll(selector: string): Array<{
+    text(): string;
+    trigger(event: string): Promise<void>;
+    attributes(name: string): string | undefined;
+  }>;
 }
 
 function button(wrapper: ButtonContainer, label: string) {
@@ -220,6 +224,97 @@ describe('AIProviderSettingsPanel', () => {
     confirm.mockResolvedValueOnce('confirm' as never);
     await button(openai, '生成测试').trigger('click');
     await flushPromises();
+    expect(mocks.generateAIProviderTest).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['account off', async (wrapper: VueWrapper) => wrapper.get('[data-testid="account-ai-enabled"]').trigger('click')],
+    ['provider disabled', async (wrapper: VueWrapper) => providerPanel(wrapper, 'ollama').get('[data-testid="provider-enabled"]').trigger('click')],
+    ['address changed', async (wrapper: VueWrapper) => providerPanel(wrapper, 'openai').get('input[data-testid="provider-address"]').setValue('https://changed.example.test')],
+    ['key changed', async (wrapper: VueWrapper) => providerPanel(wrapper, 'openai').get('input[data-testid="provider-api-key"]').setValue('changed-key')],
+    ['model changed', async (wrapper: VueWrapper) => providerPanel(wrapper, 'openai').findComponent({ name: 'ElSelect' }).setValue('changed-model')],
+    ['clear changed', async (wrapper: VueWrapper) => providerPanel(wrapper, 'openai').get('[data-testid="clear-api-key"] input').setValue(true)],
+  ])('drops a pending response after %s', async (_label, mutate) => {
+    let resolve!: (value: AIProviderHealthStatus) => void;
+    const pending = new Promise<AIProviderHealthStatus>((resolvePromise) => { resolve = resolvePromise; });
+    mocks.fetchAIProviderModels.mockImplementationOnce(() => pending);
+    const wrapper = await mountPanel();
+    const target = _label === 'provider disabled' ? providerPanel(wrapper, 'ollama') : providerPanel(wrapper, 'openai');
+
+    await button(target, '刷新模型').trigger('click');
+    await mutate(wrapper);
+    resolve(health(_label === 'provider disabled' ? 'ollama' : 'openai', ['stale-model']));
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain('stale-model');
+    expect(wrapper.text()).not.toContain(`${_label === 'provider disabled' ? 'ollama' : 'openai'} 操作完成`);
+  });
+
+  it('drops pending responses after unmount without affecting another provider', async () => {
+    let resolve!: (value: AIProviderHealthStatus) => void;
+    mocks.fetchAIProviderModels.mockImplementationOnce(() => new Promise((resolvePromise) => { resolve = resolvePromise; }));
+    const wrapper = await mountPanel();
+    await button(providerPanel(wrapper, 'openai'), '刷新模型').trigger('click');
+    await button(providerPanel(wrapper, 'ollama'), '刷新模型').trigger('click');
+    await flushPromises();
+    expect(providerPanel(wrapper, 'ollama').text()).toContain('ollama 操作完成');
+
+    wrapper.unmount();
+    resolve(health('openai', ['stale-model']));
+    await flushPromises();
+    expect(mocks.fetchAIProviderModels).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses one generation confirmation and request while the provider mutex is held', async () => {
+    let settleConfirm!: (value: string) => void;
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockImplementationOnce(() => new Promise((resolve) => {
+      settleConfirm = resolve;
+    }) as never);
+    const wrapper = await mountPanel();
+    const openai = providerPanel(wrapper, 'openai');
+    const generate = button(openai, '生成测试');
+
+    void generate.trigger('click');
+    void generate.trigger('click');
+    await flushPromises();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(generate.attributes('disabled')).toBeDefined();
+    expect(mocks.generateAIProviderTest).not.toHaveBeenCalled();
+
+    settleConfirm('confirm');
+    await flushPromises();
+    expect(mocks.generateAIProviderTest).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the generation mutex after cancel so generation can be retried', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm')
+      .mockRejectedValueOnce('cancel')
+      .mockResolvedValueOnce('confirm' as never);
+    const wrapper = await mountPanel();
+    const openai = providerPanel(wrapper, 'openai');
+
+    await button(openai, '生成测试').trigger('click');
+    await flushPromises();
+    await button(openai, '生成测试').trigger('click');
+    await flushPromises();
+
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(mocks.generateAIProviderTest).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the generation mutex after confirmation failure', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm')
+      .mockRejectedValueOnce(new Error('dialog failed'))
+      .mockResolvedValueOnce('confirm' as never);
+    const wrapper = await mountPanel();
+    const openai = providerPanel(wrapper, 'openai');
+
+    await button(openai, '生成测试').trigger('click');
+    await flushPromises();
+    await button(openai, '生成测试').trigger('click');
+    await flushPromises();
+
+    expect(confirm).toHaveBeenCalledTimes(2);
     expect(mocks.generateAIProviderTest).toHaveBeenCalledTimes(1);
   });
 });

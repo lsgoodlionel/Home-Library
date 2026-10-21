@@ -138,6 +138,12 @@ onMounted(async () => {
 function handleAccountAISaved(saved: AIModelSettings) {
   applyAISettings(saved);
   aiStatusRevision.value += 1;
+  settings.defaultModel = saved.defaultModel;
+  try {
+    saveLocalSettings(localSettingsPayload());
+  } catch {
+    ElMessage.warning('账号 AI 配置已保存，但本地默认模型同步失败');
+  }
 }
 
 async function loadVersionInfo() {
@@ -162,34 +168,34 @@ function applyAISettings(data: AIModelSettings) {
 
 async function handleSave() {
   savingSettings.value = true;
-  try {
-    const savedExternal = await saveExternalSearchSettings(externalSearchSettings);
+  const externalSave = saveExternalSearchSettings(externalSearchSettings).then((savedExternal) => {
     externalSearchSettings.providers = savedExternal.providers.map((provider) => ({
       ...provider,
       apiKey: '',
       extra: '',
     }));
-    let localPreferencesSaved = true;
-    try {
-      saveLocalSettings({
-        ollamaBaseUrl: settings.ollamaBaseUrl,
-        defaultModel: settings.defaultModel,
-        externalSearchEnabled: settings.externalSearchEnabled,
-        externalProviderOrder: [...settings.externalProviderOrder],
-      });
-    } catch {
-      localPreferencesSaved = false;
-    }
-
-    ElMessage.success('外部检索设置已保存');
-    if (!localPreferencesSaved) {
-      ElMessage.warning('外部检索设置已保存，但本地偏好保存失败');
-    }
-  } catch {
-    ElMessage.error('外部检索设置保存失败');
+  });
+  const localSave = Promise.resolve().then(() => saveLocalSettings(localSettingsPayload()));
+  try {
+    const [externalResult, localResult] = await Promise.allSettled([externalSave, localSave]);
+    const externalSaved = externalResult.status === 'fulfilled';
+    const localSaved = localResult.status === 'fulfilled';
+    if (externalSaved && localSaved) ElMessage.success('外部检索设置和本地偏好已保存');
+    else if (externalSaved) ElMessage.warning('外部检索设置已保存，本地偏好保存失败');
+    else if (localSaved) ElMessage.warning('本地偏好已保存，外部检索设置保存失败');
+    else ElMessage.error('外部检索设置和本地偏好均保存失败');
   } finally {
     savingSettings.value = false;
   }
+}
+
+function localSettingsPayload() {
+  return {
+    ollamaBaseUrl: settings.ollamaBaseUrl,
+    defaultModel: settings.defaultModel,
+    externalSearchEnabled: settings.externalSearchEnabled,
+    externalProviderOrder: [...settings.externalProviderOrder],
+  };
 }
 
 async function handleValidateExternalProvider(provider: ExternalSearchProviderConfig) {
