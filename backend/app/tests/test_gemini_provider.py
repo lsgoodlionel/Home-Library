@@ -425,6 +425,75 @@ def test_generation_extracts_all_text_parts_from_exactly_one_usable_candidate(
     assert _run(client.generate_text("prompt")) == "first second"
 
 
+def test_generation_returns_text_only_when_exactly_one_mixed_candidate_is_safely_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "candidates": [
+            {
+                "finishReason": "IMAGE_SAFETY",
+                "content": {"role": "model", "parts": [{"text": "blocked image text"}]},
+            },
+            {
+                "finishReason": "STOP",
+                "safetyRatings": [
+                    {
+                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                        "probability": "HIGH",
+                        "blocked": True,
+                    }
+                ],
+                "content": {"role": "model", "parts": [{"text": "blocked rating text"}]},
+            },
+            {
+                "finishReason": "STOP",
+                "safetyRatings": [
+                    {
+                        "category": "HARM_CATEGORY_HARASSMENT",
+                        "probability": "NEGLIGIBLE",
+                        "blocked": False,
+                    }
+                ],
+                "content": {"role": "model", "parts": [{"text": "safe text"}]},
+            },
+        ]
+    }
+    client, _ = _client_with_transport(
+        monkeypatch,
+        lambda request: httpx.Response(200, json=payload),
+    )
+
+    assert _run(client.generate_text("prompt")) == "safe text"
+
+
+def test_generation_rejects_mixed_candidates_with_more_than_one_safely_usable_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "candidates": [
+            {
+                "finishReason": "IMAGE_SAFETY",
+                "content": {"role": "model", "parts": [{"text": "blocked"}]},
+            },
+            {
+                "finishReason": "STOP",
+                "content": {"role": "model", "parts": [{"text": "safe one"}]},
+            },
+            {
+                "finishReason": "MAX_TOKENS",
+                "content": {"role": "model", "parts": [{"text": "safe two"}]},
+            },
+        ]
+    }
+    client, _ = _client_with_transport(
+        monkeypatch,
+        lambda request: httpx.Response(200, json=payload),
+    )
+
+    with pytest.raises(AIProviderInvalidResponseError):
+        _run(client.generate_text("prompt"))
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -442,6 +511,31 @@ def test_generation_extracts_all_text_parts_from_exactly_one_usable_candidate(
             "candidates": [
                 {
                     "finishReason": "SAFETY",
+                    "content": {"role": "model", "parts": [{"text": "must not escape"}]},
+                }
+            ]
+        },
+        {
+            "candidates": [
+                {
+                    "finishReason": "IMAGE_SAFETY",
+                    "content": {"role": "model", "parts": [{"text": "must not escape"}]},
+                }
+            ]
+        },
+        {
+            "candidates": [
+                {
+                    "finishReason": "FUTURE_POLICY_BLOCK",
+                    "content": {"role": "model", "parts": [{"text": "must not escape"}]},
+                }
+            ]
+        },
+        {
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "safetyRatings": [{"blocked": True}],
                     "content": {"role": "model", "parts": [{"text": "must not escape"}]},
                 }
             ]
@@ -553,6 +647,126 @@ def test_generation_maps_native_http_failures_to_safe_error_classes(
 
     with pytest.raises(expected_error):
         _run(client.generate_text("prompt"))
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_error"),
+    [
+        (
+            {
+                "error": {
+                    "code": "rate_limit_exceeded",
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [
+                        {
+                            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                            "reason": "RATE_LIMIT_EXCEEDED",
+                        }
+                    ],
+                }
+            },
+            AIProviderRateLimitError,
+        ),
+        (
+            {
+                "error": {
+                    "code": "quota_exceeded",
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [
+                        {
+                            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                            "reason": "QUOTA_EXCEEDED",
+                        }
+                    ],
+                }
+            },
+            AIProviderQuotaError,
+        ),
+        (
+            {
+                "error": {
+                    "code": 429,
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [{"reason": "rate_limit_exceeded"}],
+                }
+            },
+            AIProviderRateLimitError,
+        ),
+        (
+            {
+                "error": {
+                    "code": 429,
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [{"reason": "quota_exceeded"}],
+                }
+            },
+            AIProviderQuotaError,
+        ),
+        (
+            {"error": {"code": 429, "status": "rate_limit_exceeded"}},
+            AIProviderRateLimitError,
+        ),
+        (
+            {"error": {"code": 429, "status": "quota_exceeded"}},
+            AIProviderQuotaError,
+        ),
+    ],
+    ids=[
+        "rate-code",
+        "quota-code",
+        "rate-detail",
+        "quota-detail",
+        "rate-status",
+        "quota-status",
+    ],
+)
+def test_429_uses_bounded_machine_fields_to_distinguish_rate_limit_and_quota(
+    monkeypatch: pytest.MonkeyPatch,
+    body: dict[str, Any],
+    expected_error: type[Exception],
+) -> None:
+    client, _ = _client_with_transport(
+        monkeypatch,
+        lambda request: httpx.Response(429, json=body),
+    )
+
+    with pytest.raises(expected_error):
+        _run(client.generate_text("prompt"))
+
+
+def test_malformed_and_oversized_429_use_safe_rate_limit_fallback_without_leaking_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declared_stream = _BodyReadProbe(b"declared-429-sensitive-marker")
+    actual_marker = b"streamed-429-sensitive-marker"
+    actual_stream = _BodyReadProbe(actual_marker + b"x" * MAX_RESPONSE_BYTES)
+    responses = iter(
+        [
+            httpx.Response(429, content=b"malformed-429-sensitive-marker"),
+            httpx.Response(
+                429,
+                headers={"Content-Length": str(MAX_RESPONSE_BYTES + 1)},
+                stream=declared_stream,
+            ),
+            httpx.Response(429, stream=actual_stream),
+        ]
+    )
+    client, _ = _client_with_transport(monkeypatch, lambda request: next(responses))
+
+    for prompt in ("malformed", "declared", "streamed"):
+        with pytest.raises(AIProviderRateLimitError) as captured:
+            _run(client.generate_text(prompt))
+        _assert_public_error_graph_is_safe(
+            captured.value,
+            {
+                "malformed-429-sensitive-marker",
+                "declared-429-sensitive-marker",
+                "streamed-429-sensitive-marker",
+            },
+        )
+
+    assert declared_stream.iterated is False
+    assert actual_stream.iterated is True
 
 
 @pytest.mark.parametrize(

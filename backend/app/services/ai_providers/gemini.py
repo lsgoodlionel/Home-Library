@@ -26,6 +26,7 @@ from app.services.ai_providers.base import (
     AIProviderModel,
     AIProviderModelList,
     AIProviderQuotaError,
+    AIProviderRateLimitError,
     AIProviderRuntime,
     map_provider_exception,
     run_provider_operation,
@@ -48,7 +49,8 @@ _MODEL_LIST_PATH = "/v1beta/models"
 _GENERATE_PATH_PREFIX = "/v1beta/models/"
 _GENERATE_PATH_SUFFIX = ":generateContent"
 _QUOTA_STATUS = "RESOURCE_EXHAUSTED"
-_BLOCKED_FINISH_REASONS = {"BLOCKLIST", "PROHIBITED_CONTENT", "RECITATION", "SAFETY", "SPII"}
+_QUOTA_ERROR_CODES = {"quota_exceeded"}
+_SAFE_FINISH_REASONS = {None, "MAX_TOKENS", "STOP"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,20 +174,26 @@ class GeminiProviderClient(Generic[ResponseT]):
             ) as response:
                 if 300 <= response.status_code < 400:
                     raise AIProviderInvalidConfigurationError(reason="redirect_not_allowed")
-                if response.status_code in {401, 402, 403, 404, 422, 429} or response.status_code >= 500:
+                if response.status_code in {401, 402, 403, 404, 422} or response.status_code >= 500:
                     response.raise_for_status()
 
                 content_length = response.headers.get("Content-Length")
                 if content_length is not None:
                     try:
                         if int(content_length) > MAX_RESPONSE_BYTES:
+                            if response.status_code == 429:
+                                raise AIProviderRateLimitError(status_code=429)
                             raise AIProviderInvalidResponseError()
                     except ValueError:
+                        if response.status_code == 429:
+                            raise AIProviderRateLimitError(status_code=429) from None
                         raise AIProviderInvalidResponseError() from None
 
                 body = bytearray()
                 async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
                     if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
+                        if response.status_code == 429:
+                            raise AIProviderRateLimitError(status_code=429)
                         raise AIProviderInvalidResponseError()
                     body.extend(chunk)
 
@@ -193,6 +201,10 @@ class GeminiProviderClient(Generic[ResponseT]):
                     parsed = json.loads(body)
                 except (TypeError, ValueError, json.JSONDecodeError):
                     parsed = None
+                if response.status_code == 429:
+                    if self._is_429_quota_payload(parsed):
+                        raise AIProviderQuotaError(status_code=429)
+                    raise AIProviderRateLimitError(status_code=429)
                 if response.status_code >= 400:
                     if self._is_quota_payload(parsed):
                         raise AIProviderQuotaError(status_code=response.status_code)
@@ -206,6 +218,28 @@ class GeminiProviderClient(Generic[ResponseT]):
         if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
             return False
         return payload["error"].get("status") == _QUOTA_STATUS
+
+    @staticmethod
+    def _is_429_quota_payload(payload: object) -> bool:
+        if not isinstance(payload, dict) or not isinstance(payload.get("error"), dict):
+            return False
+        error = payload["error"]
+        machine_codes: list[object] = [
+            error.get("code"),
+            error.get("reason"),
+            error.get("status"),
+        ]
+        details = error.get("details")
+        if isinstance(details, list):
+            for detail in details:
+                if isinstance(detail, dict):
+                    machine_codes.extend(
+                        (detail.get("code"), detail.get("reason"), detail.get("status"))
+                    )
+        return any(
+            isinstance(code, str) and code.casefold() in _QUOTA_ERROR_CODES
+            for code in machine_codes
+        )
 
     @staticmethod
     def _canonical_model_id(model: object) -> str:
@@ -311,7 +345,17 @@ class GeminiProviderClient(Generic[ResponseT]):
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 raise AIProviderInvalidResponseError()
-            if candidate.get("finishReason") in _BLOCKED_FINISH_REASONS:
+            if candidate.get("finishReason") not in _SAFE_FINISH_REASONS:
+                continue
+            safety_ratings = candidate.get("safetyRatings", [])
+            if not isinstance(safety_ratings, list):
+                raise AIProviderInvalidResponseError()
+            candidate_blocked = False
+            for rating in safety_ratings:
+                if not isinstance(rating, dict) or not isinstance(rating.get("blocked"), bool):
+                    raise AIProviderInvalidResponseError()
+                candidate_blocked = candidate_blocked or rating["blocked"]
+            if candidate_blocked:
                 continue
             content = candidate.get("content")
             if content is None:
