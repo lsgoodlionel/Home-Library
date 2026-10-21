@@ -1,4 +1,8 @@
-import type { OllamaRuntimeStatus } from './settings';
+import type {
+  AIProviderCredentialState,
+  AIProviderKey,
+  OllamaRuntimeStatus,
+} from './settings';
 
 export interface AIModel {
   name: string;
@@ -10,17 +14,44 @@ export interface AIModelsResponse {
   models: AIModel[];
 }
 
-export type AIHealthState = 'unchecked' | 'healthy' | 'error';
+export interface AIProviderModel {
+  provider: AIProviderKey;
+  id: string;
+  name: string;
+}
+
+export interface AIProviderDetails {
+  version?: string;
+  installedModelCount?: number;
+  runningModelCount?: number;
+  usesAccess?: boolean;
+  [key: string]: unknown;
+}
+
+export type AIHealthState = 'unchecked' | 'available' | 'unavailable' | 'healthy' | 'error';
 
 export interface AIHealthStatus {
+  provider?: AIProviderKey;
   status: AIHealthState;
   message: string;
   checkedAt: string | null;
-  version: string | null;
-  installedModelCount: number;
-  runningModelCount: number;
-  generated: boolean;
-  ollamaRuntime: OllamaRuntimeStatus | null;
+  effectiveModel?: string;
+  safeBaseUrl?: string;
+  credentialState?: AIProviderCredentialState;
+  models?: AIProviderModel[];
+  details?: AIProviderDetails;
+  version?: string | null;
+  installedModelCount?: number;
+  runningModelCount?: number;
+  generated?: boolean;
+  ollamaRuntime?: OllamaRuntimeStatus | null;
+}
+
+export interface AIProviderDraft {
+  provider?: AIProviderKey;
+  baseUrl?: string;
+  model?: string;
+  apiKey?: string;
 }
 
 export interface ClassifyBookRequest {

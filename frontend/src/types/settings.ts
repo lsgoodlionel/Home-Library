@@ -7,14 +7,28 @@ export interface AppSettings {
 
 export type AIProviderKey = 'ollama' | 'openai' | 'gemini' | 'deepseek' | 'moonshot' | 'qwen' | 'custom';
 
+export const AI_PROVIDER_LABELS: Readonly<Record<AIProviderKey, string>> = {
+  ollama: 'Ollama',
+  openai: 'OpenAI',
+  gemini: 'Google Gemini',
+  deepseek: 'DeepSeek',
+  moonshot: 'Kimi / Moonshot',
+  qwen: '通义千问',
+  custom: '自定义兼容服务',
+};
+
+export type AIProviderCredentialState = 'missing' | 'configured' | 'unusable';
+
 export interface AIProviderConfig {
   provider: AIProviderKey;
   enabled: boolean;
   baseUrl: string;
-  apiKey: string;
+  apiKey?: string;
+  clearApiKey?: boolean;
   defaultModel: string;
   note: string;
-  hasApiKey: boolean;
+  hasApiKey?: boolean;
+  credentialState: AIProviderCredentialState;
 }
 
 export interface OllamaRuntimeStatus {
@@ -70,6 +84,7 @@ export interface SystemAIConfigUpdate extends SystemAIAuth {
 }
 
 export interface AIModelSettings {
+  aiEnabled: boolean;
   activeProvider: AIProviderKey;
   defaultModel: string;
   providers: AIProviderConfig[];

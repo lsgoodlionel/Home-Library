@@ -111,13 +111,14 @@ interface ApiAIProviderConfig {
   provider: AIProviderKey;
   enabled: boolean;
   base_url: string;
-  api_key: string;
   default_model: string;
   note: string;
   has_api_key: boolean;
+  credential_state: AIProviderConfig['credentialState'];
 }
 
 interface ApiAISettingsResponse {
+  ai_enabled: boolean;
   active_provider: AIProviderKey;
   default_model: string;
   providers: ApiAIProviderConfig[];
@@ -207,10 +208,9 @@ function normalizeAIProvider(config: ApiAIProviderConfig): AIProviderConfig {
     provider: config.provider,
     enabled: config.enabled,
     baseUrl: config.base_url,
-    apiKey: config.api_key,
     defaultModel: config.default_model,
     note: config.note,
-    hasApiKey: config.has_api_key,
+    credentialState: config.credential_state,
   };
 }
 
@@ -311,6 +311,7 @@ export async function testSystemAIConfig(): Promise<AIHealthStatus> {
 
 function normalizeAISettings(data: ApiAISettingsResponse): AIModelSettings {
   return {
+    aiEnabled: data.ai_enabled,
     activeProvider: data.active_provider,
     defaultModel: data.default_model,
     providers: data.providers.map(normalizeAIProvider),
@@ -324,17 +325,23 @@ export async function fetchAIModelSettings(): Promise<AIModelSettings> {
 }
 
 export async function saveAIModelSettings(settings: AIModelSettings): Promise<AIModelSettings> {
-  const { data } = await apiClient.put<ApiAISettingsResponse>('/ai/config', {
-    active_provider: settings.activeProvider,
-    default_model: settings.defaultModel,
-    providers: settings.providers.map((provider) => ({
+  const providers = settings.providers.map((provider) => {
+    const payload: Record<string, unknown> = {
       provider: provider.provider,
       enabled: provider.enabled,
       base_url: provider.baseUrl,
-      api_key: provider.apiKey,
       default_model: provider.defaultModel,
       note: provider.note,
-    })),
+      clear_api_key: provider.clearApiKey === true,
+    };
+    if (provider.apiKey) payload.api_key = provider.apiKey;
+    return payload;
+  });
+  const { data } = await apiClient.put<ApiAISettingsResponse>('/ai/config', {
+    ai_enabled: settings.aiEnabled,
+    active_provider: settings.activeProvider,
+    default_model: settings.defaultModel,
+    providers,
   });
   return normalizeAISettings(data);
 }

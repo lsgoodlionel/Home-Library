@@ -5,7 +5,10 @@ import { getAIErrorMessage } from './aiErrors';
 describe('getAIErrorMessage', () => {
   it.each([
     ['AI_SERVICE_DISABLED', 'AI 服务尚未启用，请联系管理员完成服务器配置。'],
+    ['AI_CONFIG_INVALID', 'AI 服务配置无效，请检查当前服务商、地址、模型和凭据。'],
     ['AI_ACCESS_DENIED', 'Cloudflare Access 验证失败，请管理员检查服务器凭据和访问策略。'],
+    ['AI_QUOTA_EXCEEDED', 'AI 服务额度不足，请检查供应商账户余额或配额。'],
+    ['AI_RATE_LIMITED', 'AI 服务请求过于频繁，请稍后重试。'],
     ['AI_TUNNEL_UNAVAILABLE', '远程 AI 服务暂时不可用，请稍后重试或检查 Tunnel 状态。'],
     ['AI_CONNECT_TIMEOUT', '连接 AI 服务超时，请检查服务地址和网络连接。'],
     ['AI_RESPONSE_TIMEOUT', 'AI 模型响应超时，模型可能仍在启动，请稍后重试。'],

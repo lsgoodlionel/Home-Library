@@ -31,6 +31,7 @@ import ServerAISettingsPanel from '@/components/ai/ServerAISettingsPanel.vue';
 import { useAuthStore } from '@/stores/auth';
 import type { AIHealthStatus, AIModel, ClassifyBookResponse } from '@/types/ai';
 import type { BookListItem, CategoryOption } from '@/types/book';
+import { AI_PROVIDER_LABELS } from '@/types/settings';
 import type {
   AIModelSettings,
   AIProviderConfig,
@@ -79,6 +80,7 @@ const emptyOllamaRuntime: OllamaRuntimeStatus = {
 
 const settings = reactive(loadLocalSettings());
 const aiSettings = reactive<AIModelSettings>({
+  aiEnabled: true,
   activeProvider: 'ollama',
   defaultModel: '',
   providers: [],
@@ -110,15 +112,7 @@ const modelOptions = computed(() => {
   }
   return names;
 });
-const aiProviderLabels: Record<AIProviderKey, string> = {
-  ollama: 'Ollama',
-  openai: 'OpenAI',
-  gemini: 'Google Gemini',
-  deepseek: 'DeepSeek',
-  moonshot: 'Kimi / Moonshot',
-  qwen: '通义千问',
-  custom: '自定义兼容接口',
-};
+const aiProviderLabels = AI_PROVIDER_LABELS;
 const externalProviderLabels: Record<ExternalSearchProviderKey, string> = {
   google_books: 'Google Books',
   isbn_work: 'ISBN Work',
@@ -307,6 +301,7 @@ async function handleSave() {
     let externalSaved = false;
     const aiSave = (async () => {
       const savedAI = await saveAIModelSettings({
+        aiEnabled: aiSettings.aiEnabled,
         activeProvider: aiSettings.activeProvider,
         defaultModel: aiSettings.defaultModel,
         providers: aiSettings.providers,

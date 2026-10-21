@@ -2,6 +2,7 @@ import { API_TIMEOUTS, apiClient } from './client';
 import type {
   AIHealthStatus,
   AIModel,
+  AIProviderDraft,
   ClassifyBookRequest,
   ClassifyBookResponse,
   DetectDuplicateRequest,
@@ -13,7 +14,7 @@ import type {
   SummarizeBookRequest,
   SummarizeBookResponse,
 } from '@/types/ai';
-import type { OllamaRuntimeStatus } from '@/types/settings';
+import type { AIProviderKey, OllamaRuntimeStatus } from '@/types/settings';
 
 interface ApiAIModelsResponse {
   models: Array<{ name: string; size?: string; modified_at?: string }>;
@@ -30,7 +31,7 @@ interface ApiOllamaRuntimeStatus {
   uses_access: boolean;
 }
 
-interface ApiAIHealthResponse {
+interface ApiOllamaHealthResponse {
   status: AIHealthStatus['status'];
   message: string;
   checked_at?: string | null;
@@ -39,6 +40,24 @@ interface ApiAIHealthResponse {
   running_model_count: number;
   generated: boolean;
   ollama_runtime?: ApiOllamaRuntimeStatus | null;
+}
+
+interface ApiAIProviderModel {
+  provider: AIProviderKey;
+  id: string;
+  name: string;
+}
+
+interface ApiAIProviderHealthResponse {
+  provider: AIProviderKey;
+  status: 'available' | 'unavailable' | 'unchecked';
+  message: string;
+  checked_at?: string | null;
+  effective_model: string;
+  safe_base_url: string;
+  credential_state: 'missing' | 'configured' | 'unusable';
+  models: ApiAIProviderModel[];
+  details: Record<string, unknown>;
 }
 
 function normalizeOllamaRuntime(data: ApiOllamaRuntimeStatus): OllamaRuntimeStatus {
@@ -54,7 +73,7 @@ function normalizeOllamaRuntime(data: ApiOllamaRuntimeStatus): OllamaRuntimeStat
   };
 }
 
-function normalizeAIHealth(data: ApiAIHealthResponse): AIHealthStatus {
+function normalizeOllamaHealth(data: ApiOllamaHealthResponse): AIHealthStatus {
   return {
     status: data.status,
     message: data.message,
@@ -65,6 +84,58 @@ function normalizeAIHealth(data: ApiAIHealthResponse): AIHealthStatus {
     generated: data.generated,
     ollamaRuntime: data.ollama_runtime ? normalizeOllamaRuntime(data.ollama_runtime) : null,
   };
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === 'number' ? value : undefined;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function normalizeProviderHealth(data: ApiAIProviderHealthResponse): AIHealthStatus {
+  const details = data.details || {};
+  return {
+    provider: data.provider,
+    status: data.status,
+    message: data.message,
+    checkedAt: data.checked_at || null,
+    effectiveModel: data.effective_model,
+    safeBaseUrl: data.safe_base_url,
+    credentialState: data.credential_state,
+    models: data.models.map((model) => ({ ...model })),
+    details: {
+      ...details,
+      version: optionalString(details.version),
+      installedModelCount: optionalNumber(details.installed_model_count),
+      runningModelCount: optionalNumber(details.running_model_count),
+      usesAccess: typeof details.uses_access === 'boolean' ? details.uses_access : undefined,
+    },
+  };
+}
+
+function providerDraftBody(draft?: AIProviderDraft): Record<string, string> {
+  const body: Record<string, string> = {};
+  if (!draft) return body;
+  if (draft.provider) body.provider = draft.provider;
+  if (draft.baseUrl) body.base_url = draft.baseUrl;
+  if (draft.model) body.model = draft.model;
+  if (draft.apiKey) body.api_key = draft.apiKey;
+  return body;
+}
+
+async function runProviderOperation(
+  provider: AIProviderKey,
+  operation: 'test' | 'models' | 'generate-test',
+  draft: AIProviderDraft | undefined,
+): Promise<AIHealthStatus> {
+  const { data } = await apiClient.post<ApiAIProviderHealthResponse>(
+    `/ai/providers/${provider}/${operation}`,
+    providerDraftBody(draft),
+    { timeout: operation === 'generate-test' ? API_TIMEOUTS.aiGeneration : API_TIMEOUTS.aiHealth },
+  );
+  return normalizeProviderHealth(data);
 }
 
 interface ApiClassifyBookResponse {
@@ -137,20 +208,32 @@ export async function getAIModels(): Promise<AIModel[]> {
 }
 
 export async function fetchAIHealth(refresh = false): Promise<AIHealthStatus> {
-  const { data } = await apiClient.get<ApiAIHealthResponse>('/ai/health', {
+  const { data } = await apiClient.get<ApiAIProviderHealthResponse>('/ai/health', {
     params: { refresh },
     timeout: API_TIMEOUTS.aiHealth,
   });
-  return normalizeAIHealth(data);
+  return normalizeProviderHealth(data);
+}
+
+export function testAIProvider(provider: AIProviderKey, draft?: AIProviderDraft): Promise<AIHealthStatus> {
+  return runProviderOperation(provider, 'test', draft);
+}
+
+export function fetchAIProviderModels(provider: AIProviderKey, draft?: AIProviderDraft): Promise<AIHealthStatus> {
+  return runProviderOperation(provider, 'models', draft);
+}
+
+export function generateAIProviderTest(provider: AIProviderKey, draft?: AIProviderDraft): Promise<AIHealthStatus> {
+  return runProviderOperation(provider, 'generate-test', draft);
 }
 
 export async function testAIConnection(generate: boolean): Promise<AIHealthStatus> {
-  const { data } = await apiClient.post<ApiAIHealthResponse>(
+  const { data } = await apiClient.post<ApiOllamaHealthResponse>(
     '/ai/test-connection',
     { generate },
     { timeout: generate ? API_TIMEOUTS.aiGeneration : API_TIMEOUTS.aiHealth },
   );
-  return normalizeAIHealth(data);
+  return normalizeOllamaHealth(data);
 }
 
 export async function classifyBook(req: ClassifyBookRequest): Promise<ClassifyBookResponse> {

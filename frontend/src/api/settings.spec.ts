@@ -7,6 +7,7 @@ import {
   fetchSystemAIModels,
   fetchSystemAIConfig,
   resetSystemAIConfig,
+  saveAIModelSettings,
   saveSystemAIConfig,
   testSystemAIConfig,
 } from './settings';
@@ -29,6 +30,79 @@ afterEach(() => {
 });
 
 describe('AI settings API normalization', () => {
+  it('normalizes AI disabled and provider credential states', async () => {
+    vi.spyOn(apiClient, 'get').mockResolvedValue({
+      data: {
+        ai_enabled: false,
+        active_provider: 'openai',
+        default_model: 'gpt-5-mini',
+        providers: [{
+          provider: 'openai',
+          enabled: true,
+          base_url: 'https://api.openai.com/v1',
+          default_model: 'gpt-5-mini',
+          note: '',
+          credential_state: 'unusable',
+          has_api_key: false,
+        }],
+        ollama_runtime: runtimePayload,
+      },
+    });
+
+    const settings = await fetchAIModelSettings();
+
+    expect(settings.aiEnabled).toBe(false);
+    expect(settings.providers[0].credentialState).toBe('unusable');
+    expect(settings.providers[0]).not.toHaveProperty('apiKey');
+  });
+
+  it.each([
+    ['preserves a saved key when draft is empty', '', false, false],
+    ['replaces a saved key when a draft is present', 'replacement-key', false, true],
+    ['clears a saved key only with the explicit flag', '', true, false],
+  ])('%s', async (_label, apiKey, clearApiKey, includesKey) => {
+    const put = vi.spyOn(apiClient, 'put').mockResolvedValue({
+      data: {
+        ai_enabled: true,
+        active_provider: 'openai',
+        default_model: 'gpt-5-mini',
+        providers: [],
+        ollama_runtime: runtimePayload,
+      },
+    });
+
+    await saveAIModelSettings({
+      aiEnabled: true,
+      activeProvider: 'openai',
+      defaultModel: 'gpt-5-mini',
+      providers: [{
+        provider: 'openai',
+        enabled: true,
+        baseUrl: 'https://api.openai.com/v1',
+        defaultModel: 'gpt-5-mini',
+        note: '',
+        credentialState: 'configured',
+        apiKey,
+        clearApiKey,
+      }],
+      ollamaRuntime: {
+        enabled: true,
+        baseUrl: runtimePayload.base_url,
+        defaultModel: runtimePayload.default_model,
+        connectTimeoutSeconds: 20,
+        readTimeoutSeconds: 180,
+        verifyTls: true,
+        accessConfigured: true,
+        usesAccess: true,
+      },
+    });
+
+    const body = put.mock.calls[0][1] as { providers: Array<Record<string, unknown>> };
+    expect(body).toMatchObject({ ai_enabled: true });
+    expect(body.providers[0].clear_api_key).toBe(clearApiKey);
+    expect(body.providers[0].hasOwnProperty('api_key')).toBe(includesKey);
+  });
+
   it('loads server models from the server-only endpoint', async () => {
     const get = vi.spyOn(apiClient, 'get').mockResolvedValue({
       data: { models: [{ name: 'qwen3.5:4b', size: '3.2 GB', modified_at: '2026-10-21T00:00:00Z' }] },
@@ -76,31 +150,37 @@ describe('AI settings API normalization', () => {
   it('reads cached health by default and normalizes health fields', async () => {
     const get = vi.spyOn(apiClient, 'get').mockResolvedValue({
       data: {
-        status: 'healthy',
+        provider: 'ollama',
+        status: 'available',
         message: 'AI 服务连接正常',
         checked_at: '2026-10-20T08:00:00Z',
-        version: '0.12.6',
-        installed_model_count: 3,
-        running_model_count: 1,
-        generated: false,
-        ollama_runtime: runtimePayload,
+        effective_model: 'qwen3.5:4b',
+        safe_base_url: 'https://openclaw.lsgood.cn',
+        credential_state: 'configured',
+        models: [],
+        details: {
+          version: '0.12.6',
+          installed_model_count: 3,
+          running_model_count: 1,
+          uses_access: true,
+        },
       },
     });
 
     const health = await fetchAIHealth();
 
     expect(get).toHaveBeenCalledWith('/ai/health', expect.objectContaining({ params: { refresh: false } }));
-    expect(health.installedModelCount).toBe(3);
-    expect(health.runningModelCount).toBe(1);
-    expect(health.ollamaRuntime?.accessConfigured).toBe(true);
-    expect(health.ollamaRuntime?.usesAccess).toBe(true);
+    expect(health.details?.installedModelCount).toBe(3);
+    expect(health.details?.runningModelCount).toBe(1);
+    expect(health.details?.usesAccess).toBe(true);
+    expect(health).not.toHaveProperty('ollamaRuntime');
     expect(JSON.stringify(health)).not.toContain('must-not-be-normalized');
   });
 
   it('separates active checks, ordinary tests, and explicit generation timeouts', async () => {
     expect(API_TIMEOUTS.aiHealth).toBe(240_000);
     expect(API_TIMEOUTS.aiGeneration).toBe(240_000);
-    const payload = {
+    const ollamaPayload = {
       status: 'healthy',
       message: 'AI 服务连接正常',
       checked_at: '2026-10-20T08:00:00Z',
@@ -110,8 +190,20 @@ describe('AI settings API normalization', () => {
       generated: false,
       ollama_runtime: runtimePayload,
     };
-    const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: payload });
-    const post = vi.spyOn(apiClient, 'post').mockResolvedValue({ data: payload });
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue({
+      data: {
+        provider: 'ollama',
+        status: 'available',
+        message: 'AI 服务连接正常',
+        checked_at: '2026-10-20T08:00:00Z',
+        effective_model: 'qwen3.5:4b',
+        safe_base_url: 'https://openclaw.lsgood.cn',
+        credential_state: 'configured',
+        models: [],
+        details: {},
+      },
+    });
+    const post = vi.spyOn(apiClient, 'post').mockResolvedValue({ data: ollamaPayload });
 
     await fetchAIHealth(true);
     await testAIConnection(false);

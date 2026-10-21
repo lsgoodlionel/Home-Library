@@ -115,6 +115,7 @@ const systemConfig: SystemAIConfig = {
 
 function settings(runtime = currentRuntime): AIModelSettings {
   return {
+    aiEnabled: true,
     activeProvider: 'ollama',
     defaultModel: runtime.defaultModel,
     providers: [{
@@ -125,6 +126,7 @@ function settings(runtime = currentRuntime): AIModelSettings {
       defaultModel: runtime.defaultModel,
       note: 'Ollama',
       hasApiKey: false,
+      credentialState: 'configured',
     }],
     ollamaRuntime: runtime,
   };
