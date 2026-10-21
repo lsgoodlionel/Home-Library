@@ -9,6 +9,7 @@ from .reading_note import ReadingNote
 from .external_book_result import ExternalBookResult
 from .ai_task import AITask
 from .user_ai_setting import UserAISetting
+from .user_ai_provider_credential import UserAIProviderCredential
 from .user_external_search_setting import UserExternalSearchSetting
 from .system_ai_setting import SystemAISetting
 from .system_config_audit import SystemConfigAudit
@@ -26,6 +27,7 @@ __all__ = [
     "ExternalBookResult",
     "AITask",
     "UserAISetting",
+    "UserAIProviderCredential",
     "UserExternalSearchSetting",
     "SystemAISetting",
     "SystemConfigAudit",
