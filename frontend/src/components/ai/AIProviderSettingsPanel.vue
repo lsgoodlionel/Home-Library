@@ -105,6 +105,7 @@ function invalidateProvider(provider: ProviderDraftState): void {
 }
 
 async function runOperation(provider: ProviderDraftState, operation: 'test' | 'models' | 'generate'): Promise<void> {
+  if (!mounted || !aiEnabled.value || !provider.enabled) return;
   const sequence = nextSequence(provider.provider);
   const snapshot = `${aiEnabled.value}:${operationSnapshot(provider)}`;
   provider.loading = operation;
@@ -134,7 +135,9 @@ async function runOperation(provider: ProviderDraftState, operation: 'test' | 'm
 }
 
 async function confirmGenerate(provider: ProviderDraftState): Promise<void> {
-  if (generationLocks.has(provider.provider)) return;
+  if (!mounted || !aiEnabled.value || !provider.enabled || generationLocks.has(provider.provider)) return;
+  const snapshot = operationSnapshot(provider);
+  const sequence = requestSequences.get(provider.provider) || 0;
   generationLocks.add(provider.provider);
   provider.loading = 'generate';
   try {
@@ -143,6 +146,9 @@ async function confirmGenerate(provider: ProviderDraftState): Promise<void> {
       '确认生成测试',
       { type: 'warning', confirmButtonText: '继续生成测试', cancelButtonText: '取消' },
     );
+    if (!mounted || !aiEnabled.value || !provider.enabled
+      || (requestSequences.get(provider.provider) || 0) !== sequence
+      || operationSnapshot(provider) !== snapshot) return;
     await runOperation(provider, 'generate');
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error('生成测试确认失败');
@@ -249,9 +255,9 @@ onBeforeUnmount(() => {
             </el-form-item>
           </div>
           <div class="provider-actions">
-            <el-button :icon="Connection" :loading="provider.loading === 'test'" @click="runOperation(provider, 'test')">测试连接</el-button>
-            <el-button :icon="Refresh" :loading="provider.loading === 'models'" @click="runOperation(provider, 'models')">刷新模型</el-button>
-            <el-button type="warning" plain :icon="Promotion" :loading="provider.loading === 'generate'" @click="confirmGenerate(provider)">生成测试</el-button>
+            <el-button :icon="Connection" :disabled="!aiEnabled || !provider.enabled" :loading="provider.loading === 'test'" @click="runOperation(provider, 'test')">测试连接</el-button>
+            <el-button :icon="Refresh" :disabled="!aiEnabled || !provider.enabled" :loading="provider.loading === 'models'" @click="runOperation(provider, 'models')">刷新模型</el-button>
+            <el-button type="warning" plain :icon="Promotion" :disabled="!aiEnabled || !provider.enabled" :loading="provider.loading === 'generate'" @click="confirmGenerate(provider)">生成测试</el-button>
           </div>
           <el-alert v-if="provider.result" class="operation-result" :closable="false" :title="provider.result" />
         </section>

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Awaitable, Callable, TypeVar
 
 from fastapi import APIRouter, Depends
-from pydantic import SecretStr
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -106,46 +105,23 @@ def _resolve_saved_runtime(db: Session, user: User) -> AIProviderRuntime:
         _raise_provider_api_error(exc)
 
 
-def _draft_runtime(
-    saved: AIProviderRuntime,
-    path_provider: str,
-    draft: AIProviderOperationRequest,
-) -> AIProviderRuntime:
-    if saved.provider != path_provider or (
-        draft.provider is not None and draft.provider != path_provider
-    ):
-        raise _provider_api_error(AIProviderInvalidConfigurationError(), saved) from None
-
-    credential = saved.credential
-    replacement = draft.api_key.get_secret_value() if draft.api_key is not None else None
-    if replacement:
-        if path_provider == "ollama":
-            replacement = ""
-            raise _provider_api_error(AIProviderInvalidConfigurationError(), saved) from None
-        credential = SecretStr(replacement)
-    replacement = ""
-    return replace(
-        saved,
-        base_url=draft.base_url or saved.base_url,
-        default_model=draft.model or saved.default_model,
-        credential=credential,
-        credential_state=("configured" if credential is not None else saved.credential_state),
-    )
-
-
 def _runtime_for_request(
     db: Session,
     user: User,
     path_provider: str,
     draft: AIProviderOperationRequest,
 ) -> _RuntimeSnapshot:
-    saved = _resolve_saved_runtime(db, user)
     try:
+        if draft.provider is not None and draft.provider != path_provider:
+            raise AIProviderInvalidConfigurationError()
         replacement = draft.api_key.get_secret_value() if draft.api_key is not None else None
         use_shared_cache = not replacement and draft.base_url is None and draft.model is None
         replacement = ""
         return _RuntimeSnapshot(
-            runtime=_draft_runtime(saved, path_provider, draft),
+            runtime=runtime_service.resolve_ai_provider_operation_runtime(
+                db, user, path_provider, base_url=draft.base_url, model=draft.model,
+                credential=draft.api_key,
+            ),
             user_id=user.id,
             use_shared_cache=use_shared_cache,
         )

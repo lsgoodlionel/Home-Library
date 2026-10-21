@@ -224,12 +224,34 @@ def _load_health_context(
     user: User,
     *,
     server_only: bool = False,
-) -> tuple[OllamaRuntimeConfig, OllamaRuntimeStatus]:
-    runtime = (
-        get_server_ollama_runtime_config(db)
-        if server_only
-        else get_ollama_runtime_config(db, user)
-    )
+) -> tuple[OllamaRuntimeConfig, OllamaRuntimeStatus] | _SafeApiFailure:
+    if server_only:
+        runtime = get_server_ollama_runtime_config(db)
+        return runtime, _safe_runtime_status(runtime)
+    try:
+        provider_runtime = runtime_service.resolve_ai_provider_runtime(db, user)
+        if provider_runtime.provider != "ollama" or provider_runtime.ollama is None:
+            raise AIProviderInvalidConfigurationError()
+        client_id, client_secret = provider_runtime.ollama.get_access_credentials()
+        runtime = OllamaRuntimeConfig(
+            enabled=provider_runtime.enabled,
+            base_url=provider_runtime.base_url,
+            trusted_base_url=provider_runtime.ollama.trusted_base_url,
+            default_model=provider_runtime.default_model,
+            connect_timeout_seconds=provider_runtime.connect_timeout_seconds,
+            read_timeout_seconds=provider_runtime.read_timeout_seconds,
+            verify_tls=provider_runtime.verify_tls,
+            access_client_id=client_id,
+            access_client_secret=client_secret,
+        )
+    except Exception as exc:
+        from app.api.routes.ai_providers import _provider_api_error
+
+        failure = _SafeApiFailure(_provider_api_error(exc))
+        exc.__traceback__ = None
+        exc.__cause__ = None
+        exc.__context__ = None
+        return failure
     return runtime, _safe_runtime_status(runtime)
 
 
@@ -451,14 +473,18 @@ async def _probe_ollama_health(
     server_only: bool = False,
 ) -> AIHealthResponse | _SafeApiFailure:
     if server_only:
-        runtime, safe_runtime = await run_in_threadpool(
+        context = await run_in_threadpool(
             _load_health_context,
             db,
             user,
             server_only=True,
         )
     else:
-        runtime, safe_runtime = await run_in_threadpool(_load_health_context, db, user)
+        context = await run_in_threadpool(_load_health_context, db, user)
+    if isinstance(context, _SafeApiFailure):
+        return context
+    runtime, safe_runtime = context
+    del context
     fingerprint = _runtime_fingerprint(runtime)
     disabled_error = _disabled_api_error(runtime)
     if disabled_error is not None:

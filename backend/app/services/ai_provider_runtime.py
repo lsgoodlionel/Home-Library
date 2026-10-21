@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from pydantic import SecretStr
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -175,14 +176,17 @@ def _resolve_cloud_runtime(
     provider: str,
     config: dict[str, object],
     model: str,
+    credential_override: SecretStr | None = None,
 ) -> AIProviderRuntime:
-    state = get_provider_credential_state(db, user.id, provider)
-    if state != "configured":
-        raise _invalid_configuration() from None
-    try:
-        credential = get_provider_api_key(db, user.id, provider)
-    except CredentialCryptoError:
-        raise _invalid_configuration() from None
+    credential = credential_override.get_secret_value() if credential_override is not None else ""
+    if not credential:
+        state = get_provider_credential_state(db, user.id, provider)
+        if state != "configured":
+            raise _invalid_configuration() from None
+        try:
+            credential = get_provider_api_key(db, user.id, provider)
+        except CredentialCryptoError:
+            raise _invalid_configuration() from None
     if not credential:
         raise _invalid_configuration() from None
 
@@ -212,6 +216,60 @@ def resolve_ai_provider_runtime(db: Session, user: User) -> AIProviderRuntime:
     if provider == "ollama":
         return _resolve_ollama_runtime(db, config, model)
     return _resolve_cloud_runtime(db, user, provider, config, model)
+
+
+def resolve_ai_provider_operation_runtime(
+    db: Session,
+    user: User,
+    provider: str,
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+    credential: SecretStr | None = None,
+) -> AIProviderRuntime:
+    """Resolve an explicitly requested diagnostic without changing account selection."""
+    setting = db.query(UserAISetting).filter_by(user_id=user.id).first()
+    if setting is not None and not setting.ai_enabled:
+        raise AIProviderDisabledError() from None
+    if provider not in _KNOWN_PROVIDERS:
+        raise _invalid_configuration() from None
+    if setting is None:
+        configs = default_provider_configs()
+        if provider == "ollama":
+            server = _get_effective_server_ai_state(db).config
+            configs[provider]["base_url"] = server.default_base_url
+            configs[provider]["default_model"] = server.default_model
+    else:
+        try:
+            configs = json.loads(setting.provider_configs)
+        except (TypeError, ValueError, RecursionError):
+            raise _invalid_configuration() from None
+    if not isinstance(configs, dict):
+        raise _invalid_configuration() from None
+    saved = configs.get(provider)
+    if not isinstance(saved, dict) or saved.get("provider") != provider:
+        raise _invalid_configuration() from None
+    config = dict(saved)
+    replacement = credential is not None and bool(credential.get_secret_value())
+    has_draft = base_url is not None or model is not None or replacement
+    if not has_draft and config.get("enabled") is not True:
+        raise _invalid_configuration() from None
+    if base_url is not None:
+        config["base_url"] = base_url
+    if model is not None:
+        config["default_model"] = model
+    selected_model = config.get("default_model")
+    selected_url = config.get("base_url")
+    if (not isinstance(selected_model, str) or not selected_model
+            or selected_model != selected_model.strip()
+            or not isinstance(selected_url, str) or not selected_url
+            or selected_url != selected_url.strip()):
+        raise _invalid_configuration() from None
+    if provider == "ollama":
+        if replacement:
+            raise _invalid_configuration() from None
+        return _resolve_ollama_runtime(db, config, selected_model)
+    return _resolve_cloud_runtime(db, user, provider, config, selected_model, credential)
 
 
 def _validate_cloud_factory_runtime(runtime: AIProviderRuntime) -> None:
@@ -307,4 +365,5 @@ __all__ = [
     "create_ai_provider_client",
     "provider_runtime_fingerprint",
     "resolve_ai_provider_runtime",
+    "resolve_ai_provider_operation_runtime",
 ]

@@ -29,6 +29,7 @@ from app.services.ai_health_status_cache import (
     provider_model_cache,
 )
 from app.services.ai_providers import ollama as ollama_provider
+from app.services.ai_providers.base import AIProviderRuntime, OllamaProviderRuntimeOptions
 from app.services.ai_setting_service import OllamaRuntimeConfig, get_ollama_runtime_config
 from app.services.ollama_client import OllamaUpstreamError
 from app.tests.conftest import make_user
@@ -321,12 +322,27 @@ def test_health_refresh_uses_one_immutable_runtime_snapshot(
     former_second_read_called = threading.Event()
     probed_runtimes: list[OllamaRuntimeConfig] = []
 
-    def resolve_probe_runtime(*args) -> OllamaRuntimeConfig:
+    def resolve_probe_runtime(*args) -> AIProviderRuntime:
         del args
         snapshot = runtime_state["value"]
         first_snapshot_captured.set()
         assert release_first_snapshot.wait(timeout=2)
-        return snapshot
+        return AIProviderRuntime(
+            provider="ollama",
+            enabled=snapshot.enabled,
+            base_url=snapshot.base_url,
+            default_model=snapshot.default_model,
+            credential_state="configured",
+            connect_timeout_seconds=snapshot.connect_timeout_seconds,
+            read_timeout_seconds=snapshot.read_timeout_seconds,
+            verify_tls=snapshot.verify_tls,
+            ollama=OllamaProviderRuntimeOptions(
+                trusted_base_url=snapshot.trusted_base_url,
+                access_client_id=snapshot.access_client_id,
+                access_client_secret=snapshot.access_client_secret,
+                uses_access=True,
+            ),
+        )
 
     def resolve_reported_runtime(*args):
         del args
@@ -338,7 +354,11 @@ def test_health_refresh_uses_one_immutable_runtime_snapshot(
             super().__init__(runtime)
             probed_runtimes.append(runtime)
 
-    monkeypatch.setattr(ai_routes, "get_ollama_runtime_config", resolve_probe_runtime)
+    monkeypatch.setattr(
+        ai_routes.runtime_service,
+        "resolve_ai_provider_runtime",
+        resolve_probe_runtime,
+    )
     monkeypatch.setattr(ai_routes, "get_effective_ai_settings", resolve_reported_runtime)
     monkeypatch.setattr(ai_routes, "OllamaClient", CapturingClient)
 

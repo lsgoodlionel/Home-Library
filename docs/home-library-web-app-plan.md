@@ -1038,4 +1038,4 @@ Task 7 采用独立 Docker 数据库和回环 HTTPS 进行迁移、受控 Access
 
 2026-10-21 补充 AI 故障诊断：连接测试不再把所有非 HTTP 故障压缩成“上游 AI 服务异常”。后端只公开白名单中的 `connection_failed`、`request_failed`、规范化 hostname 和数字 HTTP 状态；设置页保存后自动测试、手动测试及通用 AI 错误提示据此显示具体中文原因，仍拒绝透传原始异常、响应正文和凭据。
 
-2026-10-21 多服务商 AI Tasks 1–10 已实现账号级 Ollama、OpenAI、Gemini、DeepSeek、Moonshot/Kimi、Qwen 与自定义 OpenAI-compatible 配置、加密凭据、provider-aware runtime/API 和设置页。Task 11 已补 `0002 -> 0003` 加密迁移/重载/切换/AI off-on/非 AI route 集成覆盖，并把 `AI_PROVIDER_ALLOWED_PRIVATE_ORIGINS` 以 default-empty 显式传入开发和生产 Compose。浏览器 workflow spec 已建立 deterministic mock；当前本机 Chrome 运行中 provider panel 空载问题在两次同类修复后仍复现，按协作约定停止第三轮，保留给控制器的新任务诊断。Docker build/up、隔离 browser acceptance 和真实 provider smoke 仍由交付控制器执行。
+2026-10-21 多服务商 AI Tasks 1–11 已实现账号级 Ollama、OpenAI、Gemini、DeepSeek、Moonshot/Kimi、Qwen 与自定义 OpenAI-compatible 配置、加密凭据、provider-aware runtime/API 和设置页。Task 11 已补 `0002 -> 0003` 加密迁移/重载/切换/AI off-on/非 AI route 集成覆盖，并把 `AI_PROVIDER_ALLOWED_PRIVATE_ORIGINS` 以 default-empty 显式传入开发和生产 Compose。Playwright 已隔离到当前工作树服务，8 项浏览器流程全部通过；当前源码的隔离 Docker 构建、健康检查和设置页验收通过。Cloudflare Access 的缺失/错误凭据拒绝、授权模型列表及 `qwen3.5:4b` 最小生成均已完成脱敏验证。最终审查同时修复了账号停用绕过、非当前服务商草稿诊断、过期生成确认和局部更新重置选择四个问题。

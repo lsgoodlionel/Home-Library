@@ -265,6 +265,40 @@ describe('AIProviderSettingsPanel', () => {
     expect(mocks.fetchAIProviderModels).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['测试连接', '刷新模型', '生成测试'])('sends no manual %s request while local account AI is off', async (label) => {
+    const loaded = settings();
+    loaded.aiEnabled = false;
+    mocks.fetchAIModelSettings.mockResolvedValueOnce(loaded);
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never);
+    const wrapper = await mountPanel();
+    await button(providerPanel(wrapper, 'openai'), label).trigger('click');
+    await flushPromises();
+    expect(mocks.testAIProvider).not.toHaveBeenCalled();
+    expect(mocks.fetchAIProviderModels).not.toHaveBeenCalled();
+    expect(mocks.generateAIProviderTest).not.toHaveBeenCalled();
+  });
+
+  it.each(['account off', 'provider off', 'model changed', 'key changed', 'unmount'])('does not generate after pending confirmation becomes stale: %s', async (change) => {
+    let confirm!: (value: string) => void;
+    vi.spyOn(ElMessageBox, 'confirm').mockImplementationOnce(() => new Promise((resolve) => {
+      confirm = resolve;
+    }) as never);
+    const wrapper = await mountPanel();
+    const key = change === 'provider off' ? 'ollama' : 'openai';
+    const panel = providerPanel(wrapper, key);
+    void button(panel, '生成测试').trigger('click');
+    await flushPromises();
+    expect(mocks.generateAIProviderTest).not.toHaveBeenCalled();
+    if (change === 'account off') await wrapper.get('[data-testid="account-ai-enabled"]').trigger('click');
+    else if (change === 'provider off') await panel.get('[data-testid="provider-enabled"]').trigger('click');
+    else if (change === 'model changed') await panel.findComponent({ name: 'ElSelect' }).setValue('changed-model');
+    else if (change === 'key changed') await panel.get('input[data-testid="provider-api-key"]').setValue('changed-key');
+    else wrapper.unmount();
+    confirm('confirm');
+    await flushPromises();
+    expect(mocks.generateAIProviderTest).not.toHaveBeenCalled();
+  });
+
   it('uses one generation confirmation and request while the provider mutex is held', async () => {
     let settleConfirm!: (value: string) => void;
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockImplementationOnce(() => new Promise((resolve) => {

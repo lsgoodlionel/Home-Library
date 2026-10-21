@@ -345,6 +345,12 @@ def _update_user_ai_settings_outcome(
             if "ai_enabled" in payload.model_fields_set
             else setting.ai_enabled
         )
+        active_provider = (
+            payload.active_provider if "active_provider" in payload.model_fields_set else setting.active_provider
+        )
+        default_model = (
+            payload.default_model if "default_model" in payload.model_fields_set else setting.default_model
+        )
         credential_states = _credential_states(db, user.id, configs)
         for provider, ciphertext, clear_api_key in credential_updates:
             if clear_api_key:
@@ -354,14 +360,14 @@ def _update_user_ai_settings_outcome(
 
         validate_account_ai_selection(
             ai_enabled,
-            payload.active_provider,
+            active_provider,
             configs,
             credential_states,
         )
         active_model = str(
-            configs[payload.active_provider].get("default_model") or ""
+            configs[active_provider].get("default_model") or ""
         ).strip()
-        if ai_enabled and payload.default_model != active_model:
+        if ai_enabled and default_model != active_model:
             raise ApiError(
                 "AI_CONFIG_INVALID",
                 "账号默认模型必须与当前 AI 服务商默认模型一致",
@@ -378,8 +384,8 @@ def _update_user_ai_settings_outcome(
             )
 
         setting.ai_enabled = ai_enabled
-        setting.active_provider = payload.active_provider
-        setting.default_model = payload.default_model
+        setting.active_provider = active_provider
+        setting.default_model = default_model
         setting.provider_configs = _encode_configs(configs)
         setting.updated_at = _now()
         db.add(setting)

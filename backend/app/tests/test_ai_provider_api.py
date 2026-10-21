@@ -4,6 +4,7 @@ import json
 import logging
 import asyncio
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -105,6 +106,24 @@ def _reset_provider_model_cache() -> None:
     provider_model_cache.invalidate_all()
 
 
+def _install_operation_runtime(monkeypatch: pytest.MonkeyPatch, resolve: Any) -> None:
+    def operation(db: Session, user: object, provider: str, **draft: Any) -> AIProviderRuntime:
+        saved = resolve(db, user)
+        if saved.provider != provider:
+            raise AIProviderInvalidConfigurationError()
+        credential = draft.get("credential")
+        if credential is None or not credential.get_secret_value():
+            credential = saved.credential
+        elif provider == "ollama":
+            raise AIProviderInvalidConfigurationError()
+        return replace(saved, base_url=draft.get("base_url") or saved.base_url,
+                       default_model=draft.get("model") or saved.default_model,
+                       credential=credential,
+                       credential_state="configured" if credential is not None else saved.credential_state)
+
+    monkeypatch.setattr("app.services.ai_provider_runtime.resolve_ai_provider_operation_runtime", operation)
+
+
 def _install_runtime(
     monkeypatch: pytest.MonkeyPatch,
     runtime: AIProviderRuntime,
@@ -128,6 +147,7 @@ def _install_runtime(
         "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
         resolve,
     )
+    _install_operation_runtime(monkeypatch, resolve)
     monkeypatch.setattr(
         "app.services.ai_provider_runtime.create_ai_provider_client",
         create,
@@ -259,6 +279,8 @@ def test_connection_account_ai_off_fails_without_creating_client(
         del db, user
         raise AIProviderDisabledError()
 
+    _install_operation_runtime(monkeypatch, disabled)
+
     created: list[object] = []
     monkeypatch.setattr(
         "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
@@ -341,6 +363,7 @@ def test_draft_replacement_key_models_do_not_populate_saved_cache(
         "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
         lambda db, user: saved,
     )
+    _install_operation_runtime(monkeypatch, lambda db, user: saved)
     monkeypatch.setattr(
         "app.services.ai_provider_runtime.create_ai_provider_client",
         lambda runtime: (created.append(runtime), CredentialAwareClient(runtime))[1],
@@ -532,6 +555,7 @@ def test_connection_route_exception_traceback_drops_draft_key_and_prompt(
         "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
         lambda db, user: runtime,
     )
+    _install_operation_runtime(monkeypatch, lambda db, user: runtime)
     monkeypatch.setattr(
         "app.services.ai_provider_runtime.create_ai_provider_client",
         lambda candidate: FailingClient(candidate),
@@ -711,6 +735,7 @@ def test_provider_routes_run_resolver_and_failure_audit_outside_event_loop(
         "app.services.ai_provider_runtime.create_ai_provider_client",
         ThreadTrackingClient,
     )
+    _install_operation_runtime(monkeypatch, resolve)
     monkeypatch.setattr(provider_routes, "create_ai_task", audit)
 
     responses = [
