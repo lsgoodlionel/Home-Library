@@ -24,6 +24,8 @@ from app.schemas.system_ai_setting import (
 from app.services.credential_crypto import CredentialCryptoError
 from app.services.ai_health_status_cache import ai_health_status_cache
 from app.services.system_ai_setting_service import (
+    ServerAIConfigConflictError,
+    ServerAIConfigWriteError,
     get_effective_server_ai_config,
     reset_server_ai_config,
     update_server_ai_config,
@@ -57,19 +59,34 @@ def put_system_ai_config(
             actor_id=admin.id,
         )
     except CredentialCryptoError:
-        raise ApiError(
+        error = ApiError(
             "AI_SERVER_CREDENTIAL_ERROR",
             "服务器密钥强度不足，不能保存凭据",
             status_code=400,
-        ) from None
+        )
     except ValueError:
-        raise ApiError(
+        error = ApiError(
             "AI_SERVER_CONFIG_INVALID",
             "服务器 AI 配置无效",
             status_code=422,
-        ) from None
-    ai_health_status_cache.invalidate_all()
-    return SystemAIConfigResponse.from_config(config)
+        )
+    except ServerAIConfigConflictError:
+        error = ApiError(
+            "AI_SERVER_CONFIG_CONFLICT",
+            "服务器 AI 配置已被其他请求修改，请刷新后重试",
+            status_code=409,
+        )
+    except ServerAIConfigWriteError:
+        error = ApiError(
+            "AI_SERVER_CONFIG_WRITE_FAILED",
+            "服务器 AI 配置保存失败，请稍后重试",
+            status_code=500,
+        )
+    else:
+        ai_health_status_cache.invalidate_all()
+        return SystemAIConfigResponse.from_config(config)
+    del request, payload, db, admin
+    raise error from None
 
 
 @router.delete("", response_model=SystemAIConfigResponse)
@@ -81,9 +98,25 @@ def delete_system_ai_config(
 ) -> SystemAIConfigResponse:
     require_secure_server_config_transport(request)
     verify_admin_secondary_auth(admin, payload.admin_password, payload.upgrade_password)
-    config = reset_server_ai_config(db, actor_id=admin.id)
-    ai_health_status_cache.invalidate_all()
-    return SystemAIConfigResponse.from_config(config)
+    try:
+        config = reset_server_ai_config(db, actor_id=admin.id)
+    except ServerAIConfigConflictError:
+        error = ApiError(
+            "AI_SERVER_CONFIG_CONFLICT",
+            "服务器 AI 配置已被其他请求修改，请刷新后重试",
+            status_code=409,
+        )
+    except ServerAIConfigWriteError:
+        error = ApiError(
+            "AI_SERVER_CONFIG_WRITE_FAILED",
+            "服务器 AI 配置恢复失败，请稍后重试",
+            status_code=500,
+        )
+    else:
+        ai_health_status_cache.invalidate_all()
+        return SystemAIConfigResponse.from_config(config)
+    del request, payload, db, admin
+    raise error from None
 
 
 @router.post("/test", response_model=AIHealthResponse)

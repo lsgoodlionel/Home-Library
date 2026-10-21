@@ -501,6 +501,7 @@ async def list_models(
             exc=OllamaDisabledError("AI service disabled"),
             created_by=current_user.id,
         )
+        del runtime, input_data, db, current_user
         _raise_api_error(disabled_error)
     client = OllamaClient(runtime)
     api_error: ApiError | None = None

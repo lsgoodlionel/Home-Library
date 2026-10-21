@@ -510,7 +510,9 @@ UTF-8 编码最大 64 KiB。
 
 `POST /api/system/ai-config/test` 不接受待保存配置或凭据，只对当前生效配置及当前账号目标执行只读 version/tags/ps 检查。保存与健康检测是独立操作：保存 HTTP 200 后，测试可能返回 HTTP 502 / `AI_ACCESS_DENIED` / `access_denied`（上游 401/403），或连接/读取超时等既有稳定分类。测试失败不回滚保存。
 
-全局保存或恢复会失效全部健康缓存。`GET/PUT /api/ai/config` 仍管理登录账号偏好，不能改变服务器凭据和安全参数。
+PUT/DELETE 成功后才失效全部健康缓存。并发版本冲突（包含首次创建竞争）返回 HTTP 409 / `AI_SERVER_CONFIG_CONFLICT`，提示“服务器 AI 配置已被其他请求修改，请刷新后重试”；失败方不修改配置、凭据或审计。数据库写入故障返回 HTTP 500 / `AI_SERVER_CONFIG_WRITE_FAILED` 与稳定中文提示，不包含 SQL、参数、明文或密文。升级密码按 UTF-8 bytes 恒定时间比较，支持 Unicode；错误或无法编码的输入稳定返回 403。
+
+`GET/PUT /api/ai/config` 仍管理登录账号偏好，不能改变服务器凭据和安全参数。
 
 ### GET /api/ai/models
 

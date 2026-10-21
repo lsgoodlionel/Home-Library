@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, attributes
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.config import Settings, get_settings
 from app.core.ollama_url import normalize_ollama_base_url
@@ -238,13 +240,13 @@ def _encrypt_pair(settings: Settings, client_id: str, client_secret: str) -> tup
     return cipher.encrypt(client_id), cipher.encrypt(client_secret)
 
 
-def update_server_ai_config(
+def _update_server_ai_config_outcome(
     db: Session,
     *,
     values: ServerAIConfigUpdateValues,
     credentials: CredentialUpdate,
     actor_id: int,
-) -> ServerAIConfig:
+) -> ServerAIConfig | Exception:
     try:
         settings = get_settings()
         previous = _get_effective_server_ai_state(db)
@@ -265,6 +267,7 @@ def update_server_ai_config(
             id_ciphertext = None
             secret_ciphertext = None
 
+        existing_row = row is not None
         if row is None:
             row = SystemAISetting(id=1)
         row.enabled = values.enabled
@@ -279,6 +282,15 @@ def update_server_ai_config(
         row.config_version = version
         row.updated_by = actor_id
         row.updated_at = _now()
+        if existing_row:
+            # Write the whole validated snapshot, including unchanged fields. The
+            # mapper's version predicate rejects a concurrent update or reset.
+            for name in (
+                *_VALUE_FIELD_NAMES,
+                "access_client_id_ciphertext",
+                "access_client_secret_ciphertext",
+            ):
+                attributes.flag_modified(row, name)
         db.add(row)
 
         changed_fields = [
@@ -295,13 +307,12 @@ def update_server_ai_config(
             )
         )
         db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    return get_effective_server_ai_config(db)
+        return get_effective_server_ai_config(db)
+    except Exception as exc:
+        return _safe_write_failure(db, exc)
 
 
-def reset_server_ai_config(db: Session, *, actor_id: int) -> ServerAIConfig:
+def _reset_server_ai_config_outcome(db: Session, *, actor_id: int) -> ServerAIConfig | Exception:
     try:
         row = db.get(SystemAISetting, 1)
         version = (row.config_version if row is not None else 0) + 1
@@ -316,7 +327,67 @@ def reset_server_ai_config(db: Session, *, actor_id: int) -> ServerAIConfig:
             )
         )
         db.commit()
-    except Exception:
+        return get_effective_server_ai_config(db)
+    except Exception as exc:
+        return _safe_write_failure(db, exc)
+
+
+class ServerAIConfigConflictError(Exception):
+    """A concurrent writer won; the caller must reload before retrying."""
+
+
+class ServerAIConfigWriteError(Exception):
+    """A stable database failure carrying no original exception or parameters."""
+
+
+def _safe_write_failure(db: Session, error: Exception) -> Exception:
+    # The original exception, Session and ORM objects never leave the outcome frame.
+    # Constructing a new exception does not link its context; only raising does.
+    try:
         db.rollback()
-        raise
-    return get_effective_server_ai_config(db)
+    except Exception:
+        try:
+            db.invalidate()
+        except Exception:
+            pass
+        return ServerAIConfigWriteError("服务器 AI 配置保存失败，请稍后重试")
+    if isinstance(error, StaleDataError) or (
+        isinstance(error, IntegrityError)
+        and (
+            getattr(error.orig, "sqlite_errorcode", None) in {1555, 2067}
+            or getattr(error.orig, "pgcode", None) == "23505"
+        )
+    ):
+        return ServerAIConfigConflictError("服务器 AI 配置已被其他请求修改，请刷新后重试")
+    if isinstance(error, CredentialCryptoError):
+        message = "凭据加密失败"
+        if error.args == ("服务器密钥强度不足，不能保存凭据",):
+            message = "服务器密钥强度不足，不能保存凭据"
+        return CredentialCryptoError(message)
+    if isinstance(error, ValueError):
+        return ValueError("服务器 AI 配置无效")
+    return ServerAIConfigWriteError("服务器 AI 配置保存失败，请稍后重试")
+
+
+def update_server_ai_config(
+    db: Session,
+    *,
+    values: ServerAIConfigUpdateValues,
+    credentials: CredentialUpdate,
+    actor_id: int,
+) -> ServerAIConfig:
+    outcome = _update_server_ai_config_outcome(
+        db, values=values, credentials=credentials, actor_id=actor_id,
+    )
+    del db, values, credentials
+    if isinstance(outcome, Exception):
+        raise outcome from None
+    return outcome
+
+
+def reset_server_ai_config(db: Session, *, actor_id: int) -> ServerAIConfig:
+    outcome = _reset_server_ai_config_outcome(db, actor_id=actor_id)
+    del db
+    if isinstance(outcome, Exception):
+        raise outcome from None
+    return outcome

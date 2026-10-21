@@ -35,3 +35,6 @@ class SystemAISetting(Base):
     )
 
     __table_args__ = (CheckConstraint("id = 1", name="ck_system_ai_settings_singleton"),)
+
+    # Optimistic concurrency applies to both UPDATE and DELETE across instances.
+    __mapper_args__ = {"version_id_col": config_version, "version_id_generator": False}

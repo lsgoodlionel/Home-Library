@@ -121,10 +121,14 @@ def verify_admin_secondary_auth(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="管理员密码错误",
         )
-    if not secrets.compare_digest(
-        upgrade_password.get_secret_value(),
-        settings.upgrade_password,
-    ):
+    try:
+        upgrade_matches = secrets.compare_digest(
+            upgrade_password.get_secret_value().encode("utf-8"),
+            settings.upgrade_password.encode("utf-8"),
+        )
+    except UnicodeEncodeError:
+        upgrade_matches = False
+    if not upgrade_matches:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="服务器升级专用密码错误",

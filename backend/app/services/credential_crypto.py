@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import hashlib
 import os
 
 from cryptography.exceptions import InvalidTag
@@ -15,6 +16,9 @@ _PREFIX = "v1:"
 _NONCE_BYTES = 12
 _DEFAULT_KEYS = frozenset({"change-this-secret", "dev-secret-change-me-in-production"})
 
+# Fingerprint of the publicly documented deployment example, never a production key.
+_PUBLIC_EXAMPLE_KEY_SHA256 = "79ef599b03c84b902bc2c21405ad47203ca5606291b87fc383219ccc0c9d77f6"
+
 
 class CredentialCryptoError(ValueError):
     """A sanitized credential failure safe to handle at service boundaries."""
@@ -25,6 +29,7 @@ def is_production_secret_key(secret_key: str) -> bool:
     return (
         bool(normalized_key)
         and normalized_key not in _DEFAULT_KEYS
+        and hashlib.sha256(normalized_key.encode("utf-8")).hexdigest() != _PUBLIC_EXAMPLE_KEY_SHA256
         and len(normalized_key.encode("utf-8")) >= 32
     )
 
