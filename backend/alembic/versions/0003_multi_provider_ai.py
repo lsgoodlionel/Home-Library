@@ -26,6 +26,10 @@ depends_on = None
 _ACCOUNT_KEY_PURPOSE = b"home-library:user-ai-provider-key:v1"
 
 
+class AccountCredentialMigrationError(RuntimeError):
+    """A sanitized migration failure carrying no SQL parameters or source exception."""
+
+
 def _cipher() -> CredentialCipher:
     secret_key = Settings().secret_key
     if not is_production_secret_key(secret_key):
@@ -42,9 +46,9 @@ def _prepare_upgrades(
         try:
             configs = json.loads(row.provider_configs)
         except (TypeError, json.JSONDecodeError):
-            continue
+            raise AccountCredentialMigrationError("账号 AI 配置数据无效") from None
         if not isinstance(configs, dict):
-            continue
+            raise AccountCredentialMigrationError("账号 AI 配置数据无效")
 
         plaintext_keys: list[tuple[str, str]] = []
         for provider, provider_config in configs.items():
@@ -78,7 +82,7 @@ def _prepare_upgrades(
     return prepared
 
 
-def upgrade() -> None:
+def _run_upgrade() -> None:
     connection = op.get_bind()
     rows = list(
         connection.execute(
@@ -140,54 +144,27 @@ def upgrade() -> None:
         )
 
 
+def _upgrade_outcome() -> AccountCredentialMigrationError | None:
+    try:
+        _run_upgrade()
+    except Exception:
+        return AccountCredentialMigrationError("账号供应商凭据迁移失败")
+    return None
+
+
+def upgrade() -> None:
+    outcome = _upgrade_outcome()
+    if outcome is not None:
+        raise outcome from None
+
+
 def downgrade() -> None:
     connection = op.get_bind()
-    credential_rows = list(
-        connection.execute(
-            sa.text(
-                """
-                SELECT user_id, provider, api_key_ciphertext
-                FROM user_ai_provider_credentials
-                """
-            )
-        ).mappings()
+    credential_exists = connection.scalar(
+        sa.text("SELECT 1 FROM user_ai_provider_credentials LIMIT 1")
     )
-    credentials_by_user: dict[int, list[tuple[str, str]]] = {}
-    if credential_rows:
-        cipher = _cipher()
-        for row in credential_rows:
-            api_key = cipher.decrypt(row.api_key_ciphertext)
-            credentials_by_user.setdefault(row.user_id, []).append((row.provider, api_key))
-
-    setting_rows = list(
-        connection.execute(
-            sa.text("SELECT id, user_id, provider_configs FROM user_ai_settings")
-        ).mappings()
-    )
-    for row in setting_rows:
-        try:
-            configs = json.loads(row.provider_configs)
-        except (TypeError, json.JSONDecodeError):
-            configs = {}
-        if not isinstance(configs, dict):
-            configs = {}
-        for provider, api_key in credentials_by_user.get(row.user_id, []):
-            provider_config = configs.setdefault(provider, {})
-            if isinstance(provider_config, dict):
-                provider_config["api_key"] = api_key
-        connection.execute(
-            sa.text(
-                """
-                UPDATE user_ai_settings
-                SET provider_configs = :provider_configs
-                WHERE id = :setting_id
-                """
-            ),
-            {
-                "provider_configs": json.dumps(configs, ensure_ascii=False, sort_keys=True),
-                "setting_id": row.id,
-            },
-        )
+    if credential_exists is not None:
+        raise AccountCredentialMigrationError("存在账号供应商凭据，拒绝降级")
 
     op.drop_table("user_ai_provider_credentials")
     op.drop_column("user_ai_settings", "ai_enabled")
