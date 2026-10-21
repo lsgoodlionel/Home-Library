@@ -199,7 +199,7 @@ class GeminiProviderClient(Generic[ResponseT]):
 
                 try:
                     parsed = json.loads(body)
-                except (TypeError, ValueError, json.JSONDecodeError):
+                except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
                     parsed = None
                 if response.status_code == 429:
                     if self._is_429_quota_payload(parsed):

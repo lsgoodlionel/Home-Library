@@ -17,6 +17,7 @@ from app.services.ai_providers.base import (
     AIProviderClient,
     AIProviderConnectTimeoutError,
     AIProviderDisabledError,
+    AIProviderError,
     AIProviderHealth,
     AIProviderInvalidConfigurationError,
     AIProviderInvalidResponseError,
@@ -732,6 +733,60 @@ def test_429_uses_bounded_machine_fields_to_distinguish_rate_limit_and_quota(
 
     with pytest.raises(expected_error):
         _run(client.generate_text("prompt"))
+
+
+@pytest.mark.parametrize("operation", ["test_connection", "list_models", "generate_text", "generate_json"])
+@pytest.mark.parametrize(
+    ("status_code", "expected_error"),
+    [
+        (429, AIProviderRateLimitError),
+        (200, AIProviderInvalidResponseError),
+        (400, AIProviderModelError),
+    ],
+)
+def test_deep_bounded_json_uses_safe_status_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    operation: str,
+    status_code: int,
+    expected_error: type[AIProviderError],
+) -> None:
+    body = b"[" * 20_000 + b"0" + b"]" * 20_000
+    assert len(body) == 40_001 < MAX_RESPONSE_BYTES
+    with pytest.raises(RecursionError):
+        json.loads(body)
+
+    key = "deep-json-key-marker"
+    prompt = "deep-json-prompt-marker"
+    query = "deep-json-query-marker"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        upstream_request = httpx.Request(
+            request.method,
+            f"{request.url}?token={query}",
+            headers=request.headers,
+            content=request.content,
+        )
+        return httpx.Response(status_code, request=upstream_request, content=body)
+
+    client, _ = _client_with_transport(monkeypatch, handler, credential=key)
+    if operation == "generate_text":
+        pending = client.generate_text(prompt)
+    elif operation == "generate_json":
+        pending = client.generate_json(prompt, _GeneratedRecord)
+    else:
+        pending = getattr(client, operation)()
+    with pytest.raises(AIProviderError) as captured:
+        _run(pending)
+
+    assert type(captured.value) is expected_error
+    assert captured.value.status_code == (status_code if status_code >= 400 else None)
+    markers = {body.decode(), key, f"x-goog-api-key: {key}", query, prompt}
+    _assert_public_error_graph_is_safe(captured.value, markers)
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    combined_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert not any(marker in combined_logs for marker in markers)
 
 
 def test_malformed_and_oversized_429_use_safe_rate_limit_fallback_without_leaking_body(
