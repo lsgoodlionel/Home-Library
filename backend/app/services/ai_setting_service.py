@@ -254,6 +254,13 @@ def _safe_ai_setting_update_failure(db: Session, error: Exception) -> ApiError:
     return ApiError("AI_CONFIG_SAVE_FAILED", "AI 配置保存失败", 500)
 
 
+def _invalidate_provider_model_cache_safely(user_id: int) -> None:
+    try:
+        provider_model_cache.invalidate_user(user_id)
+    except Exception:
+        pass
+
+
 def get_or_create_user_ai_setting(db: Session, user: User) -> UserAISetting:
     setting = db.query(UserAISetting).filter_by(user_id=user.id).first()
     if setting:
@@ -416,7 +423,7 @@ def update_user_ai_settings(
     del db, user, payload, credential_updates, consumed
     if isinstance(outcome, ApiError):
         raise outcome from None
-    provider_model_cache.invalidate_user(user_id)
+    _invalidate_provider_model_cache_safely(user_id)
     return outcome
 
 

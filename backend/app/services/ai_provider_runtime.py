@@ -13,7 +13,10 @@ from app.services.ai_provider_credential_service import (
     get_provider_api_key,
     get_provider_credential_state,
 )
-from app.services.ai_provider_url import validate_cloud_provider_url
+from app.services.ai_provider_url import (
+    normalize_cloud_provider_origin,
+    validate_cloud_provider_url,
+)
 from app.services.ai_providers.base import (
     AIProviderClient,
     AIProviderDisabledError,
@@ -28,7 +31,6 @@ from app.services.ai_providers.openai_compatible import (
     OpenAICompatibleProviderClient,
 )
 from app.services.ai_setting_service import (
-    _decode_configs,
     default_provider_configs,
     normalize_access_origin,
 )
@@ -44,6 +46,39 @@ def _invalid_configuration() -> AIProviderInvalidConfigurationError:
     return AIProviderInvalidConfigurationError()
 
 
+def _strict_runtime_provider_config(
+    raw: str,
+    active_provider: str,
+    account_model: str,
+) -> dict[str, object]:
+    try:
+        configs = json.loads(raw)
+    except (TypeError, json.JSONDecodeError, RecursionError):
+        raise _invalid_configuration() from None
+    if not isinstance(configs, dict):
+        raise _invalid_configuration() from None
+    config = configs.get(active_provider)
+    if not isinstance(config, dict) or config.get("provider") != active_provider:
+        raise _invalid_configuration() from None
+    enabled = config.get("enabled")
+    base_url = config.get("base_url")
+    provider_model = config.get("default_model")
+    if (
+        not isinstance(enabled, bool)
+        or not isinstance(base_url, str)
+        or not base_url
+        or base_url != base_url.strip()
+        or not isinstance(provider_model, str)
+        or not provider_model
+        or provider_model != provider_model.strip()
+        or not account_model
+        or account_model != account_model.strip()
+        or account_model != provider_model
+    ):
+        raise _invalid_configuration() from None
+    return config
+
+
 def _account_selection(
     db: Session,
     user: User,
@@ -57,25 +92,26 @@ def _account_selection(
         active_provider = "ollama"
         account_model = str(configs[active_provider]["default_model"])
         ai_enabled = True
+        config = configs[active_provider]
     else:
-        configs = _decode_configs(setting.provider_configs)
         active_provider = setting.active_provider
-        account_model = setting.default_model.strip()
+        account_model = setting.default_model
         ai_enabled = setting.ai_enabled
 
     if not ai_enabled:
         raise AIProviderDisabledError() from None
     if active_provider not in _KNOWN_PROVIDERS:
         raise _invalid_configuration() from None
-    config = configs.get(active_provider)
-    if (
-        not isinstance(config, dict)
-        or config.get("provider") != active_provider
-        or not bool(config.get("enabled"))
-    ):
+    if setting is not None:
+        config = _strict_runtime_provider_config(
+            setting.provider_configs,
+            active_provider,
+            account_model,
+        )
+    if config.get("enabled") is not True:
         raise _invalid_configuration() from None
-    provider_model = str(config.get("default_model") or "").strip()
-    if not provider_model or not account_model or account_model != provider_model:
+    provider_model = config.get("default_model")
+    if not isinstance(provider_model, str):
         raise _invalid_configuration() from None
     return active_provider, provider_model, config
 
@@ -178,6 +214,67 @@ def resolve_ai_provider_runtime(db: Session, user: User) -> AIProviderRuntime:
     return _resolve_cloud_runtime(db, user, provider, config, model)
 
 
+def _validate_cloud_factory_runtime(runtime: AIProviderRuntime) -> None:
+    if (
+        runtime.ollama is not None
+        or runtime.credential_state != "configured"
+        or not runtime.get_credential_value()
+    ):
+        raise _invalid_configuration() from None
+    try:
+        validated_url = validate_cloud_provider_url(
+            runtime.base_url,
+            allowed_private_origins=get_settings().ai_provider_allowed_private_origins,
+        )
+    except AIProviderInvalidConfigurationError:
+        raise _invalid_configuration() from None
+    if validated_url != runtime.base_url:
+        raise _invalid_configuration() from None
+
+
+def _validate_ollama_factory_runtime(runtime: AIProviderRuntime) -> None:
+    options = runtime.ollama
+    if options is None or runtime.credential is not None:
+        raise _invalid_configuration() from None
+    try:
+        normalized_base_url = normalize_ollama_base_url(runtime.base_url)
+        normalized_trusted_origin = normalize_cloud_provider_origin(
+            options.trusted_base_url
+        )
+    except (InvalidOllamaBaseURL, AIProviderInvalidConfigurationError, ValueError):
+        raise _invalid_configuration() from None
+    trusted_origin = normalize_access_origin(options.trusted_base_url)
+    if (
+        normalized_base_url != runtime.base_url
+        or normalized_trusted_origin != options.trusted_base_url
+        or trusted_origin is None
+    ):
+        raise _invalid_configuration() from None
+
+    client_id, client_secret = options.get_access_credentials()
+    has_client_id = bool(client_id)
+    has_client_secret = bool(client_secret)
+    if has_client_id != has_client_secret:
+        raise _invalid_configuration() from None
+    pair_complete = has_client_id and has_client_secret
+    if pair_complete != (runtime.credential_state == "configured"):
+        if not (
+            not pair_complete
+            and runtime.credential_state == "unusable"
+        ):
+            raise _invalid_configuration() from None
+    if runtime.credential_state not in {"missing", "configured", "unusable"}:
+        raise _invalid_configuration() from None
+
+    effective_origin = normalize_access_origin(runtime.base_url)
+    exact_trusted_origin = effective_origin is not None and effective_origin == trusted_origin
+    expected_uses_access = pair_complete and exact_trusted_origin
+    if options.uses_access is not expected_uses_access:
+        raise _invalid_configuration() from None
+    if runtime.credential_state == "unusable" and exact_trusted_origin:
+        raise _invalid_configuration() from None
+
+
 def create_ai_provider_client(runtime: AIProviderRuntime) -> AIProviderClient:
     if not runtime.enabled:
         raise AIProviderDisabledError() from None
@@ -188,16 +285,14 @@ def create_ai_provider_client(runtime: AIProviderRuntime) -> AIProviderClient:
         or runtime.default_model != runtime.default_model.strip()
     ):
         raise _invalid_configuration() from None
-    if runtime.provider == "ollama" and runtime.ollama is not None:
+    if runtime.provider == "ollama":
+        _validate_ollama_factory_runtime(runtime)
         return OllamaProviderClient(runtime)
-    cloud_runtime_valid = (
-        runtime.ollama is None
-        and runtime.credential_state == "configured"
-        and bool(runtime.get_credential_value())
-    )
-    if runtime.provider == "gemini" and cloud_runtime_valid:
+    if runtime.provider == "gemini":
+        _validate_cloud_factory_runtime(runtime)
         return GeminiProviderClient(runtime)
-    if runtime.provider in OPENAI_COMPATIBLE_DESCRIPTORS and cloud_runtime_valid:
+    if runtime.provider in OPENAI_COMPATIBLE_DESCRIPTORS:
+        _validate_cloud_factory_runtime(runtime)
         return OpenAICompatibleProviderClient(runtime)
     raise _invalid_configuration() from None
 

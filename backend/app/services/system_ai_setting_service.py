@@ -233,6 +233,13 @@ def get_effective_server_ai_config(db: Session) -> ServerAIConfig:
     return _get_effective_server_ai_state(db).config
 
 
+def _invalidate_provider_model_cache_safely() -> None:
+    try:
+        provider_model_cache.invalidate_all()
+    except Exception:
+        pass
+
+
 def _encrypt_pair(settings: Settings, client_id: str, client_secret: str) -> tuple[str, str]:
     _validate_credential_pair(client_id, client_secret)
     if not is_production_secret_key(settings.secret_key):
@@ -383,7 +390,7 @@ def update_server_ai_config(
     del db, values, credentials
     if isinstance(outcome, Exception):
         raise outcome from None
-    provider_model_cache.invalidate_all()
+    _invalidate_provider_model_cache_safely()
     return outcome
 
 
@@ -392,5 +399,5 @@ def reset_server_ai_config(db: Session, *, actor_id: int) -> ServerAIConfig:
     del db
     if isinstance(outcome, Exception):
         raise outcome from None
-    provider_model_cache.invalidate_all()
+    _invalidate_provider_model_cache_safely()
     return outcome

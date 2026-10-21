@@ -9,7 +9,7 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models import User, UserAISetting
+from app.models import SystemAISetting, User, UserAISetting
 from app.schemas.ai_setting import AISettingsUpdate
 from app.services.ai_health_status_cache import ProviderModelCache
 from app.services.ai_provider_credential_service import set_provider_api_key
@@ -24,6 +24,7 @@ from app.services.ai_providers.base import (
     AIProviderModel,
     AIProviderModelList,
     AIProviderRuntime,
+    OllamaProviderRuntimeOptions,
 )
 from app.services.ai_providers.gemini import GeminiProviderClient
 from app.services.ai_providers.ollama import OllamaProviderClient
@@ -170,6 +171,80 @@ def test_runtime_rejects_provider_model_mismatch_without_fallback(db: Session) -
         resolve_ai_provider_runtime(db, user)
 
 
+@pytest.mark.parametrize(
+    ("provider_configs", "account_model"),
+    [
+        ("{", "server-model"),
+        (json.dumps({"openai": _configs()["openai"]}), "server-model"),
+        (
+            json.dumps(
+                {
+                    "ollama": {
+                        **_configs(provider="ollama")["ollama"],
+                        "provider": "openai",
+                    }
+                }
+            ),
+            "ollama-account-model",
+        ),
+        (
+            json.dumps(
+                {
+                    "ollama": {
+                        **_configs(provider="ollama")["ollama"],
+                        "enabled": "true",
+                    }
+                }
+            ),
+            "ollama-account-model",
+        ),
+        (
+            json.dumps(
+                {
+                    "ollama": {
+                        **_configs(provider="ollama")["ollama"],
+                        "base_url": "",
+                    }
+                }
+            ),
+            "ollama-account-model",
+        ),
+        (
+            json.dumps(
+                {
+                    "ollama": {
+                        **_configs(provider="ollama")["ollama"],
+                        "default_model": " ollama-account-model ",
+                    }
+                }
+            ),
+            "ollama-account-model",
+        ),
+    ],
+    ids=[
+        "malformed-json",
+        "missing-active-provider",
+        "embedded-provider-mismatch",
+        "enabled-not-bool",
+        "empty-base-url",
+        "model-not-canonical",
+    ],
+)
+def test_runtime_strictly_rejects_corrupt_persisted_provider_config(
+    db: Session,
+    provider_configs: str,
+    account_model: str,
+) -> None:
+    user = _user(db, f"strict-config-{abs(hash(provider_configs))}")
+    row = _setting(db, user, provider="ollama")
+    row.provider_configs = provider_configs
+    row.default_model = account_model
+    db.commit()
+
+    with pytest.raises(AIProviderInvalidConfigurationError):
+        resolve_ai_provider_runtime(db, user)
+
+
 def test_cloud_runtime_decrypts_only_into_secret_safe_runtime(
     db: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -303,6 +378,145 @@ def test_factory_rejects_known_cloud_runtime_without_usable_credential() -> None
         create_ai_provider_client(runtime)
 
 
+def _ollama_options(
+    *,
+    trusted_base_url: str = "https://ollama.example.test",
+    client_id: str | None = "access-id",
+    client_secret: str | None = "access-secret",
+    uses_access: bool = True,
+) -> OllamaProviderRuntimeOptions:
+    return OllamaProviderRuntimeOptions(
+        trusted_base_url=trusted_base_url,
+        access_client_id=client_id,
+        access_client_secret=client_secret,
+        uses_access=uses_access,
+        config_version=1,
+    )
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        AIProviderRuntime(
+            provider="openai",
+            enabled=True,
+            base_url="http://127.0.0.1",
+            default_model="gpt-test",
+            credential_state="configured",
+            credential="cloud-key",
+        ),
+        AIProviderRuntime(
+            provider="openai",
+            enabled=True,
+            base_url="https://api.example.test/v1",
+            default_model="gpt-test",
+            credential_state="configured",
+            credential="cloud-key",
+            ollama=_ollama_options(),
+        ),
+        AIProviderRuntime(
+            provider="ollama",
+            enabled=True,
+            base_url="ftp://ollama.example.test",
+            default_model="qwen-test",
+            credential_state="configured",
+            ollama=_ollama_options(),
+        ),
+        AIProviderRuntime(
+            provider="ollama",
+            enabled=True,
+            base_url="https://ollama.example.test",
+            default_model="qwen-test",
+            credential_state="configured",
+            ollama=_ollama_options(trusted_base_url="https://ollama.example.test/path"),
+        ),
+        AIProviderRuntime(
+            provider="ollama",
+            enabled=True,
+            base_url="https://ollama.example.test",
+            default_model="qwen-test",
+            credential_state="configured",
+            credential="cloud-key",
+            ollama=_ollama_options(),
+        ),
+        AIProviderRuntime(
+            provider="ollama",
+            enabled=True,
+            base_url="https://ollama.example.test",
+            default_model="qwen-test",
+            credential_state="configured",
+            ollama=_ollama_options(client_secret=None, uses_access=False),
+        ),
+        AIProviderRuntime(
+            provider="ollama",
+            enabled=True,
+            base_url="https://ollama.example.test",
+            default_model="qwen-test",
+            credential_state="missing",
+            ollama=_ollama_options(uses_access=False),
+        ),
+        AIProviderRuntime(
+            provider="ollama",
+            enabled=True,
+            base_url="https://ollama.example.test",
+            default_model="qwen-test",
+            credential_state="configured",
+            ollama=_ollama_options(uses_access=False),
+        ),
+        AIProviderRuntime(
+            provider="ollama",
+            enabled=True,
+            base_url="https://other.example.test",
+            default_model="qwen-test",
+            credential_state="configured",
+            ollama=_ollama_options(uses_access=True),
+        ),
+        AIProviderRuntime(
+            provider="ollama",
+            enabled=True,
+            base_url="https://ollama.example.test",
+            default_model="qwen-test",
+            credential_state="configured",
+            ollama=_ollama_options(client_id=None, client_secret=None, uses_access=False),
+        ),
+    ],
+    ids=[
+        "cloud-forbidden-url",
+        "cloud-with-ollama-options",
+        "ollama-invalid-base-url",
+        "ollama-trusted-url-is-not-origin",
+        "ollama-with-cloud-credential",
+        "ollama-partial-access-pair",
+        "ollama-pair-with-missing-state",
+        "ollama-exact-origin-uses-access-false",
+        "ollama-other-origin-uses-access-true",
+        "ollama-configured-state-without-pair",
+    ],
+)
+def test_factory_rejects_provider_invariants_before_client_creation(
+    runtime: AIProviderRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[str] = []
+
+    def unexpected_client(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        created.append("created")
+        return object()
+
+    monkeypatch.setattr("app.services.ai_provider_runtime.OllamaProviderClient", unexpected_client)
+    monkeypatch.setattr("app.services.ai_provider_runtime.GeminiProviderClient", unexpected_client)
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.OpenAICompatibleProviderClient",
+        unexpected_client,
+    )
+
+    with pytest.raises(AIProviderInvalidConfigurationError):
+        create_ai_provider_client(runtime)
+
+    assert created == []
+
+
 def test_provider_model_cache_isolates_keys_expires_and_evicts_lru() -> None:
     now = [100.0]
     cache = ProviderModelCache(max_entries=2, ttl_seconds=300, clock=lambda: now[0])
@@ -399,3 +613,105 @@ def test_server_setting_update_and_reset_invalidate_all_model_cache(
     reset_server_ai_config(db, actor_id=actor.id)
 
     assert invalidations == ["all", "all"]
+
+
+def test_account_update_returns_committed_success_when_model_cache_invalidation_fails(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    user = _user(db, "account-cache-failure")
+    _setting(db, user, provider="ollama", ai_enabled=False)
+    marker = "account-cache-secret-marker"
+    monkeypatch.setattr(
+        "app.services.ai_setting_service.provider_model_cache.invalidate_user",
+        lambda user_id: (_ for _ in ()).throw(RuntimeError(f"{marker}-{user_id}")),
+    )
+
+    response = update_user_ai_settings(
+        db,
+        user,
+        AISettingsUpdate.model_validate(
+            {
+                "ai_enabled": False,
+                "active_provider": "ollama",
+                "default_model": "ollama-account-model",
+                "providers": [{"provider": "ollama", "note": "committed-note"}],
+            }
+        ),
+    )
+
+    db.expire_all()
+    saved = db.query(UserAISetting).filter_by(user_id=user.id).one()
+    assert response.ai_enabled is False
+    assert json.loads(saved.provider_configs)["ollama"]["note"] == "committed-note"
+    assert marker not in "\n".join(record.getMessage() for record in caplog.records)
+
+
+def test_server_update_returns_committed_success_when_model_cache_invalidation_fails(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    actor = _user(db, "server-update-cache-failure")
+    marker = "server-update-cache-secret-marker"
+    monkeypatch.setattr(
+        "app.services.system_ai_setting_service.provider_model_cache.invalidate_all",
+        lambda: (_ for _ in ()).throw(RuntimeError(marker)),
+    )
+
+    result = update_server_ai_config(
+        db,
+        values=ServerAIConfigUpdateValues(
+            enabled=True,
+            default_base_url="https://committed-ollama.example.test",
+            trusted_base_url="https://committed-ollama.example.test",
+            default_model="committed-model",
+            connect_timeout_seconds=8,
+            read_timeout_seconds=80,
+            verify_tls=True,
+        ),
+        credentials=CredentialUpdate(mode="clear_pair"),
+        actor_id=actor.id,
+    )
+
+    db.expire_all()
+    saved = db.get(SystemAISetting, 1)
+    assert result.config_version == 1
+    assert saved is not None
+    assert saved.default_model == "committed-model"
+    assert marker not in "\n".join(record.getMessage() for record in caplog.records)
+
+
+def test_server_reset_returns_committed_success_when_model_cache_invalidation_fails(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    actor = _user(db, "server-reset-cache-failure")
+    update_server_ai_config(
+        db,
+        values=ServerAIConfigUpdateValues(
+            enabled=True,
+            default_base_url="https://reset-ollama.example.test",
+            trusted_base_url="https://reset-ollama.example.test",
+            default_model="reset-model",
+            connect_timeout_seconds=8,
+            read_timeout_seconds=80,
+            verify_tls=True,
+        ),
+        credentials=CredentialUpdate(mode="clear_pair"),
+        actor_id=actor.id,
+    )
+    marker = "server-reset-cache-secret-marker"
+    monkeypatch.setattr(
+        "app.services.system_ai_setting_service.provider_model_cache.invalidate_all",
+        lambda: (_ for _ in ()).throw(RuntimeError(marker)),
+    )
+
+    result = reset_server_ai_config(db, actor_id=actor.id)
+
+    db.expire_all()
+    assert result.configuration_source in {"environment", "default"}
+    assert db.get(SystemAISetting, 1) is None
+    assert marker not in "\n".join(record.getMessage() for record in caplog.records)
