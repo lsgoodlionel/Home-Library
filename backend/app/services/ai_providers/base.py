@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Protocol, TypeVar, runtime_checkable
+from typing import Any, Awaitable, Callable, Literal, Protocol, TypeVar, runtime_checkable
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 T = TypeVar("T", bound=BaseModel)
+ResultT = TypeVar("ResultT")
 CredentialState = Literal["missing", "configured", "unusable"]
 ProviderHealthStatus = Literal["available", "unavailable", "unchecked"]
 
@@ -19,10 +20,17 @@ class AIProviderRuntime:
     base_url: str
     default_model: str
     credential_state: CredentialState
-    credential: str | None = field(default=None, repr=False, compare=False)
+    credential: SecretStr | None = field(default=None, repr=False, compare=False)
     connect_timeout_seconds: float = 20.0
     read_timeout_seconds: float = 180.0
     verify_tls: bool = True
+
+    def __post_init__(self) -> None:
+        if isinstance(self.credential, str):
+            object.__setattr__(self, "credential", SecretStr(self.credential))
+
+    def get_credential_value(self) -> str | None:
+        return self.credential.get_secret_value() if self.credential is not None else None
 
     def to_safe_dict(self) -> dict[str, Any]:
         safe = asdict(self)
@@ -163,6 +171,34 @@ def map_provider_exception(exc: Exception) -> AIProviderError:
     return AIProviderUpstreamError()
 
 
+@dataclass(frozen=True, slots=True)
+class _ProviderFailureOutcome:
+    error: AIProviderError
+
+
+async def _provider_operation_outcome(
+    operation: Callable[[], Awaitable[ResultT]],
+) -> ResultT | _ProviderFailureOutcome:
+    try:
+        return await operation()
+    except Exception as source:
+        error = map_provider_exception(source)
+        source.__traceback__ = None
+        del source, operation
+        return _ProviderFailureOutcome(error)
+
+
+async def run_provider_operation(
+    operation: Callable[[], Awaitable[ResultT]],
+) -> ResultT:
+    outcome = await _provider_operation_outcome(operation)
+    if isinstance(outcome, _ProviderFailureOutcome):
+        error = outcome.error
+        del outcome, operation
+        raise error from None
+    return outcome
+
+
 __all__ = [
     "AIProviderAuthenticationError",
     "AIProviderClient",
@@ -182,4 +218,5 @@ __all__ = [
     "CredentialState",
     "ProviderHealthStatus",
     "map_provider_exception",
+    "run_provider_operation",
 ]

@@ -3,7 +3,11 @@ from __future__ import annotations
 import ipaddress
 import socket
 from dataclasses import dataclass
+from typing import Iterable
 from urllib.parse import SplitResult, urljoin, urlsplit, urlunsplit
+
+import httpcore
+import httpx
 
 from app.services.ai_providers.base import AIProviderInvalidConfigurationError
 
@@ -25,9 +29,27 @@ _METADATA_ADDRESSES = {
 
 
 @dataclass(frozen=True, slots=True)
+class ValidatedCloudProviderTarget:
+    url: str
+    origin: str
+    hostname: str
+    port: int
+    resolved_addresses: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderRedirectPolicy:
     target_url: str
     forward_authorization: bool
+    validated_target: ValidatedCloudProviderTarget
+
+
+def _canonical_address(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    return address
 
 
 def _safe_error(reason: str) -> AIProviderInvalidConfigurationError:
@@ -85,6 +107,7 @@ def _origin_from_parts(parts: SplitResult) -> str:
 
 
 def _is_protected(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    address = _canonical_address(address)
     return (
         address in _METADATA_ADDRESSES
         or address.is_loopback
@@ -97,13 +120,16 @@ def _is_protected(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> boo
     )
 
 
-def _resolved_addresses(hostname: str, port: int) -> tuple[set[ipaddress.IPv4Address | ipaddress.IPv6Address] | None, bool]:
+def _resolved_addresses(
+    hostname: str,
+    port: int,
+) -> tuple[tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...] | None, bool]:
     try:
         literal = ipaddress.ip_address(hostname)
     except ValueError:
         literal = None
     if literal is not None:
-        return {literal}, False
+        return (_canonical_address(literal),), False
 
     try:
         answers = socket.getaddrinfo(
@@ -112,7 +138,12 @@ def _resolved_addresses(hostname: str, port: int) -> tuple[set[ipaddress.IPv4Add
             family=socket.AF_UNSPEC,
             type=socket.SOCK_STREAM,
         )
-        addresses = {ipaddress.ip_address(answer[4][0]) for answer in answers}
+        addresses = tuple(
+            dict.fromkeys(
+                _canonical_address(ipaddress.ip_address(answer[4][0]))
+                for answer in answers
+            )
+        )
     except (OSError, UnicodeError, ValueError):
         return None, True
     if not addresses:
@@ -120,10 +151,10 @@ def _resolved_addresses(hostname: str, port: int) -> tuple[set[ipaddress.IPv4Add
     return addresses, False
 
 
-def _validate_cloud_provider_url(
+def _validate_cloud_provider_target(
     url: str,
     allowed_private_origins: set[str],
-) -> str | AIProviderInvalidConfigurationError:
+) -> ValidatedCloudProviderTarget | AIProviderInvalidConfigurationError:
     parts = _normalized_parts(url, origin_only=False)
     if isinstance(parts, AIProviderInvalidConfigurationError):
         return parts
@@ -139,15 +170,33 @@ def _validate_cloud_provider_url(
         return _safe_error("target_not_allowed")
     if origin not in allowed_private_origins and any(_is_protected(address) for address in addresses):
         return _safe_error("target_not_allowed")
-    return urlunsplit(parts)
+    return ValidatedCloudProviderTarget(
+        url=urlunsplit(parts),
+        origin=origin,
+        hostname=hostname,
+        port=parts.port or 443,
+        resolved_addresses=tuple(str(address) for address in addresses),
+    )
 
 
-def validate_cloud_provider_url(url: str, *, allowed_private_origins: set[str]) -> str:
-    result = _validate_cloud_provider_url(url, allowed_private_origins)
+def validate_cloud_provider_target(
+    url: str,
+    *,
+    allowed_private_origins: set[str],
+) -> ValidatedCloudProviderTarget:
+    result = _validate_cloud_provider_target(url, allowed_private_origins)
     if isinstance(result, AIProviderInvalidConfigurationError):
         del url, allowed_private_origins
         raise result from None
     return result
+
+
+def validate_cloud_provider_url(url: str, *, allowed_private_origins: set[str]) -> str:
+    result = _validate_cloud_provider_target(url, allowed_private_origins)
+    if isinstance(result, AIProviderInvalidConfigurationError):
+        del url, allowed_private_origins
+        raise result from None
+    return result.url
 
 
 def _validate_cloud_provider_redirect(
@@ -156,16 +205,116 @@ def _validate_cloud_provider_redirect(
     allowed_private_origins: set[str],
 ) -> ProviderRedirectPolicy | AIProviderInvalidConfigurationError:
     target = urljoin(current_url, redirect_url)
-    validated = _validate_cloud_provider_url(target, allowed_private_origins)
+    validated = _validate_cloud_provider_target(target, allowed_private_origins)
     if isinstance(validated, AIProviderInvalidConfigurationError):
         return _safe_error("redirect_not_allowed")
     current_parts = _normalized_parts(current_url, origin_only=False)
     if isinstance(current_parts, AIProviderInvalidConfigurationError):
         return _safe_error("redirect_not_allowed")
-    target_parts = urlsplit(validated)
+    target_parts = urlsplit(validated.url)
     return ProviderRedirectPolicy(
-        target_url=validated,
+        target_url=validated.url,
         forward_authorization=_origin_from_parts(current_parts) == _origin_from_parts(target_parts),
+        validated_target=validated,
+    )
+
+
+class PinnedAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
+    def __init__(
+        self,
+        target: ValidatedCloudProviderTarget,
+        delegate: httpcore.AsyncNetworkBackend,
+    ) -> None:
+        self._target = target
+        self._delegate = delegate
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[tuple[object, ...]] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        if host.lower() != self._target.hostname or port != self._target.port:
+            raise httpcore.ConnectError("Pinned provider target does not match request origin")
+
+        last_error: httpcore.ConnectError | httpcore.ConnectTimeout | None = None
+        for address in self._target.resolved_addresses:
+            try:
+                return await self._delegate.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise httpcore.ConnectError("Pinned provider target has no validated address")
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[tuple[object, ...]] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        del path, timeout, socket_options
+        raise httpcore.ConnectError("Unix sockets are not allowed for cloud providers")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._delegate.sleep(seconds)
+
+
+class PinnedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
+    def __init__(
+        self,
+        target: ValidatedCloudProviderTarget,
+        *,
+        verify: bool = True,
+        limits: httpx.Limits | None = None,
+        retries: int = 0,
+        network_backend: httpcore.AsyncNetworkBackend | None = None,
+    ) -> None:
+        from httpcore._backends.auto import AutoBackend
+
+        resolved_limits = limits or httpx.Limits(
+            max_connections=100,
+            max_keepalive_connections=20,
+            keepalive_expiry=5.0,
+        )
+        self.network_backend = PinnedAsyncNetworkBackend(
+            target,
+            network_backend or AutoBackend(),
+        )
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=httpx.create_ssl_context(verify=verify, trust_env=False),
+            max_connections=resolved_limits.max_connections,
+            max_keepalive_connections=resolved_limits.max_keepalive_connections,
+            keepalive_expiry=resolved_limits.keepalive_expiry,
+            http1=True,
+            http2=False,
+            retries=retries,
+            network_backend=self.network_backend,
+        )
+
+
+def create_pinned_async_transport(
+    target: ValidatedCloudProviderTarget,
+    *,
+    verify: bool = True,
+    limits: httpx.Limits | None = None,
+    retries: int = 0,
+    network_backend: httpcore.AsyncNetworkBackend | None = None,
+) -> PinnedAsyncHTTPTransport:
+    return PinnedAsyncHTTPTransport(
+        target,
+        verify=verify,
+        limits=limits,
+        retries=retries,
+        network_backend=network_backend,
     )
 
 
@@ -184,8 +333,13 @@ def validate_cloud_provider_redirect(
 
 __all__ = [
     "CLOUD_PROVIDER_FOLLOW_REDIRECTS",
+    "PinnedAsyncHTTPTransport",
+    "PinnedAsyncNetworkBackend",
     "ProviderRedirectPolicy",
+    "ValidatedCloudProviderTarget",
+    "create_pinned_async_transport",
     "normalize_cloud_provider_origin",
     "validate_cloud_provider_redirect",
+    "validate_cloud_provider_target",
     "validate_cloud_provider_url",
 ]

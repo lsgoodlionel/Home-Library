@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import FrozenInstanceError
+from dataclasses import asdict
 from datetime import UTC, datetime
 
 import httpx
 import pytest
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 
 from app.services.ai_providers.base import (
@@ -23,6 +26,7 @@ from app.services.ai_providers.base import (
     AIProviderRuntime,
     AIProviderUpstreamError,
     map_provider_exception,
+    run_provider_operation,
 )
 
 
@@ -88,9 +92,12 @@ def test_provider_data_structures_are_immutable_and_runtime_repr_is_safe() -> No
             value.provider = "changed"  # type: ignore[misc]
 
     assert credential not in repr(runtime)
+    assert credential not in repr(asdict(runtime))
+    assert credential not in repr(jsonable_encoder(runtime))
     safe_runtime = runtime.to_safe_dict()
     assert "credential" not in safe_runtime
     assert credential not in repr(safe_runtime)
+    assert runtime.get_credential_value() == credential
 
 
 @pytest.mark.parametrize(
@@ -166,3 +173,59 @@ def test_provider_error_taxonomy_exposes_disabled_and_invalid_configuration() ->
     assert disabled.category == "disabled"
     assert invalid.category == "invalid_configuration"
     assert invalid.reason == "dns_failure"
+
+
+def test_safe_provider_operation_raise_boundary_drops_source_exception_graph_and_locals(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source_marker = "source-exception-sensitive-marker"
+    authorization_marker = "authorization-sensitive-marker"
+    prompt_marker = "prompt-sensitive-marker"
+    query_marker = "query-sensitive-marker"
+    response_marker = "response-sensitive-marker"
+
+    async def failing_operation() -> str:
+        request = httpx.Request(
+            "POST",
+            f"https://api.example.test/v1/chat?token={query_marker}",
+            headers={"Authorization": f"Bearer {authorization_marker}"},
+            content=prompt_marker.encode(),
+        )
+        response = httpx.Response(401, request=request, content=response_marker.encode())
+        raise httpx.HTTPStatusError(source_marker, request=request, response=response)
+
+    with pytest.raises(AIProviderAuthenticationError) as captured:
+        asyncio.run(run_provider_operation(failing_operation))
+
+    markers = {
+        source_marker,
+        authorization_marker,
+        prompt_marker,
+        query_marker,
+        response_marker,
+    }
+    graph: list[BaseException] = [captured.value]
+    seen: set[int] = set()
+    rendered: list[str] = []
+    while graph:
+        current = graph.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        rendered.extend((str(current), repr(current)))
+        if current.__cause__ is not None:
+            graph.append(current.__cause__)
+        if current.__context__ is not None:
+            graph.append(current.__context__)
+        traceback = current.__traceback__
+        while traceback is not None:
+            if traceback.tb_frame.f_globals.get("__name__") == "app.services.ai_providers.base":
+                rendered.append(repr(traceback.tb_frame.f_locals))
+            traceback = traceback.tb_next
+
+    rendered.extend(record.getMessage() for record in caplog.records)
+    combined = "\n".join(rendered)
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    for marker in markers:
+        assert marker not in combined

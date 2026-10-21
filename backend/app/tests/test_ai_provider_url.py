@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import socket
+import ssl
+from typing import Any
 
+import httpcore
+import httpx
 import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.services.ai_provider_url import (
     CLOUD_PROVIDER_FOLLOW_REDIRECTS,
+    PinnedAsyncNetworkBackend,
     ProviderRedirectPolicy,
+    create_pinned_async_transport,
     normalize_cloud_provider_origin,
     validate_cloud_provider_redirect,
+    validate_cloud_provider_target,
     validate_cloud_provider_url,
 )
 from app.services.ai_providers.base import AIProviderInvalidConfigurationError
@@ -103,6 +111,18 @@ def test_cloud_url_checks_every_dns_answer(monkeypatch: pytest.MonkeyPatch) -> N
     assert captured.value.reason == "target_not_allowed"
 
 
+def test_ipv4_mapped_ipv6_metadata_is_never_allowlisted(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_dns(monkeypatch, ["::ffff:169.254.169.254"])
+
+    with pytest.raises(AIProviderInvalidConfigurationError) as captured:
+        validate_cloud_provider_url(
+            "https://allowed.example/v1",
+            allowed_private_origins={"https://allowed.example"},
+        )
+
+    assert captured.value.reason == "target_not_allowed"
+
+
 def test_exact_normalized_origin_allowlist_can_authorize_private_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -191,11 +211,15 @@ def test_redirect_contract_revalidates_target_and_strips_cross_origin_authorizat
     assert same_origin == ProviderRedirectPolicy(
         target_url="https://api.example.test/v2/chat",
         forward_authorization=True,
+        validated_target=same_origin.validated_target,
     )
     assert cross_origin == ProviderRedirectPolicy(
         target_url="https://other.example.test/v2/chat",
         forward_authorization=False,
+        validated_target=cross_origin.validated_target,
     )
+    assert same_origin.validated_target.resolved_addresses == ("93.184.216.34",)
+    assert cross_origin.validated_target.resolved_addresses == ("93.184.216.34",)
 
 
 def test_redirect_to_private_target_is_rejected_before_authorization_decision(
@@ -211,3 +235,115 @@ def test_redirect_to_private_target_is_rejected_before_authorization_decision(
         )
 
     assert captured.value.reason == "redirect_not_allowed"
+
+
+class _RecordingStream(httpcore.AsyncNetworkStream):
+    def __init__(self) -> None:
+        self.writes: list[bytes] = []
+        self.server_hostnames: list[str | None] = []
+        self._response_sent = False
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        del max_bytes, timeout
+        if self._response_sent:
+            return b""
+        self._response_sent = True
+        return b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        del timeout
+        self.writes.append(buffer)
+
+    async def aclose(self) -> None:
+        return None
+
+    async def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        del ssl_context, timeout
+        self.server_hostnames.append(server_hostname)
+        return self
+
+    def get_extra_info(self, info: str) -> Any:
+        del info
+        return None
+
+
+class _RecordingBackend(httpcore.AsyncNetworkBackend):
+    def __init__(self, stream: _RecordingStream) -> None:
+        self.stream = stream
+        self.connect_hosts: list[tuple[str, int]] = []
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: object = None,
+    ) -> httpcore.AsyncNetworkStream:
+        del timeout, local_address, socket_options
+        self.connect_hosts.append((host, port))
+        return self.stream
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: object = None,
+    ) -> httpcore.AsyncNetworkStream:
+        del path, timeout, socket_options
+        raise AssertionError("Unix sockets are not part of the pinned cloud transport")
+
+    async def sleep(self, seconds: float) -> None:
+        del seconds
+
+
+def test_pinned_transport_uses_first_validated_dns_answers_and_preserves_host_and_sni(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dns_answers = [["93.184.216.34"], ["10.0.0.8"]]
+    dns_calls = 0
+
+    def changing_getaddrinfo(
+        host: str,
+        port: int,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        nonlocal dns_calls
+        del host, family, type, proto, flags
+        answers = dns_answers[min(dns_calls, len(dns_answers) - 1)]
+        dns_calls += 1
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port))
+            for address in answers
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", changing_getaddrinfo)
+    target = validate_cloud_provider_target(
+        "https://api.example.test/v1",
+        allowed_private_origins=set(),
+    )
+    stream = _RecordingStream()
+    delegate = _RecordingBackend(stream)
+    transport = create_pinned_async_transport(target, network_backend=delegate)
+
+    async def request() -> httpx.Response:
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await client.get("https://api.example.test/v1/models")
+
+    response = asyncio.run(request())
+
+    assert response.status_code == 200
+    assert dns_calls == 1
+    assert target.resolved_addresses == ("93.184.216.34",)
+    assert delegate.connect_hosts == [("93.184.216.34", 443)]
+    assert stream.server_hostnames == ["api.example.test"]
+    assert b"Host: api.example.test" in b"".join(stream.writes)
+    assert isinstance(transport.network_backend, PinnedAsyncNetworkBackend)
