@@ -29,7 +29,12 @@ import {
 import OllamaConnectionStatus from '@/components/ai/OllamaConnectionStatus.vue';
 import ServerAISettingsPanel from '@/components/ai/ServerAISettingsPanel.vue';
 import { useAuthStore } from '@/stores/auth';
-import type { AIHealthStatus, AIModel, ClassifyBookResponse } from '@/types/ai';
+import type {
+  AIModel,
+  AIProviderHealthStatus,
+  ClassifyBookResponse,
+  OllamaHealthStatus,
+} from '@/types/ai';
 import type { BookListItem, CategoryOption } from '@/types/book';
 import { AI_PROVIDER_LABELS } from '@/types/settings';
 import type {
@@ -64,7 +69,7 @@ const autoClassifying = ref(false);
 const stopAutoClassifyRequested = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const versionInfo = ref<AppVersionInfo | null>(null);
-const aiHealth = ref<AIHealthStatus | null>(null);
+const aiHealth = ref<OllamaHealthStatus | null>(null);
 const runtimeNeedsSync = ref(false);
 
 const emptyOllamaRuntime: OllamaRuntimeStatus = {
@@ -97,7 +102,7 @@ const orderedProviders = computed(() =>
 const activeAIProvider = computed(() =>
   aiSettings.providers.find((provider) => provider.provider === aiSettings.activeProvider),
 );
-const ollamaConnectionStatus = computed<AIHealthStatus>(() => {
+const ollamaConnectionStatus = computed<OllamaHealthStatus>(() => {
   const currentRuntime = aiSettings.ollamaRuntime;
   const cached = aiHealth.value;
   if (cached && ollamaRuntimesMatch(cached.ollamaRuntime, currentRuntime)) {
@@ -134,7 +139,10 @@ async function loadModels() {
 async function loadAIHealth(refresh = false) {
   loadingAIStatus.value = true;
   try {
-    aiHealth.value = await fetchAIHealth(refresh);
+    const providerStatus = await fetchAIHealth(refresh);
+    aiHealth.value = providerStatusMatchesRuntime(providerStatus)
+      ? providerHealthToLegacy(providerStatus)
+      : createUncheckedAIHealth(aiSettings.ollamaRuntime);
     if (refresh) ElMessage.success(aiHealth.value.message);
   } catch (err: unknown) {
     if (refresh) {
@@ -213,7 +221,7 @@ async function loadExternalSettings() {
 onMounted(async () => {
   const ancillaryLoads = Promise.all([loadVersionInfo(), loadExternalSettings()]);
   const aiSettingsLoaded = await loadAISettings();
-  if (aiSettingsLoaded) {
+  if (aiSettingsLoaded && aiSettings.aiEnabled) {
     await loadAIHealth(false);
   }
   await ancillaryLoads;
@@ -232,6 +240,7 @@ async function loadVersionInfo() {
 }
 
 function applyAISettings(data: AIModelSettings) {
+  aiSettings.aiEnabled = data.aiEnabled;
   aiSettings.activeProvider = data.activeProvider;
   aiSettings.defaultModel = data.defaultModel;
   aiSettings.providers = data.providers.map((provider) => ({ ...provider, apiKey: '' }));
@@ -255,7 +264,7 @@ function ollamaRuntimesMatch(
   );
 }
 
-function createUncheckedAIHealth(runtime: OllamaRuntimeStatus): AIHealthStatus {
+function createUncheckedAIHealth(runtime: OllamaRuntimeStatus): OllamaHealthStatus {
   return {
     status: 'unchecked',
     message: '尚未检查',
@@ -268,7 +277,26 @@ function createUncheckedAIHealth(runtime: OllamaRuntimeStatus): AIHealthStatus {
   };
 }
 
-function createLocalAIHealthError(error: unknown): AIHealthStatus {
+function providerHealthToLegacy(status: AIProviderHealthStatus): OllamaHealthStatus {
+  return {
+    status: status.status === 'available' ? 'healthy' : status.status === 'unavailable' ? 'error' : 'unchecked',
+    message: status.message,
+    checkedAt: status.checkedAt,
+    version: typeof status.details.version === 'string' ? status.details.version : null,
+    installedModelCount: status.details.installedModelCount ?? 0,
+    runningModelCount: status.details.runningModelCount ?? 0,
+    generated: false,
+    ollamaRuntime: { ...aiSettings.ollamaRuntime },
+  };
+}
+
+function providerStatusMatchesRuntime(status: AIProviderHealthStatus): boolean {
+  return status.provider === 'ollama'
+    && status.safeBaseUrl === aiSettings.ollamaRuntime.baseUrl
+    && status.effectiveModel === aiSettings.ollamaRuntime.defaultModel;
+}
+
+function createLocalAIHealthError(error: unknown): OllamaHealthStatus {
   return {
     status: 'error',
     message: getAIErrorMessage(error),
@@ -284,8 +312,8 @@ function createLocalAIHealthError(error: unknown): AIHealthStatus {
 async function syncAIHealthFailure(error: unknown) {
   try {
     const latest = await fetchAIHealth(false);
-    if (latest.status === 'error' && ollamaRuntimesMatch(latest.ollamaRuntime, aiSettings.ollamaRuntime)) {
-      aiHealth.value = latest;
+    if (latest.status === 'unavailable') {
+      aiHealth.value = providerHealthToLegacy(latest);
       return;
     }
   } catch {

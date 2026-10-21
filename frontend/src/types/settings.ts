@@ -27,7 +27,7 @@ export interface AIProviderConfig {
   clearApiKey?: boolean;
   defaultModel: string;
   note: string;
-  hasApiKey?: boolean;
+  hasApiKey: boolean;
   credentialState: AIProviderCredentialState;
 }
 

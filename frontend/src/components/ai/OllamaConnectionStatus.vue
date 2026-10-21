@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
-import type { AIHealthStatus } from '@/types/ai';
+import type { OllamaHealthStatus } from '@/types/ai';
 
 const props = defineProps<{
-  status: AIHealthStatus | null;
+  status: OllamaHealthStatus | null;
   isAdmin: boolean;
   loading: boolean;
 }>();

@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 
 import { fetchAIHealth, fetchAIProviderModels } from '@/api/ai';
 import { AI_PROVIDER_LABELS } from '@/types/settings';
-import type { AIHealthStatus } from '@/types/ai';
+import type { AIProviderHealthStatus, AIProviderModel } from '@/types/ai';
 import type { AIProviderKey } from '@/types/settings';
 import { getAIErrorMessage } from '@/utils/aiErrors';
 
@@ -13,9 +13,10 @@ const props = defineProps<{
   model: string;
 }>();
 
-const status = ref<AIHealthStatus | null>(null);
-const models = ref<AIHealthStatus['models']>([]);
+const status = ref<AIProviderHealthStatus | null>(null);
+const models = ref<AIProviderModel[]>([]);
 const safeError = ref('');
+const loading = ref(false);
 let requestSequence = 0;
 let active = true;
 
@@ -26,6 +27,14 @@ const credentialLabel = computed(() => {
   return '未配置';
 });
 const ollamaDetails = computed(() => props.provider === 'ollama' ? status.value?.details : undefined);
+const statusLabel = computed(() => {
+  if (!props.aiEnabled) return '已停用';
+  if (loading.value) return '检查中';
+  if (safeError.value) return '检查失败';
+  if (status.value?.status === 'available') return '连接正常';
+  if (status.value?.status === 'unavailable') return '连接不可用';
+  return '尚未检查';
+});
 
 function formatCheckedAt(value: string | null | undefined): string {
   if (!value) return '尚未检查';
@@ -39,6 +48,7 @@ async function refresh(provider: AIProviderKey): Promise<void> {
   models.value = [];
   safeError.value = '';
   if (!props.aiEnabled) return;
+  loading.value = true;
   try {
     const [health, modelResult] = await Promise.all([
       fetchAIHealth(),
@@ -50,6 +60,8 @@ async function refresh(provider: AIProviderKey): Promise<void> {
   } catch (error) {
     if (!active || sequence !== requestSequence || props.provider !== provider) return;
     safeError.value = getAIErrorMessage(error);
+  } finally {
+    if (active && sequence === requestSequence && props.provider === provider) loading.value = false;
   }
 }
 
@@ -61,6 +73,7 @@ watch(
       status.value = null;
       models.value = [];
       safeError.value = '';
+      loading.value = false;
       return;
     }
     void refresh(provider);
@@ -82,7 +95,7 @@ onBeforeUnmount(() => {
         <div v-if="!aiEnabled" class="status-message">当前账号未启用 AI</div>
         <div v-else class="status-message">{{ safeError || status?.message || '正在检查' }}</div>
       </div>
-      <el-tag>{{ aiEnabled ? (status?.status === 'available' ? '连接正常' : '尚未检查') : '已停用' }}</el-tag>
+      <el-tag>{{ statusLabel }}</el-tag>
     </div>
 
     <el-alert v-if="safeError" type="error" :closable="false" :title="safeError" />
@@ -107,6 +120,12 @@ onBeforeUnmount(() => {
       </el-descriptions-item>
       <el-descriptions-item v-for="item in models" :key="`${item.provider}:${item.id}`" label="可用模型">
         {{ item.name }}
+      </el-descriptions-item>
+      <el-descriptions-item
+        v-if="!loading && !safeError && status?.status === 'available' && models.length === 0"
+        label="可用模型"
+      >
+        未发现可用模型，可手动输入模型名称
       </el-descriptions-item>
     </el-descriptions>
   </section>

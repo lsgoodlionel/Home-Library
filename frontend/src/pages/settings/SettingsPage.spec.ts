@@ -2,7 +2,7 @@ import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { AIHealthStatus } from '@/types/ai';
+import type { AIProviderHealthStatus, OllamaHealthStatus } from '@/types/ai';
 import ServerAISettingsPanel from '@/components/ai/ServerAISettingsPanel.vue';
 import type { AIModelSettings, OllamaRuntimeStatus, SystemAIConfig } from '@/types/settings';
 import SettingsPage from './SettingsPage.vue';
@@ -132,10 +132,14 @@ function settings(runtime = currentRuntime): AIModelSettings {
   };
 }
 
+function disabledSettings(): AIModelSettings {
+  return { ...settings(), aiEnabled: false };
+}
+
 function health(
-  status: AIHealthStatus['status'] = 'healthy',
+  status: OllamaHealthStatus['status'] = 'healthy',
   runtime = currentRuntime,
-): AIHealthStatus {
+): OllamaHealthStatus {
   return {
     status,
     message: status === 'error' ? '连接 AI 服务超时' : 'AI 服务连接正常',
@@ -145,6 +149,28 @@ function health(
     runningModelCount: status === 'healthy' ? 1 : 0,
     generated: false,
     ollamaRuntime: runtime,
+  };
+}
+
+function providerHealth(
+  status: AIProviderHealthStatus['status'] = 'available',
+  runtime = currentRuntime,
+): AIProviderHealthStatus {
+  return {
+    provider: 'ollama',
+    status,
+    message: status === 'unavailable' ? '连接 AI 服务超时' : status === 'unchecked' ? '尚未检查' : 'AI 服务连接正常',
+    checkedAt: '2026-10-20T08:00:00Z',
+    effectiveModel: runtime.defaultModel,
+    safeBaseUrl: runtime.baseUrl,
+    credentialState: 'configured',
+    models: [],
+    details: {
+      version: status === 'available' ? '0.12.6' : undefined,
+      installedModelCount: status === 'available' ? 3 : 0,
+      runningModelCount: status === 'available' ? 1 : 0,
+      usesAccess: runtime.usesAccess,
+    },
   };
 }
 
@@ -178,7 +204,7 @@ beforeEach(() => {
   mocks.saveExternalSearchSettings.mockResolvedValue({ providers: [] });
   mocks.fetchAIModelSettings.mockResolvedValue(settings());
   mocks.saveAIModelSettings.mockResolvedValue(settings());
-  mocks.fetchAIHealth.mockResolvedValue(health());
+  mocks.fetchAIHealth.mockResolvedValue(providerHealth());
   mocks.testAIConnection.mockResolvedValue(health());
   mocks.fetchAvailableModels.mockResolvedValue([{ name: 'first-model' }]);
   mocks.fetchSystemAIConfig.mockResolvedValue(systemConfig);
@@ -192,6 +218,48 @@ afterEach(() => {
 });
 
 describe('SettingsPage AI status orchestration', () => {
+  it('keeps a loaded AI-off account disabled when saving unrelated settings', async () => {
+    mocks.fetchAIModelSettings.mockResolvedValueOnce(disabledSettings());
+    mocks.saveAIModelSettings.mockResolvedValueOnce(disabledSettings());
+
+    const wrapper = await mountPage();
+    expect(mocks.fetchAIHealth).not.toHaveBeenCalled();
+    expect(mocks.fetchAvailableModels).not.toHaveBeenCalled();
+
+    await button(wrapper, '保存设置').trigger('click');
+    await flushPromises();
+
+    expect(mocks.saveAIModelSettings).toHaveBeenCalledWith(expect.objectContaining({ aiEnabled: false }));
+    expect(mocks.fetchAIHealth).not.toHaveBeenCalled();
+    expect(mocks.fetchAvailableModels).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['configured', true],
+    ['missing', false],
+    ['unusable', false],
+  ] as const)('renders the loaded %s credential state without losing the saved-key hint', async (credentialState, hasApiKey) => {
+    const loaded = settings();
+    loaded.activeProvider = 'openai';
+    loaded.defaultModel = 'gpt-5-mini';
+    loaded.providers = [{
+      provider: 'openai',
+      enabled: true,
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: '',
+      defaultModel: 'gpt-5-mini',
+      note: '',
+      credentialState,
+      hasApiKey,
+    }];
+    mocks.fetchAIModelSettings.mockResolvedValueOnce(loaded);
+
+    const wrapper = await mountPage();
+
+    const hint = '当前账号已有已保存 Key；输入新值会覆盖。';
+    expect(wrapper.text().includes(hint)).toBe(credentialState === 'configured');
+  });
+
   it('separates_server_settings_runtime_status_and_account_preferences', async () => {
     const wrapper = await mountPage();
     const text = wrapper.text();
@@ -217,7 +285,7 @@ describe('SettingsPage AI status orchestration', () => {
     });
     mocks.fetchAIHealth.mockImplementation(async (refresh: boolean) => {
       callOrder.push(`health:${refresh}`);
-      return health('healthy', refresh ? nextRuntime : currentRuntime);
+      return providerHealth('available', refresh ? nextRuntime : currentRuntime);
     });
     const wrapper = await mountPage();
     callOrder.length = 0;
@@ -265,7 +333,7 @@ describe('SettingsPage AI status orchestration', () => {
 
     const retrySettings = deferred<AIModelSettings>();
     mocks.fetchAIModelSettings.mockReturnValueOnce(retrySettings.promise);
-    mocks.fetchAIHealth.mockResolvedValueOnce(health('healthy', nextRuntime));
+    mocks.fetchAIHealth.mockResolvedValueOnce(providerHealth('available', nextRuntime));
     await button(wrapper, '重新同步运行配置').trigger('click');
     await flushPromises();
     expect(runtimeSection().find('.ollama-status').exists()).toBe(false);
@@ -422,7 +490,7 @@ describe('SettingsPage AI status orchestration', () => {
     } else {
       mocks.testAIConnection.mockRejectedValueOnce({ response: { data: { error: { code: 'AI_CONNECT_TIMEOUT' } } } });
     }
-    mocks.fetchAIHealth.mockResolvedValueOnce(health('error'));
+    mocks.fetchAIHealth.mockResolvedValueOnce(providerHealth('unavailable'));
 
     await button(wrapper, label).trigger('click');
     await flushPromises();
@@ -450,7 +518,7 @@ describe('SettingsPage AI status orchestration', () => {
   });
 
   it('discards_stale_process_health_from_another_runtime', async () => {
-    mocks.fetchAIHealth.mockResolvedValueOnce(health('healthy', staleRuntime));
+    mocks.fetchAIHealth.mockResolvedValueOnce(providerHealth('available', staleRuntime));
 
     const wrapper = await mountPage();
 

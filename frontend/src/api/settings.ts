@@ -1,6 +1,6 @@
 import { getAIModels } from './ai';
 import { API_TIMEOUTS, apiClient } from './client';
-import type { AIHealthStatus, AIModel } from '@/types/ai';
+import type { AIModel, OllamaHealthStatus } from '@/types/ai';
 import type {
   AIModelSettings,
   AIProviderConfig,
@@ -157,7 +157,7 @@ interface ApiSystemAIConfigResponse {
 }
 
 interface ApiAIHealthResponse {
-  status: AIHealthStatus['status'];
+  status: OllamaHealthStatus['status'];
   message: string;
   checked_at?: string | null;
   version?: string | null;
@@ -210,6 +210,7 @@ function normalizeAIProvider(config: ApiAIProviderConfig): AIProviderConfig {
     baseUrl: config.base_url,
     defaultModel: config.default_model,
     note: config.note,
+    hasApiKey: config.has_api_key,
     credentialState: config.credential_state,
   };
 }
@@ -247,7 +248,7 @@ function normalizeSystemAIConfig(data: ApiSystemAIConfigResponse): SystemAIConfi
   };
 }
 
-function normalizeSystemAIHealth(data: ApiAIHealthResponse): AIHealthStatus {
+function normalizeSystemAIHealth(data: ApiAIHealthResponse): OllamaHealthStatus {
   return {
     status: data.status,
     message: data.message,
@@ -300,7 +301,7 @@ export async function resetSystemAIConfig(auth: SystemAIAuth): Promise<SystemAIC
   return normalizeSystemAIConfig(data);
 }
 
-export async function testSystemAIConfig(): Promise<AIHealthStatus> {
+export async function testSystemAIConfig(): Promise<OllamaHealthStatus> {
   const { data } = await apiClient.post<ApiAIHealthResponse>(
     '/system/ai-config/test',
     {},

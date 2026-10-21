@@ -2,10 +2,10 @@ import { flushPromises, mount } from '@vue/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import * as aiApi from '@/api/ai';
-import type { AIHealthStatus } from '@/types/ai';
+import type { AIProviderHealthStatus } from '@/types/ai';
 import CurrentAIStatus from './CurrentAIStatus.vue';
 
-const baseStatus: AIHealthStatus = {
+const baseStatus: AIProviderHealthStatus = {
   provider: 'openai',
   status: 'available',
   message: '连接正常',
@@ -16,6 +16,14 @@ const baseStatus: AIHealthStatus = {
   models: [{ provider: 'openai', id: 'gpt-5-mini', name: 'GPT-5 mini' }],
   details: {},
 };
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 function mountStatus(props: Record<string, unknown>) {
   return mount(CurrentAIStatus, {
@@ -39,6 +47,58 @@ function mountStatus(props: Record<string, unknown>) {
 afterEach(() => vi.restoreAllMocks());
 
 describe('CurrentAIStatus', () => {
+  it('distinguishes loading, unchecked, unavailable, available empty-model, and request error states', async () => {
+    const pendingHealth = deferred<AIProviderHealthStatus>();
+    const pendingModels = deferred<AIProviderHealthStatus>();
+    vi.spyOn(aiApi, 'fetchAIHealth').mockReturnValueOnce(pendingHealth.promise);
+    vi.spyOn(aiApi, 'fetchAIProviderModels').mockReturnValueOnce(pendingModels.promise);
+    const loading = mountStatus({});
+    expect(loading.text()).toContain('正在检查');
+    expect(loading.text()).toContain('检查中');
+    loading.unmount();
+
+    vi.mocked(aiApi.fetchAIHealth).mockResolvedValueOnce({
+      ...baseStatus,
+      status: 'unchecked',
+      message: '尚未检查',
+    });
+    vi.mocked(aiApi.fetchAIProviderModels).mockResolvedValueOnce({ ...baseStatus, models: [] });
+    const unchecked = mountStatus({});
+    await flushPromises();
+    expect(unchecked.text()).toContain('尚未检查');
+    expect(unchecked.text()).not.toContain('未发现可用模型');
+    unchecked.unmount();
+
+    vi.mocked(aiApi.fetchAIHealth).mockResolvedValueOnce({
+      ...baseStatus,
+      status: 'unavailable',
+      message: '连接失败',
+    });
+    vi.mocked(aiApi.fetchAIProviderModels).mockResolvedValueOnce({ ...baseStatus, models: [] });
+    const unavailable = mountStatus({});
+    await flushPromises();
+    expect(unavailable.text()).toContain('连接不可用');
+    expect(unavailable.text()).not.toContain('尚未检查');
+    expect(unavailable.text()).not.toContain('未发现可用模型');
+    unavailable.unmount();
+
+    vi.mocked(aiApi.fetchAIHealth).mockResolvedValueOnce(baseStatus);
+    vi.mocked(aiApi.fetchAIProviderModels).mockResolvedValueOnce({ ...baseStatus, models: [] });
+    const empty = mountStatus({});
+    await flushPromises();
+    expect(empty.text()).toContain('连接正常');
+    expect(empty.text()).toContain('未发现可用模型，可手动输入模型名称');
+    empty.unmount();
+
+    vi.mocked(aiApi.fetchAIHealth).mockRejectedValueOnce(new Error('unsafe-marker'));
+    vi.mocked(aiApi.fetchAIProviderModels).mockResolvedValueOnce(baseStatus);
+    const failed = mountStatus({});
+    await flushPromises();
+    expect(failed.text()).toContain('检查失败');
+    expect(failed.text()).toContain('AI 服务暂时不可用');
+    expect(failed.text()).not.toContain('unsafe-marker');
+  });
+
   it('shows Ollama-only runtime details only for Ollama', async () => {
     vi.spyOn(aiApi, 'fetchAIProviderModels')
       .mockResolvedValueOnce({ ...baseStatus, provider: 'ollama', models: [] })
@@ -95,8 +155,8 @@ describe('CurrentAIStatus', () => {
 
   it('ignores stale model responses after switching providers and after unmount', async () => {
     vi.spyOn(aiApi, 'fetchAIHealth').mockResolvedValue(baseStatus);
-    let resolveOpenAI!: (value: AIHealthStatus) => void;
-    let resolveGemini!: (value: AIHealthStatus) => void;
+    let resolveOpenAI!: (value: AIProviderHealthStatus) => void;
+    let resolveGemini!: (value: AIProviderHealthStatus) => void;
     vi.spyOn(aiApi, 'fetchAIProviderModels')
       .mockReturnValueOnce(new Promise((resolve) => { resolveOpenAI = resolve; }))
       .mockReturnValueOnce(new Promise((resolve) => { resolveGemini = resolve; }));

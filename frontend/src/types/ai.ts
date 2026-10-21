@@ -28,24 +28,34 @@ export interface AIProviderDetails {
   [key: string]: unknown;
 }
 
-export type AIHealthState = 'unchecked' | 'available' | 'unavailable' | 'healthy' | 'error';
+export type AIProviderHealthState = 'unchecked' | 'available' | 'unavailable';
 
-export interface AIHealthStatus {
-  provider?: AIProviderKey;
-  status: AIHealthState;
+export interface AIProviderHealthStatus {
+  provider: AIProviderKey;
+  status: AIProviderHealthState;
   message: string;
   checkedAt: string | null;
-  effectiveModel?: string;
-  safeBaseUrl?: string;
-  credentialState?: AIProviderCredentialState;
-  models?: AIProviderModel[];
-  details?: AIProviderDetails;
-  version?: string | null;
-  installedModelCount?: number;
-  runningModelCount?: number;
-  generated?: boolean;
-  ollamaRuntime?: OllamaRuntimeStatus | null;
+  effectiveModel: string;
+  safeBaseUrl: string;
+  credentialState: AIProviderCredentialState;
+  models: AIProviderModel[];
+  details: AIProviderDetails;
 }
+
+export type OllamaHealthState = 'unchecked' | 'healthy' | 'error';
+
+export interface OllamaHealthStatus {
+  status: OllamaHealthState;
+  message: string;
+  checkedAt: string | null;
+  version: string | null;
+  installedModelCount: number;
+  runningModelCount: number;
+  generated: boolean;
+  ollamaRuntime: OllamaRuntimeStatus | null;
+}
+
+export type AIHealthStatus = AIProviderHealthStatus | OllamaHealthStatus;
 
 export interface AIProviderDraft {
   provider?: AIProviderKey;

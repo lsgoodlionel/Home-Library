@@ -1,8 +1,8 @@
 import { API_TIMEOUTS, apiClient } from './client';
 import type {
-  AIHealthStatus,
   AIModel,
   AIProviderDraft,
+  AIProviderHealthStatus,
   ClassifyBookRequest,
   ClassifyBookResponse,
   DetectDuplicateRequest,
@@ -13,6 +13,7 @@ import type {
   RecommendBookContentResponse,
   SummarizeBookRequest,
   SummarizeBookResponse,
+  OllamaHealthStatus,
 } from '@/types/ai';
 import type { AIProviderKey, OllamaRuntimeStatus } from '@/types/settings';
 
@@ -32,7 +33,7 @@ interface ApiOllamaRuntimeStatus {
 }
 
 interface ApiOllamaHealthResponse {
-  status: AIHealthStatus['status'];
+  status: OllamaHealthStatus['status'];
   message: string;
   checked_at?: string | null;
   version?: string | null;
@@ -73,7 +74,7 @@ function normalizeOllamaRuntime(data: ApiOllamaRuntimeStatus): OllamaRuntimeStat
   };
 }
 
-function normalizeOllamaHealth(data: ApiOllamaHealthResponse): AIHealthStatus {
+function normalizeOllamaHealth(data: ApiOllamaHealthResponse): OllamaHealthStatus {
   return {
     status: data.status,
     message: data.message,
@@ -94,7 +95,7 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-function normalizeProviderHealth(data: ApiAIProviderHealthResponse): AIHealthStatus {
+function normalizeProviderHealth(data: ApiAIProviderHealthResponse): AIProviderHealthStatus {
   const details = data.details || {};
   return {
     provider: data.provider,
@@ -129,7 +130,7 @@ async function runProviderOperation(
   provider: AIProviderKey,
   operation: 'test' | 'models' | 'generate-test',
   draft: AIProviderDraft | undefined,
-): Promise<AIHealthStatus> {
+): Promise<AIProviderHealthStatus> {
   const { data } = await apiClient.post<ApiAIProviderHealthResponse>(
     `/ai/providers/${provider}/${operation}`,
     providerDraftBody(draft),
@@ -207,7 +208,7 @@ export async function getAIModels(): Promise<AIModel[]> {
   }));
 }
 
-export async function fetchAIHealth(refresh = false): Promise<AIHealthStatus> {
+export async function fetchAIHealth(refresh = false): Promise<AIProviderHealthStatus> {
   const { data } = await apiClient.get<ApiAIProviderHealthResponse>('/ai/health', {
     params: { refresh },
     timeout: API_TIMEOUTS.aiHealth,
@@ -215,19 +216,19 @@ export async function fetchAIHealth(refresh = false): Promise<AIHealthStatus> {
   return normalizeProviderHealth(data);
 }
 
-export function testAIProvider(provider: AIProviderKey, draft?: AIProviderDraft): Promise<AIHealthStatus> {
+export function testAIProvider(provider: AIProviderKey, draft?: AIProviderDraft): Promise<AIProviderHealthStatus> {
   return runProviderOperation(provider, 'test', draft);
 }
 
-export function fetchAIProviderModels(provider: AIProviderKey, draft?: AIProviderDraft): Promise<AIHealthStatus> {
+export function fetchAIProviderModels(provider: AIProviderKey, draft?: AIProviderDraft): Promise<AIProviderHealthStatus> {
   return runProviderOperation(provider, 'models', draft);
 }
 
-export function generateAIProviderTest(provider: AIProviderKey, draft?: AIProviderDraft): Promise<AIHealthStatus> {
+export function generateAIProviderTest(provider: AIProviderKey, draft?: AIProviderDraft): Promise<AIProviderHealthStatus> {
   return runProviderOperation(provider, 'generate-test', draft);
 }
 
-export async function testAIConnection(generate: boolean): Promise<AIHealthStatus> {
+export async function testAIConnection(generate: boolean): Promise<OllamaHealthStatus> {
   const { data } = await apiClient.post<ApiOllamaHealthResponse>(
     '/ai/test-connection',
     { generate },

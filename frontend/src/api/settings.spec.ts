@@ -30,6 +30,34 @@ afterEach(() => {
 });
 
 describe('AI settings API normalization', () => {
+  it.each([
+    ['configured', true],
+    ['missing', false],
+    ['unusable', false],
+  ] as const)('normalizes %s credential state and saved-key compatibility', async (credentialState, hasApiKey) => {
+    vi.spyOn(apiClient, 'get').mockResolvedValue({
+      data: {
+        ai_enabled: true,
+        active_provider: 'openai',
+        default_model: 'gpt-5-mini',
+        providers: [{
+          provider: 'openai',
+          enabled: true,
+          base_url: 'https://api.openai.com/v1',
+          default_model: 'gpt-5-mini',
+          note: '',
+          credential_state: credentialState,
+          has_api_key: hasApiKey,
+        }],
+        ollama_runtime: runtimePayload,
+      },
+    });
+
+    const loaded = await fetchAIModelSettings();
+
+    expect(loaded.providers[0]).toMatchObject({ credentialState, hasApiKey });
+  });
+
   it('normalizes AI disabled and provider credential states', async () => {
     vi.spyOn(apiClient, 'get').mockResolvedValue({
       data: {
@@ -81,6 +109,7 @@ describe('AI settings API normalization', () => {
         baseUrl: 'https://api.openai.com/v1',
         defaultModel: 'gpt-5-mini',
         note: '',
+        hasApiKey: true,
         credentialState: 'configured',
         apiKey,
         clearApiKey,

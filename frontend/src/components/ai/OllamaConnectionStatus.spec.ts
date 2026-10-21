@@ -1,10 +1,10 @@
 import { mount } from '@vue/test-utils';
 import { describe, expect, it } from 'vitest';
 
-import type { AIHealthStatus } from '@/types/ai';
+import type { OllamaHealthStatus } from '@/types/ai';
 import OllamaConnectionStatus from './OllamaConnectionStatus.vue';
 
-const status: AIHealthStatus = {
+const status: OllamaHealthStatus = {
   status: 'healthy',
   message: 'AI 服务连接正常',
   checkedAt: '2026-10-20T08:00:00Z',
@@ -24,7 +24,7 @@ const status: AIHealthStatus = {
   },
 };
 
-function mountStatus(overrides: Partial<AIHealthStatus> = {}, isAdmin = false) {
+function mountStatus(overrides: Partial<OllamaHealthStatus> = {}, isAdmin = false) {
   return mount(OllamaConnectionStatus, {
     props: {
       status: { ...status, ...overrides },
