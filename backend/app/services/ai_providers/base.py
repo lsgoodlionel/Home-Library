@@ -14,6 +14,41 @@ ProviderHealthStatus = Literal["available", "unavailable", "unchecked"]
 
 
 @dataclass(frozen=True, slots=True)
+class OllamaProviderRuntimeOptions:
+    trusted_base_url: str
+    access_client_id: SecretStr | None = field(default=None, repr=False, compare=False)
+    access_client_secret: SecretStr | None = field(default=None, repr=False, compare=False)
+    uses_access: bool = False
+    config_version: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.access_client_id, str):
+            object.__setattr__(self, "access_client_id", SecretStr(self.access_client_id))
+        if isinstance(self.access_client_secret, str):
+            object.__setattr__(self, "access_client_secret", SecretStr(self.access_client_secret))
+
+    def get_access_credentials(self) -> tuple[str, str]:
+        client_id = (
+            self.access_client_id.get_secret_value()
+            if self.access_client_id is not None
+            else ""
+        )
+        client_secret = (
+            self.access_client_secret.get_secret_value()
+            if self.access_client_secret is not None
+            else ""
+        )
+        return client_id, client_secret
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "trusted_base_url": self.trusted_base_url,
+            "uses_access": self.uses_access,
+            "config_version": self.config_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AIProviderRuntime:
     provider: str
     enabled: bool
@@ -24,6 +59,11 @@ class AIProviderRuntime:
     connect_timeout_seconds: float = 20.0
     read_timeout_seconds: float = 180.0
     verify_tls: bool = True
+    ollama: OllamaProviderRuntimeOptions | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if isinstance(self.credential, str):
@@ -35,6 +75,7 @@ class AIProviderRuntime:
     def to_safe_dict(self) -> dict[str, Any]:
         safe = asdict(self)
         safe.pop("credential", None)
+        safe["ollama"] = self.ollama.to_safe_dict() if self.ollama is not None else None
         return safe
 
 
@@ -60,6 +101,7 @@ class AIProviderHealth:
     effective_model: str
     safe_base_url: str
     credential_state: CredentialState
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -248,6 +290,7 @@ __all__ = [
     "AIProviderRuntime",
     "AIProviderUpstreamError",
     "CredentialState",
+    "OllamaProviderRuntimeOptions",
     "ProviderHealthStatus",
     "map_provider_exception",
     "run_provider_operation",

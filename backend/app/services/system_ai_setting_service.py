@@ -18,6 +18,7 @@ from app.services.credential_crypto import (
     CredentialCryptoError,
     is_production_secret_key,
 )
+from app.services.ai_health_status_cache import provider_model_cache
 
 
 ConfigurationSource = Literal["database", "environment", "default"]
@@ -382,6 +383,7 @@ def update_server_ai_config(
     del db, values, credentials
     if isinstance(outcome, Exception):
         raise outcome from None
+    provider_model_cache.invalidate_all()
     return outcome
 
 
@@ -390,4 +392,5 @@ def reset_server_ai_config(db: Session, *, actor_id: int) -> ServerAIConfig:
     del db
     if isinstance(outcome, Exception):
         raise outcome from None
+    provider_model_cache.invalidate_all()
     return outcome

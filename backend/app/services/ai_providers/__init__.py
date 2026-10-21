@@ -4,6 +4,7 @@ from app.services.ai_providers.base import (
     AIProviderModel,
     AIProviderModelList,
     AIProviderRuntime,
+    OllamaProviderRuntimeOptions,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "AIProviderModel",
     "AIProviderModelList",
     "AIProviderRuntime",
+    "OllamaProviderRuntimeOptions",
 ]

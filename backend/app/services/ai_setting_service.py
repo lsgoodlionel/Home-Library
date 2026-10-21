@@ -28,6 +28,7 @@ from app.services.ai_provider_credential_service import (
     _cipher as _account_credential_cipher,
     get_provider_credential_state,
 )
+from app.services.ai_health_status_cache import provider_model_cache
 from app.services.system_ai_setting_service import _get_effective_server_ai_state
 
 
@@ -399,6 +400,7 @@ def update_user_ai_settings(
     user: User,
     payload: AISettingsUpdate,
 ) -> AISettingsResponse:
+    user_id = user.id
     consumed = _consume_provider_api_keys(payload)
     if isinstance(consumed, ApiError):
         del db, user, payload
@@ -414,6 +416,7 @@ def update_user_ai_settings(
     del db, user, payload, credential_updates, consumed
     if isinstance(outcome, ApiError):
         raise outcome from None
+    provider_model_cache.invalidate_user(user_id)
     return outcome
 
 
