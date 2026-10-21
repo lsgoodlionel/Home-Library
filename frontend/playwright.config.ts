@@ -18,7 +18,8 @@ export default defineConfig({
   webServer: {
     command: `npm run dev -- --host 127.0.0.1 --port ${serverPort} --strictPort`,
     url: baseURL,
-    reuseExistingServer: true,
+    // A shared port may belong to another checkout and serve different source.
+    reuseExistingServer: false,
     timeout: 120_000,
   },
   projects: [

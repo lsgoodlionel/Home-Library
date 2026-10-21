@@ -63,6 +63,7 @@ async function installControlledApi(page: Page, role: 'admin' | 'member' = 'admi
     uses_access: systemConfig.credential_state.credentials_usable,
   });
   const accountConfig = () => ({
+    ai_enabled: true,
     active_provider: 'ollama',
     default_model: systemConfig.default_model,
     providers: [{
@@ -73,6 +74,7 @@ async function installControlledApi(page: Page, role: 'admin' | 'member' = 'admi
       default_model: systemConfig.default_model,
       note: '受服务器边界约束的当前账号 Ollama 偏好',
       has_api_key: false,
+      credential_state: 'missing',
     }],
     ollama_runtime: runtime(),
   });
@@ -85,6 +87,17 @@ async function installControlledApi(page: Page, role: 'admin' | 'member' = 'admi
     running_model_count: 0,
     generated: false,
     ollama_runtime: runtime(),
+  });
+  const providerStatus = () => ({
+    provider: 'ollama',
+    status: 'available',
+    message: '测试上游连接正常',
+    checked_at: '2026-10-21T00:00:00Z',
+    effective_model: systemConfig.default_model,
+    safe_base_url: systemConfig.default_base_url,
+    credential_state: systemConfig.credential_state.credentials_usable ? 'configured' : 'missing',
+    models: [{ provider: 'ollama', id: systemConfig.default_model, name: systemConfig.default_model }],
+    details: { version: 'test-upstream', installed_model_count: 1, running_model_count: 0, uses_access: runtime().uses_access },
   });
 
   await routeApi('/api/auth/login', (route) => json(route, {
@@ -111,6 +124,10 @@ async function installControlledApi(page: Page, role: 'admin' | 'member' = 'admi
     }
     return json(route, healthy());
   });
+  await routeApi('/api/ai/providers/ollama/models', (route) => json(route, providerStatus()));
+  await routeApi('/api/system/ai-config/models', (route) => json(route, {
+    models: [{ name: systemConfig.default_model }],
+  }));
   await routeApi('/api/system/ai-config', async (route) => {
     if (route.request().method() === 'PUT') {
       saveRequests += 1;
@@ -149,7 +166,7 @@ async function installControlledApi(page: Page, role: 'admin' | 'member' = 'admi
     if (forcedHealthFailure) {
       return json(route, { error: { code: 'AI_CONNECT_TIMEOUT', message: 'controlled upstream unavailable' } }, 503);
     }
-    return json(route, healthy());
+    return json(route, providerStatus());
   });
   await routeApi('/api/books', (route) => json(route, {
     items: [], total: 0, page: 1, page_size: 20,
@@ -194,12 +211,12 @@ test.describe('system AI settings', () => {
     await expect(page.getByRole('menuitem', { name: '设置' })).toBeVisible();
     await page.getByRole('menuitem', { name: '设置' }).click();
     await expect(page).toHaveURL('/settings');
-    await expect(page.getByRole('heading', { name: '当前账号 AI 偏好' })).toBeVisible();
-    await expect(page.getByRole('region', { name: '服务器 AI 配置' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: '当前账号 AI 配置' })).toBeVisible();
+    await expect(page.getByRole('region', { name: '服务器 Ollama 网关' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: '保存服务器配置' })).toHaveCount(0);
     await page.reload();
     await expect(page).toHaveURL('/settings');
-    await expect(page.getByRole('heading', { name: '当前账号 AI 偏好' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '当前账号 AI 配置' })).toBeVisible();
     expect(api.serverRequests).toEqual([]);
     for (const path of ['/users', '/categories', '/locations']) {
       await page.goto(path);
@@ -207,7 +224,7 @@ test.describe('system AI settings', () => {
     }
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto('/settings');
-    await expect(page.getByRole('heading', { name: '当前账号 AI 偏好' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '当前账号 AI 配置' })).toBeVisible();
     await expect(page.getByRole('button', { name: '保存设置', exact: true })).toBeVisible();
     expect(api.serverRequests).toEqual([]);
   });
@@ -218,10 +235,12 @@ test.describe('system AI settings', () => {
     await page.getByRole('menuitem', { name: '设置', exact: true }).click();
     await expect(page).toHaveURL('/settings');
 
-    const server = page.getByRole('region', { name: '服务器 AI 配置' });
+    const server = page.getByRole('region', { name: '服务器 Ollama 网关' });
     await expect(server).toBeVisible();
-    await expect(page.getByRole('heading', { name: '当前运行状态' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '当前账号 AI 偏好' })).toBeVisible();
+    const status = page.locator('.current-ai-status');
+    await expect(status).toBeVisible();
+    await expect(status).toContainText('Ollama');
+    await expect(page.getByRole('heading', { name: '当前账号 AI 配置' })).toBeVisible();
 
     await expect(server.getByTestId('access-client-id')).toHaveJSProperty('tagName', 'INPUT');
     await server.getByTestId('access-client-id').fill('synthetic-client-id');
@@ -230,7 +249,10 @@ test.describe('system AI settings', () => {
     expect(api.saveRequests).toBe(0);
 
     await server.getByTestId('access-client-secret').fill('synthetic-client-secret');
-    await server.getByPlaceholder('qwen3.5:4b').fill('persisted-test-model');
+    const serverModel = server.getByTestId('server-default-model');
+    await serverModel.locator('.el-select__wrapper').click();
+    await serverModel.getByRole('combobox').fill('persisted-test-model');
+    await page.getByRole('option', { name: 'persisted-test-model', exact: true }).click();
     await server.getByRole('button', { name: '保存服务器配置' }).click();
 
     const authDialog = page.getByTestId('auth-dialog');
@@ -242,15 +264,15 @@ test.describe('system AI settings', () => {
     await authDialog.getByRole('button', { name: '确认保存' }).click();
 
     await expect(page.getByText('服务器 AI 配置已保存', { exact: true })).toBeVisible();
-    await expect(page.getByRole('region', { name: 'Ollama 连接状态' }).getByText('连接异常', { exact: true })).toBeVisible();
-    await expect(page.getByRole('region', { name: 'Ollama 连接状态' }).getByText('连接 AI 服务超时，请检查服务地址和网络连接。', { exact: true })).toBeVisible();
+    await expect(status.getByText('检查失败', { exact: true })).toBeVisible();
+    await expect(status.locator('.status-message')).toHaveText('连接 AI 服务超时，请检查服务地址和网络连接。');
     await expect(authDialog).toBeHidden();
     expect(api.saveRequests).toBe(1);
     expect(api.submittedBothAccessValues).toBe(true);
 
     await page.reload();
     await expect(server.locator('.el-tag').getByText('数据库配置', { exact: true })).toBeVisible();
-    await expect(server.getByPlaceholder('qwen3.5:4b')).toHaveValue('persisted-test-model');
+    await expect(serverModel).toContainText('persisted-test-model');
     await expect(server.getByText('凭据完整且可用', { exact: true })).toBeVisible();
     await expect(page.locator('.el-card__header').getByText('外部检索', { exact: true })).toBeVisible();
 
@@ -261,7 +283,7 @@ test.describe('system AI settings', () => {
     await expect(page.getByText('暂无符合条件的图书', { exact: true })).toBeVisible();
     await page.getByRole('menuitem', { name: '设置', exact: true }).click();
     await expect(page).toHaveURL('/settings');
-    await expect(page.getByRole('region', { name: 'Ollama 连接状态' }).getByText('连接异常', { exact: true })).toBeVisible();
+    await expect(status.getByText('检查失败', { exact: true })).toBeVisible();
 
     await server.getByRole('button', { name: '恢复环境变量配置' }).click();
     await page.getByRole('button', { name: '继续恢复' }).click();
@@ -272,6 +294,7 @@ test.describe('system AI settings', () => {
 
     await expect(page.getByText('服务器 AI 配置已恢复', { exact: true })).toBeVisible();
     await expect(server.locator('.el-tag').getByText('环境变量', { exact: true })).toBeVisible();
+    await expect(status.getByText('连接正常', { exact: true })).toBeVisible();
     expect(api.resetRequests).toBe(1);
 
     await page.getByRole('menuitem', { name: '藏书', exact: true }).click();
@@ -286,7 +309,7 @@ test.describe('system AI settings', () => {
     await loginAsAdmin(page);
     await page.goto('/settings');
 
-    const server = page.getByRole('region', { name: '服务器 AI 配置' });
+    const server = page.getByRole('region', { name: '服务器 Ollama 网关' });
     await expect(server).toBeVisible();
     await expect(server.getByRole('button', { name: '保存服务器配置' })).toBeVisible();
     await expect(server.getByRole('button', { name: '测试连接' })).toBeVisible();
@@ -295,7 +318,7 @@ test.describe('system AI settings', () => {
     const layout = await page.evaluate(() => ({
       viewportWidth: window.innerWidth,
       documentWidth: document.documentElement.scrollWidth,
-      serverRight: document.querySelector('[aria-label="服务器 AI 配置"]')?.getBoundingClientRect().right ?? 0,
+      serverRight: document.querySelector('[aria-label="服务器 Ollama 网关"]')?.getBoundingClientRect().right ?? 0,
     }));
     expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewportWidth);
     expect(layout.serverRight).toBeLessThanOrEqual(layout.viewportWidth);
