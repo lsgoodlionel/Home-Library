@@ -309,8 +309,9 @@ def _prepare_business_task_snapshot(
                 identity_exc.__traceback__ = None
                 identity_exc.__cause__ = None
                 identity_exc.__context__ = None
-        audit_db = audit_sessions() if audit_sessions is not None else db
+        audit_db: Session | None = None
         try:
+            audit_db = audit_sessions() if audit_sessions is not None else db
             create_ai_task(
                 audit_db,
                 task_type=task_type,
@@ -325,7 +326,7 @@ def _prepare_business_task_snapshot(
             audit_exc.__cause__ = None
             audit_exc.__context__ = None
         finally:
-            if audit_db is not db:
+            if audit_db is not None and audit_db is not db:
                 try:
                     audit_db.close()
                 except Exception as close_exc:

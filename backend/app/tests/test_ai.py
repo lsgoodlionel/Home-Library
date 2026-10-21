@@ -741,6 +741,150 @@ def test_snapshot_audit_failure_preserves_original_safe_error_and_graph(
     )
 
 
+@pytest.mark.parametrize("provider", ["openai", "ollama"])
+@pytest.mark.parametrize("audit_stage", ["factory", "create", "commit", "refresh", "close", "commit_close"])
+@pytest.mark.parametrize(
+    ("stage", "expected_code", "expected_message", "expected_category"),
+    [
+        ("template", "AI_RESPONSE_INVALID", "模型返回内容不能安全使用", "invalid_response"),
+        ("categories", "AI_UPSTREAM_ERROR", "上游 AI 服务异常", "upstream"),
+    ],
+)
+def test_snapshot_audit_lifecycle_failure_preserves_original_safe_error_and_graph(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    audit_stage: str,
+    stage: str,
+    expected_code: str,
+    expected_message: str,
+    expected_category: str,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    runtime = AIProviderRuntime(
+        provider=provider,
+        enabled=True,
+        base_url="https://provider.example.test",
+        default_model="provider-model",
+        credential_state="configured",
+        credential="snapshot-credential-sensitive-marker" if provider == "openai" else None,
+        ollama=OllamaProviderRuntimeOptions(
+            trusted_base_url="https://provider.example.test",
+            access_client_id="snapshot-access-id-sensitive-marker",
+            access_client_secret="snapshot-access-secret-sensitive-marker",
+            uses_access=True,
+        ) if provider == "ollama" else None,
+    )
+    payload = (
+        NaturalSearchRequest(query="payload-sensitive-marker")
+        if stage == "template" else ClassifyBookRequest(title="payload-sensitive-marker")
+    )
+    original = ValueError("template-sensitive-marker") if stage == "template" else RuntimeError(
+        "categories-sensitive-marker"
+    )
+    original.__cause__ = RuntimeError("original-cause-sensitive-marker")
+    audit_errors: list[BaseException] = []
+    events: list[str] = []
+
+    def fail_original(*args: Any) -> None:
+        raise original
+
+    def fail_audit() -> None:
+        error = AIProviderInvalidConfigurationError()
+        error.args = ("audit-sensitive-marker",)
+        error.sensitive = {  # type: ignore[attr-defined]
+            "runtime": runtime,
+            "payload": payload,
+            "prompt": "full-prompt-sensitive-marker",
+            "raw_response": "raw-response-sensitive-marker",
+        }
+        error.__cause__ = RuntimeError("audit-cause-sensitive-marker")
+        audit_errors.append(error)
+        raise error
+
+    class AuditDB:
+        def add(self, task: AITask) -> None:
+            events.append("add")
+
+        def commit(self) -> None:
+            events.append("commit")
+            if audit_stage in {"commit", "commit_close"}:
+                fail_audit()
+
+        def refresh(self, task: AITask) -> None:
+            events.append("refresh")
+            if audit_stage == "refresh":
+                fail_audit()
+
+        def close(self) -> None:
+            events.append("close")
+            if audit_stage in {"close", "commit_close"}:
+                fail_audit()
+
+    def audit_factory() -> AuditDB:
+        events.append("factory")
+        if audit_stage == "factory":
+            fail_audit()
+        return AuditDB()
+
+    create_task = ai_routes.create_ai_task
+
+    def record_task(db: Session, **kwargs: Any) -> AITask:
+        events.append("create")
+        if audit_stage == "create":
+            fail_audit()
+        return create_task(db, **kwargs)
+
+    monkeypatch.setattr(ai_routes.runtime_service, "resolve_ai_provider_runtime", lambda db, user: runtime)
+    monkeypatch.setattr(ai_routes, "sessionmaker", lambda **kwargs: audit_factory)
+    monkeypatch.setattr(ai_routes, "create_ai_task", record_task)
+    monkeypatch.setattr(
+        ai_routes, "load_prompt_template",
+        fail_original if stage == "template" else lambda name: "full-prompt-sensitive-marker {categories}",
+    )
+    monkeypatch.setattr(ai_routes, "_format_categories_for_prompt", fail_original)
+
+    class FakeDB:
+        def get_bind(self) -> None:
+            return None
+
+    route = ai_routes.natural_search if stage == "template" else ai_routes.classify_book
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(route(payload, FakeDB(), SimpleNamespace(id=7)))
+
+    assert (caught.value.status_code, caught.value.code, caught.value.message) == (
+        502, expected_code, expected_message,
+    )
+    assert caught.value.details == {"category": expected_category}
+    expected_steps = ["factory", "create", "add", "commit", "refresh"]
+    stop = "commit" if audit_stage == "commit_close" else audit_stage
+    if stop != "close":
+        expected_steps = expected_steps[:expected_steps.index(stop) + 1]
+    if audit_stage != "factory":
+        expected_steps.append("close")
+    assert events == expected_steps
+    assert len(audit_errors) == (2 if audit_stage == "commit_close" else 1)
+    for source in [original, *audit_errors]:
+        assert source.__traceback__ is None
+        assert source.__cause__ is None
+        assert source.__context__ is None
+    _assert_route_exception_graph_excludes(
+        caught.value,
+        "snapshot-credential-sensitive-marker",
+        "snapshot-access-id-sensitive-marker",
+        "snapshot-access-secret-sensitive-marker",
+        "template-sensitive-marker",
+        "categories-sensitive-marker",
+        "original-cause-sensitive-marker",
+        "payload-sensitive-marker",
+        "full-prompt-sensitive-marker",
+        "raw-response-sensitive-marker",
+        "audit-sensitive-marker",
+        "audit-cause-sensitive-marker",
+        forbidden_types=(AIProviderRuntime, OllamaProviderRuntimeOptions, AuditDB),
+    )
+
+
 @pytest.mark.parametrize(("generate", "probe_count"), [(False, 3), (True, 4)])
 def test_health_probes_run_concurrently_within_one_backend_timeout(
     monkeypatch: pytest.MonkeyPatch,
