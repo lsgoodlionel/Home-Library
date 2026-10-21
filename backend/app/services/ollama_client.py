@@ -32,9 +32,16 @@ _CF_1033_PATTERN = re.compile(rb"(?<!\d)1033(?!\d)")
 class OllamaClientError(Exception):
     category = "ollama_error"
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        reason: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.reason = reason
 
 
 class OllamaConnectTimeoutError(OllamaClientError):
@@ -74,6 +81,7 @@ class _SafeFailure:
     error_type: type[OllamaClientError]
     message: str
     status_code: int | None = None
+    reason: str | None = None
 
 
 class OllamaClient:
@@ -227,9 +235,14 @@ class OllamaClient:
                             request_error = _SafeFailure(
                                 OllamaUpstreamError,
                                 "Ollama connection failed",
+                                reason="connection_failed",
                             )
                     except httpx.RequestError:
-                        request_error = _SafeFailure(OllamaUpstreamError, "Ollama request failed")
+                        request_error = _SafeFailure(
+                            OllamaUpstreamError,
+                            "Ollama request failed",
+                            reason="request_failed",
+                        )
                     except (httpx.InvalidURL, UnicodeError, ValueError):
                         request_error = _SafeFailure(OllamaModelError, "Ollama base URL is invalid")
 
@@ -238,7 +251,11 @@ class OllamaClient:
                     if request_error is not None:
                         return request_error
 
-        return _SafeFailure(OllamaUpstreamError, "Ollama connection failed")
+        return _SafeFailure(
+            OllamaUpstreamError,
+            "Ollama connection failed",
+            reason="connection_failed",
+        )
 
 
 async def _request_and_validate(
@@ -384,7 +401,11 @@ def _failure_for_status(status_code: int, prefix: bytes) -> _SafeFailure:
 
 
 def _raise_safe_failure(failure: _SafeFailure) -> None:
-    raise failure.error_type(failure.message, status_code=failure.status_code)
+    raise failure.error_type(
+        failure.message,
+        status_code=failure.status_code,
+        reason=failure.reason,
+    )
 
 
 async def _read_prefix(response: httpx.Response, limit: int) -> bytes:

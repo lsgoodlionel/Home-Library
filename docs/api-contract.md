@@ -56,7 +56,7 @@
 | `AI_CONNECT_TIMEOUT` | 连接 AI 服务超时 |
 | `AI_RESPONSE_TIMEOUT` | 模型启动或生成超时 |
 | `AI_MODEL_ERROR` | 模型配置或请求参数错误 |
-| `AI_UPSTREAM_ERROR` | 上游 AI 服务异常 |
+| `AI_UPSTREAM_ERROR` | 上游连接/传输异常或其他 5xx；返回脱敏 reason、hostname 或 HTTP 状态 |
 | `AI_RESPONSE_INVALID` | 模型响应无法安全解析 |
 | `INTERNAL_ERROR` | 服务内部错误 |
 
@@ -508,7 +508,7 @@ UTF-8 编码最大 64 KiB。
 
 `DELETE` 请求体为 `admin_password`、`upgrade_password`、`confirm_reset: true`，删除全局覆盖，返回环境或默认配置，不删除账号偏好。PUT/DELETE 要求 HTTPS，或来自精确可信代理且 `X-Forwarded-Proto: https`，或直连回环且浏览器 Origin/Referer 也为回环；普通 Docker HTTP 代理不满足此条件。
 
-`POST /api/system/ai-config/test` 不接受待保存配置或凭据，只对当前生效配置及当前账号目标执行只读 version/tags/ps 检查。保存与健康检测是独立操作：保存 HTTP 200 后，测试可能返回 HTTP 502 / `AI_ACCESS_DENIED` / `access_denied`（上游 401/403），或连接/读取超时等既有稳定分类。测试失败不回滚保存。
+`POST /api/system/ai-config/test` 不接受待保存配置或凭据，只对当前生效配置及当前账号目标执行只读 version/tags/ps 检查。保存与健康检测是独立操作：保存 HTTP 200 后，测试可能返回 HTTP 502 / `AI_ACCESS_DENIED` / `access_denied`（上游 401/403），或连接/读取超时等既有稳定分类。测试失败不回滚保存。`AI_UPSTREAM_ERROR.details` 只允许安全诊断字段：`reason=connection_failed|request_failed`、规范化 hostname 和数字 HTTP 状态；前端据此区分“未收到 HTTP 响应”“传输失败”和“上游返回 HTTP 状态”，不透传原始异常或响应正文。
 
 PUT/DELETE 成功后才失效全部健康缓存。并发版本冲突（包含首次创建竞争）返回 HTTP 409 / `AI_SERVER_CONFIG_CONFLICT`，提示“服务器 AI 配置已被其他请求修改，请刷新后重试”；失败方不修改配置、凭据或审计。数据库写入故障返回 HTTP 500 / `AI_SERVER_CONFIG_WRITE_FAILED` 与稳定中文提示，不包含 SQL、参数、明文或密文。升级密码按 UTF-8 bytes 恒定时间比较，支持 Unicode；错误或无法编码的输入稳定返回 403。
 
@@ -539,7 +539,7 @@ query 或 fragment。
 
 默认只检查只读端点。只有严格 JSON 布尔值 `true` 才执行最小生成测试，并使用 `keep_alive=0`；前端操作前需要二次确认。
 
-AI 错误使用上表稳定代码和中文消息，不返回 Prompt、图书全文、请求头、上游响应正文或凭据。AI 服务关闭、Access/Tunnel 故障或超时时，登录、藏书、检索、借阅、阅读、统计和备份接口仍保持可用。
+AI 错误使用上表稳定代码和中文消息。服务器配置保存后的自动测试与手动测试使用相同的脱敏错误映射；不返回 Prompt、图书全文、请求头、上游响应正文或凭据。AI 服务关闭、Access/Tunnel 故障或超时时，登录、藏书、检索、借阅、阅读、统计和备份接口仍保持可用。
 
 ### POST /api/ai/classify-book
 

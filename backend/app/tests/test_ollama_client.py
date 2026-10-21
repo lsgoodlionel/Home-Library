@@ -523,6 +523,26 @@ def test_transient_connect_failure_retries_once_before_response() -> None:
     assert attempts == 2
 
 
+def test_persistent_connect_failure_exposes_only_safe_diagnostic_reason() -> None:
+    secret_marker = "connect-error-secret-marker"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(secret_marker, request=request)
+
+    client = OllamaClient(_runtime(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(OllamaUpstreamError) as caught:
+        _run(client.version())
+
+    assert caught.value.reason == "connection_failed"
+    assert secret_marker not in str(caught.value)
+    _assert_sensitive_exception_state_unreachable(
+        caught.value,
+        secret_marker,
+        "client-secret-marker",
+    )
+
+
 def test_health_generation_and_chat_methods_use_expected_upstream_contracts() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/tags":

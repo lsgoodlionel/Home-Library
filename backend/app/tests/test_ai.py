@@ -1202,10 +1202,10 @@ def test_admin_connection_failure_updates_health_cache(
             id="model",
         ),
         pytest.param(
-            OllamaUpstreamError("safe", status_code=500),
+            OllamaUpstreamError("safe", reason="connection_failed"),
             "AI_UPSTREAM_ERROR",
             502,
-            "上游 AI 服务异常",
+            "未收到上游 HTTP 响应，无法建立连接（ollama.example.test）",
             id="upstream",
         ),
         pytest.param(
@@ -1258,6 +1258,8 @@ def test_health_failure_returns_chinese_classified_error_without_secret(
     assert response.json()["error"]["message"] == expected_message
     assert response.json()["error"]["details"]["hostname"] == "ollama.example.test"
     assert response.json()["error"]["details"]["category"] == getattr(error, "category")
+    if getattr(error, "reason", None):
+        assert response.json()["error"]["details"]["reason"] == error.reason
     assert cached.status_code == 200
     assert cached.json()["status"] == "error"
     assert cached.json()["message"] == expected_message

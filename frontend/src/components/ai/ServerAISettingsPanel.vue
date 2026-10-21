@@ -10,6 +10,7 @@ import {
   testSystemAIConfig,
 } from '@/api/settings';
 import type { SystemAIConfig, SystemAIConfigUpdate } from '@/types/settings';
+import { getAIErrorMessage } from '@/utils/aiErrors';
 
 const emit = defineEmits<{
   'runtime-changed': [config: SystemAIConfig];
@@ -190,9 +191,10 @@ async function runFollowUpTest(operation: '保存' | '恢复') {
   try {
     const health = await testSystemAIConfig();
     testStatus.value = health.message;
-  } catch {
-    testStatus.value = '连接测试失败';
-    ElMessage.warning(`配置已${operation}，但连接测试失败`);
+  } catch (error) {
+    const message = getAIErrorMessage(error);
+    testStatus.value = message;
+    ElMessage.warning(`配置已${operation}，但连接测试失败：${message}`);
   }
 }
 
@@ -250,8 +252,9 @@ async function runConnectionTest() {
     testStatus.value = health.message;
     ElMessage.success(health.message);
   } catch (error) {
-    testStatus.value = '连接测试失败';
-    ElMessage.error(getErrorMessage(error, '服务器 AI 连接测试失败'));
+    const message = getAIErrorMessage(error);
+    testStatus.value = message;
+    ElMessage.error(message);
   } finally {
     testing.value = false;
   }

@@ -137,6 +137,17 @@ def _ai_error_from_ollama(
                 details["hostname"] = hostname
             if exc.status_code is not None:
                 details["status"] = exc.status_code
+            if exc.reason:
+                details["reason"] = exc.reason
+            if isinstance(exc, OllamaUpstreamError):
+                if exc.status_code is not None:
+                    message = f"上游 AI 服务返回 HTTP {exc.status_code}"
+                elif exc.reason == "connection_failed":
+                    message = "未收到上游 HTTP 响应，无法建立连接"
+                elif exc.reason == "request_failed":
+                    message = "上游 AI 请求在传输过程中失败"
+                if hostname:
+                    message = f"{message}（{hostname}）"
             return ApiError(code, message, status_code=status_code, details=details)
     return ApiError("EXTERNAL_SERVICE_ERROR", "AI 服务调用失败", status_code=502)
 

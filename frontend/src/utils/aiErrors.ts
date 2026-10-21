@@ -12,6 +12,32 @@ const AI_ERROR_MESSAGES: Record<string, string> = {
 const GENERIC_AI_ERROR = 'AI 服务暂时不可用，请稍后重试；图书信息仍可手工填写和保存。';
 const ADMIN_PERMISSION_ERROR = '权限已变更，当前操作仅限管理员，请重新登录或联系管理员。';
 
+type SafeAIDetails = {
+  hostname?: unknown;
+  reason?: unknown;
+  status?: unknown;
+};
+
+function safeHostname(value: unknown): string {
+  return typeof value === 'string' && /^[a-z0-9.-]{1,253}$/i.test(value) ? value : '';
+}
+
+function getUpstreamDiagnostic(details: SafeAIDetails | undefined): string | null {
+  const hostname = safeHostname(details?.hostname);
+  const suffix = hostname ? `（${hostname}）` : '';
+  const status = details?.status;
+  if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599) {
+    return `上游 AI 服务返回 HTTP ${status}${suffix}。`;
+  }
+  if (details?.reason === 'connection_failed') {
+    return `未收到上游 HTTP 响应，无法建立连接${suffix}。`;
+  }
+  if (details?.reason === 'request_failed') {
+    return `上游 AI 请求在传输过程中失败${suffix}。`;
+  }
+  return null;
+}
+
 export function getAIErrorMessage(error: unknown): string {
   if (!error || typeof error !== 'object' || !('response' in error)) {
     return GENERIC_AI_ERROR;
@@ -20,13 +46,17 @@ export function getAIErrorMessage(error: unknown): string {
   const response = (error as {
     response?: {
       status?: unknown;
-      data?: { error?: { code?: unknown; status?: unknown; details?: { status?: unknown } } };
+      data?: { error?: { code?: unknown; status?: unknown; details?: SafeAIDetails } };
     };
   }).response;
   const code = response?.data?.error?.code;
   const errorStatus = response?.data?.error?.status ?? response?.data?.error?.details?.status;
   if (response?.status === 403 || (code === 'HTTP_ERROR' && errorStatus === 403)) {
     return ADMIN_PERMISSION_ERROR;
+  }
+  if (code === 'AI_UPSTREAM_ERROR') {
+    const diagnostic = getUpstreamDiagnostic(response?.data?.error?.details);
+    if (diagnostic) return diagnostic;
   }
   return typeof code === 'string' && AI_ERROR_MESSAGES[code]
     ? AI_ERROR_MESSAGES[code]

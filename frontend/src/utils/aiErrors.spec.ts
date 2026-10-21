@@ -46,4 +46,31 @@ describe('getAIErrorMessage', () => {
     expect(message.length).toBeLessThanOrEqual(40);
     expect(message).not.toContain(marker);
   });
+
+  it.each([
+    [
+      { reason: 'connection_failed', hostname: 'openclaw.lsgood.cn' },
+      '未收到上游 HTTP 响应，无法建立连接（openclaw.lsgood.cn）。',
+    ],
+    [
+      { status: 500, hostname: 'openclaw.lsgood.cn' },
+      '上游 AI 服务返回 HTTP 500（openclaw.lsgood.cn）。',
+    ],
+  ])('shows safe upstream diagnostics without using raw error text', (details, expected) => {
+    const marker = 'raw-upstream-secret-marker';
+    const message = getAIErrorMessage({
+      response: {
+        data: {
+          error: {
+            code: 'AI_UPSTREAM_ERROR',
+            message: marker,
+            details: { ...details, upstream: marker },
+          },
+        },
+      },
+    });
+
+    expect(message).toBe(expected);
+    expect(message).not.toContain(marker);
+  });
 });
