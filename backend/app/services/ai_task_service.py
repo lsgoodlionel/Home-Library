@@ -19,6 +19,7 @@ _MAX_OUTPUT_JSON_BYTES = 65_536
 _AUDIT_FIELD_ALLOWLIST = frozenset(
     {
         "model",
+        "provider",
         "title",
         "subtitle",
         "author",

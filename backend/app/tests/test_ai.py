@@ -39,7 +39,12 @@ from app.services.ai_health_status_cache import (
     provider_model_cache,
 )
 from app.services.ai_providers.ollama import OllamaProviderClient, _map_ollama_error
-from app.services.ai_providers.base import AIProviderInvalidConfigurationError
+from app.services.ai_providers.base import (
+    AIProviderInvalidConfigurationError,
+    AIProviderRuntime,
+    AIProviderUpstreamError,
+    OllamaProviderRuntimeOptions,
+)
 from app.services.ai_task_service import create_ai_task, sanitize_ai_task_input
 from app.services.ollama_client import (
     OllamaAccessDeniedError,
@@ -234,7 +239,6 @@ def _classify_payload() -> dict:
         "author": "费孝通",
         "publisher": "三联书店",
         "summary": "社会学经典作品",
-        "model": "qwen2.5",
     }
 
 
@@ -397,47 +401,118 @@ def test_business_route_api_error_traceback_drops_sensitive_locals(
 ) -> None:
     from app.api.routes import ai as ai_routes
 
-    runtime = OllamaRuntimeConfig(
+    runtime = AIProviderRuntime(
+        provider="ollama",
         enabled=True,
         base_url="https://ollama.example.test",
-        trusted_base_url="https://ollama.example.test",
         default_model="qwen3:8b",
+        credential_state="configured",
         connect_timeout_seconds=20,
         read_timeout_seconds=180,
         verify_tls=True,
-        access_client_id="client-id",
-        access_client_secret="access-secret-marker",
+        ollama=OllamaProviderRuntimeOptions(
+            trusted_base_url="https://ollama.example.test",
+            access_client_id="client-id",
+            access_client_secret="access-secret-marker",
+            uses_access=True,
+        ),
     )
 
     class FailingClient:
-        def __init__(self, configured_runtime: OllamaRuntimeConfig) -> None:
+        def __init__(self, configured_runtime: AIProviderRuntime) -> None:
             self.runtime = configured_runtime
 
         async def generate_json(self, **kwargs: Any) -> None:
-            raise OllamaUpstreamError("safe upstream failure")
+            raise AIProviderUpstreamError()
 
-    monkeypatch.setattr(ai_routes, "OllamaClient", FailingClient)
-    monkeypatch.setattr(ai_routes, "_record_failure", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        ai_routes,
-        "_prepare_runtime_and_template",
-        lambda *args: (runtime, template),
+        "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
+        lambda db, user: runtime,
     )
     monkeypatch.setattr(
-        ai_routes,
-        "_prepare_classify_context",
-        lambda *args: (runtime, "categories", template),
+        "app.services.ai_provider_runtime.create_ai_provider_client",
+        lambda configured_runtime: FailingClient(configured_runtime),
     )
+    monkeypatch.setattr(ai_routes, "load_prompt_template", lambda name: template)
+    monkeypatch.setattr(ai_routes, "_record_provider_task", lambda *args, **kwargs: None)
+
+    class FakeDB:
+        def get_bind(self) -> None:
+            return None
 
     route = getattr(ai_routes, route_name)
     with pytest.raises(ApiError) as caught:
-        asyncio.run(route(payload, object(), SimpleNamespace(id=7)))
+        asyncio.run(route(payload, FakeDB(), SimpleNamespace(id=7)))
 
     _assert_route_exception_graph_excludes(
         caught.value,
         "access-secret-marker",
         "prompt-sensitive-marker",
         "payload-sensitive-marker",
+    )
+
+
+def test_business_route_audit_failure_drops_sensitive_locals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    runtime = AIProviderRuntime(
+        provider="openai",
+        enabled=True,
+        base_url="https://openai.example.test/v1",
+        default_model="provider-model",
+        credential_state="configured",
+        credential="credential-sensitive-marker",
+    )
+
+    class SuccessfulClient:
+        async def generate_json(self, **kwargs: Any) -> Any:
+            return kwargs["response_model"].model_validate(
+                {"keyword": "审计", "tags": [], "model": kwargs["model"]}
+            )
+
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
+        lambda db, user: runtime,
+    )
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.create_ai_provider_client",
+        lambda configured_runtime: SuccessfulClient(),
+    )
+    monkeypatch.setattr(
+        ai_routes,
+        "load_prompt_template",
+        lambda name: "prompt-sensitive-marker {query}",
+    )
+    monkeypatch.setattr(
+        ai_routes,
+        "_record_provider_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("audit-sensitive-marker")
+        ),
+    )
+
+    class FakeDB:
+        def get_bind(self) -> None:
+            return None
+
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(
+            ai_routes.natural_search(
+                NaturalSearchRequest(query="payload-sensitive-marker"),
+                FakeDB(),
+                SimpleNamespace(id=7),
+            )
+        )
+
+    assert caught.value.code == "AI_UPSTREAM_ERROR"
+    _assert_route_exception_graph_excludes(
+        caught.value,
+        "credential-sensitive-marker",
+        "prompt-sensitive-marker",
+        "payload-sensitive-marker",
+        "audit-sensitive-marker",
     )
 
 
@@ -1820,9 +1895,7 @@ def test_ai_task_input_truncates_long_summary_and_never_stores_headers(
 
     assert response.status_code == 200
     audit = json.loads(db.query(AITask).one().input_data)
-    assert len(audit["current"]["summary"]) <= 512
-    assert len(audit["candidates"][0]["summary"]) <= 512
-    assert len(audit["missing_fields"]) == 20
+    assert audit == {"provider": "ollama"}
     serialized = json.dumps(audit, ensure_ascii=False).lower()
     assert "headers" not in serialized
     assert "authorization" not in serialized
@@ -2047,10 +2120,8 @@ def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
 
     sync_threads: list[int] = []
     event_loop_threads: list[int] = []
-    original_runtime = ai_routes.get_ollama_runtime_config
-    original_categories = ai_routes._format_categories_for_prompt
-    original_template = ai_routes.load_prompt_template
-    original_create_task = ai_routes.create_ai_task
+    original_prepare = ai_routes._prepare_business_task_snapshot
+    original_record = ai_routes._record_provider_task
 
     def track_sync(callable_):
         def wrapper(*args, **kwargs):
@@ -2060,7 +2131,7 @@ def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
         return wrapper
 
     class ThreadTrackingClient:
-        def __init__(self, runtime: OllamaRuntimeConfig) -> None:
+        def __init__(self, runtime: AIProviderRuntime) -> None:
             self.runtime = runtime
 
         async def generate_json(self, **kwargs):
@@ -2076,11 +2147,16 @@ def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
                 }
             )
 
-    monkeypatch.setattr(ai_routes, "get_ollama_runtime_config", track_sync(original_runtime))
-    monkeypatch.setattr(ai_routes, "_format_categories_for_prompt", track_sync(original_categories))
-    monkeypatch.setattr(ai_routes, "load_prompt_template", track_sync(original_template))
-    monkeypatch.setattr(ai_routes, "create_ai_task", track_sync(original_create_task))
-    monkeypatch.setattr(ai_routes, "OllamaClient", ThreadTrackingClient)
+    monkeypatch.setattr(
+        ai_routes,
+        "_prepare_business_task_snapshot",
+        track_sync(original_prepare),
+    )
+    monkeypatch.setattr(ai_routes, "_record_provider_task", track_sync(original_record))
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.create_ai_provider_client",
+        ThreadTrackingClient,
+    )
 
     response = client.post(
         "/api/ai/classify-book",
@@ -2090,7 +2166,7 @@ def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
 
     assert response.status_code == 200
     assert event_loop_threads
-    assert len(sync_threads) == 4
+    assert len(sync_threads) == 2
     assert all(thread_id != event_loop_threads[0] for thread_id in sync_threads)
 
 
@@ -2122,7 +2198,7 @@ def test_ai_failure_does_not_modify_book_or_block_non_ai_health(
     assert response.json()["error"]["code"] == "AI_RESPONSE_INVALID"
     assert (book.title, book.author, book.summary, book.category_id) == original
     assert task.status == "failed"
-    assert task.error_message == "response_invalid"
+    assert task.error_message == "invalid_response"
     assert client.get("/api/health").json() == {"status": "ok"}
 
 
@@ -2158,12 +2234,13 @@ def test_classify_book_accepts_valid_model_json(
     assert response.status_code == 200
     data = response.json()
     assert data["category_code"] == "C91"
-    assert data["model"] == "qwen2.5"
+    assert data["model"] == "qwen3.5:4b"
 
     task = db.query(AITask).one()
     assert task.task_type == "classify_book"
     assert task.status == "success"
-    assert json.loads(task.output_data or "{}")["category_code"] == "C91"
+    assert json.loads(task.input_data) == {"provider": "ollama"}
+    assert task.output_data is None
 
 
 def test_classify_book_rejects_invalid_model_json(
@@ -2188,7 +2265,7 @@ def test_classify_book_rejects_invalid_model_json(
 
     task = db.query(AITask).one()
     assert task.status == "failed"
-    assert task.error_message == "response_invalid"
+    assert task.error_message == "invalid_response"
 
 
 def test_ollama_unavailable_returns_clear_error(
@@ -2229,7 +2306,7 @@ def test_generate_tags_records_success(
     response = client.post(
         "/api/ai/generate-tags",
         headers=member_headers,
-        json={"title": "乡土中国", "summary": "社会学经典", "model": "qwen2.5"},
+        json={"title": "乡土中国", "summary": "社会学经典"},
     )
 
     assert response.status_code == 200
@@ -2277,14 +2354,13 @@ def test_recommend_book_content_records_success(
                 }
             ],
             "missing_fields": ["publisher", "publish_year", "summary"],
-            "model": "qwen2.5",
         },
     )
 
     assert response.status_code == 200
     data = response.json()
     assert data["recommended"]["publisher"] == "人民出版社"
-    assert data["model"] == "qwen2.5"
+    assert data["model"] == "qwen3.5:4b"
     task = db.query(AITask).one()
     assert task.task_type == "recommend_book_content"
     assert task.status == "success"

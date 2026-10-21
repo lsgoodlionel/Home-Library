@@ -10,14 +10,14 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from starlette.concurrency import run_in_threadpool
 
 from app.core.errors import ApiError
 from app.core.ollama_url import InvalidOllamaBaseURL, normalize_ollama_base_url
 from app.core.security import get_current_user, require_admin
 from app.db.session import get_db
-from app.models import Category
+from app.models import Category, UserAISetting
 from app.models.user import User
 from app.schemas.ai import (
     AIConnectionTestRequest,
@@ -48,6 +48,14 @@ from app.services.ai_setting_service import (
 )
 from app.services.ai_health_status_cache import ai_health_status_cache as _health_status_cache
 from app.services.ai_task_service import create_ai_task
+from app.services import ai_provider_runtime as runtime_service
+from app.services.ai_providers.base import (
+    AIProviderError,
+    AIProviderInvalidConfigurationError,
+    AIProviderRuntime,
+    map_provider_exception,
+    run_provider_operation,
+)
 from app.services.ollama_client import (
     OllamaAccessDeniedError,
     OllamaClient,
@@ -79,8 +87,18 @@ class _SafeHealthCancellation:
 _HEALTH_CANCELLED = _SafeHealthCancellation()
 
 
-def _model_name(requested_model: str | None, default_model: str) -> str:
-    return requested_model or default_model
+@dataclass(frozen=True, slots=True)
+class _BusinessTaskSnapshot:
+    runtime: AIProviderRuntime
+    user_id: int
+    audit_sessions: sessionmaker[Session]
+    template: str
+    categories: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _BusinessSnapshotFailure:
+    error: AIProviderError
 
 
 def _clean_text(value: str | None) -> str:
@@ -242,23 +260,88 @@ def _disabled_api_error(runtime: OllamaRuntimeConfig) -> ApiError | None:
     )
 
 
-def _prepare_runtime_and_template(
+def _prepare_business_task_snapshot(
     db: Session,
-    user: User | None,
+    user: User,
+    task_type: str,
     template_name: str,
-) -> tuple[OllamaRuntimeConfig, str]:
-    return get_ollama_runtime_config(db, user), load_prompt_template(template_name)
-
-
-def _prepare_classify_context(
-    db: Session,
-    user: User | None,
-) -> tuple[OllamaRuntimeConfig, str, str]:
-    return (
-        get_ollama_runtime_config(db, user),
-        _format_categories_for_prompt(db),
-        load_prompt_template("classify_book.txt"),
+    requested_model: str | None,
+    *,
+    include_categories: bool = False,
+) -> _BusinessTaskSnapshot | _BusinessSnapshotFailure:
+    try:
+        runtime = runtime_service.resolve_ai_provider_runtime(db, user)
+        if requested_model is not None and requested_model != runtime.default_model:
+            raise AIProviderInvalidConfigurationError() from None
+    except Exception as exc:
+        safe_error = map_provider_exception(exc)
+        setting = db.query(UserAISetting).filter_by(user_id=user.id).first()
+        if setting is None:
+            provider = "ollama"
+            model = get_server_ollama_runtime_config(db).default_model
+        else:
+            provider = setting.active_provider
+            model = setting.default_model
+        create_ai_task(
+            db,
+            task_type=task_type,
+            model=model,
+            input_data={"provider": provider},
+            status="failed",
+            error_message=safe_error.category,
+            created_by=user.id,
+        )
+        exc.__traceback__ = None
+        exc.__cause__ = None
+        exc.__context__ = None
+        return _BusinessSnapshotFailure(safe_error)
+    return _BusinessTaskSnapshot(
+        runtime=runtime,
+        user_id=user.id,
+        audit_sessions=sessionmaker(
+            bind=db.get_bind(),
+            autocommit=False,
+            autoflush=False,
+            expire_on_commit=False,
+        ),
+        template=load_prompt_template(template_name),
+        categories=_format_categories_for_prompt(db) if include_categories else "",
     )
+
+
+async def _load_business_task_snapshot(
+    db: Session,
+    user: User,
+    task_type: str,
+    template_name: str,
+    requested_model: str | None,
+    *,
+    include_categories: bool = False,
+) -> _BusinessTaskSnapshot | _SafeApiFailure:
+    try:
+        snapshot = await run_in_threadpool(
+            _prepare_business_task_snapshot,
+            db,
+            user,
+            task_type,
+            template_name,
+            requested_model,
+            include_categories=include_categories,
+        )
+    except Exception as exc:
+        from app.api.routes.ai_providers import _provider_api_error
+
+        failure = _provider_api_error(exc)
+        exc.__traceback__ = None
+        exc.__cause__ = None
+        exc.__context__ = None
+        del exc, db, user, task_type, template_name, requested_model
+        return _SafeApiFailure(failure)
+    if isinstance(snapshot, _BusinessSnapshotFailure):
+        from app.api.routes.ai_providers import _provider_api_error
+
+        return _SafeApiFailure(_provider_api_error(snapshot.error))
+    return snapshot
 
 
 async def _check_ollama(
@@ -423,63 +506,91 @@ def _record_failure(
     )
 
 
-async def _run_json_task(
-    db: Session,
+def _record_provider_task(
+    audit_sessions: sessionmaker[Session],
     *,
     task_type: str,
+    provider: str,
     model: str,
-    input_data: dict[str, Any],
+    status: str,
+    error_message: str | None,
+    created_by: int,
+) -> None:
+    db = audit_sessions()
+    try:
+        create_ai_task(
+            db,
+            task_type=task_type,
+            model=model,
+            input_data={"provider": provider},
+            status=status,
+            error_message=error_message,
+            created_by=created_by,
+        )
+    finally:
+        db.close()
+
+
+async def _run_provider_json_task(
+    *,
+    task_type: str,
     prompt: str,
     response_model: type[BaseModel],
-    runtime: OllamaRuntimeConfig,
-    created_by: int | None = None,
+    snapshot: _BusinessTaskSnapshot,
 ) -> BaseModel | _SafeApiFailure:
-    disabled_error = _disabled_api_error(runtime)
-    if disabled_error is not None:
-        await run_in_threadpool(
-            _record_failure,
-            db,
-            task_type=task_type,
-            model=model,
-            input_data=input_data,
-            exc=OllamaDisabledError("AI service disabled"),
-            created_by=created_by,
-        )
-        return _SafeApiFailure(disabled_error)
-    client = OllamaClient(runtime)
+    runtime = snapshot.runtime
+    model = runtime.default_model
+    provider = runtime.provider
+    audit_sessions = snapshot.audit_sessions
+    user_id = snapshot.user_id
+    client = None
     api_error: ApiError | None = None
+    error_category: str | None = None
+    result: BaseModel | None = None
     try:
-        result = await client.generate_json(prompt=prompt, response_model=response_model, model=model)
-    except OllamaClientError as exc:
-        await run_in_threadpool(
-            _record_failure,
-            db,
-            task_type=task_type,
-            model=model,
-            input_data=input_data,
-            exc=exc,
-            created_by=created_by,
+        client = runtime_service.create_ai_provider_client(runtime)
+        result = await run_provider_operation(
+            lambda: client.generate_json(
+                prompt=prompt,
+                response_model=response_model,
+                model=model,
+            )
         )
-        api_error = _ai_error_from_ollama(exc, hostname=_safe_hostname(runtime.base_url))
+    except Exception as exc:
+        from app.api.routes.ai_providers import _provider_api_error
+
+        safe_error = map_provider_exception(exc)
+        error_category = safe_error.category
+        api_error = _provider_api_error(safe_error, runtime)
+        exc.__traceback__ = None
+        exc.__cause__ = None
+        exc.__context__ = None
+
+    try:
+        await run_in_threadpool(
+            _record_provider_task,
+            audit_sessions,
+            task_type=task_type,
+            provider=provider,
+            model=model,
+            status="failed" if api_error is not None else "success",
+            error_message=error_category,
+            created_by=user_id,
+        )
+    except Exception as exc:
+        from app.api.routes.ai_providers import _provider_api_error
+
+        if api_error is None:
+            api_error = _provider_api_error(exc)
         exc.__traceback__ = None
         exc.__cause__ = None
         exc.__context__ = None
 
     if api_error is not None:
-        del client, db, input_data, prompt, response_model, runtime
+        del client, prompt, response_model, runtime, snapshot, audit_sessions, result
         return _SafeApiFailure(api_error)
-
-    output_data = result.model_dump(mode="json")
-    await run_in_threadpool(
-        create_ai_task,
-        db,
-        task_type=task_type,
-        model=model,
-        input_data=input_data,
-        output_data=output_data,
-        status="success",
-        created_by=created_by,
-    )
+    if result is None:
+        return _SafeApiFailure(ApiError("AI_UPSTREAM_ERROR", "上游 AI 服务异常", 502))
     return result
 
 
@@ -598,32 +709,33 @@ async def classify_book(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ClassifyBookResponse:
-    runtime, categories_text, template = await run_in_threadpool(
-        _prepare_classify_context,
+    snapshot = await _load_business_task_snapshot(
         db,
         current_user,
+        "classify_book",
+        "classify_book.txt",
+        payload.model,
+        include_categories=True,
     )
-    model = _model_name(payload.model, runtime.default_model)
-    input_data = payload.model_dump(mode="json")
-    prompt = template.format(
+    if isinstance(snapshot, _SafeApiFailure):
+        del payload, db, current_user
+        _raise_api_error(snapshot.error)
+    prompt = snapshot.template.format(
         title=payload.title,
         author=_clean_text(payload.author),
         publisher=_clean_text(payload.publisher),
         summary=_clean_text(payload.summary),
-        categories=categories_text,
+        categories=snapshot.categories,
     )
-    outcome = await _run_json_task(
-        db,
+    del payload, db, current_user
+    outcome = await _run_provider_json_task(
         task_type="classify_book",
-        model=model,
-        input_data=input_data,
         prompt=prompt,
         response_model=ClassifyBookResponse,
-        runtime=runtime,
-        created_by=current_user.id,
+        snapshot=snapshot,
     )
     if isinstance(outcome, _SafeApiFailure):
-        del payload, db, current_user, runtime, categories_text, template, model, input_data, prompt
+        del snapshot, prompt
         _raise_api_error(outcome.error)
     return outcome
 
@@ -634,15 +746,17 @@ async def generate_tags(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> GenerateTagsResponse:
-    runtime, template = await run_in_threadpool(
-        _prepare_runtime_and_template,
+    snapshot = await _load_business_task_snapshot(
         db,
         current_user,
+        "generate_tags",
         "generate_tags.txt",
+        payload.model,
     )
-    model = _model_name(payload.model, runtime.default_model)
-    input_data = payload.model_dump(mode="json")
-    prompt = template.format(
+    if isinstance(snapshot, _SafeApiFailure):
+        del payload, db, current_user
+        _raise_api_error(snapshot.error)
+    prompt = snapshot.template.format(
         title=payload.title,
         author=_clean_text(payload.author),
         publisher=_clean_text(payload.publisher),
@@ -650,18 +764,15 @@ async def generate_tags(
         summary=_clean_text(payload.summary),
         existing_tags=", ".join(payload.existing_tags),
     )
-    outcome = await _run_json_task(
-        db,
+    del payload, db, current_user
+    outcome = await _run_provider_json_task(
         task_type="generate_tags",
-        model=model,
-        input_data=input_data,
         prompt=prompt,
         response_model=GenerateTagsResponse,
-        runtime=runtime,
-        created_by=current_user.id,
+        snapshot=snapshot,
     )
     if isinstance(outcome, _SafeApiFailure):
-        del payload, db, current_user, runtime, template, model, input_data, prompt
+        del snapshot, prompt
         _raise_api_error(outcome.error)
     return outcome
 
@@ -672,31 +783,30 @@ async def recommend_book_content(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> RecommendBookContentResponse:
-    runtime, template = await run_in_threadpool(
-        _prepare_runtime_and_template,
+    snapshot = await _load_business_task_snapshot(
         db,
         current_user,
+        "recommend_book_content",
         "recommend_book_content.txt",
+        payload.model,
     )
-    model = _model_name(payload.model, runtime.default_model)
-    input_data = payload.model_dump(mode="json")
-    prompt = template.format(
+    if isinstance(snapshot, _SafeApiFailure):
+        del payload, db, current_user
+        _raise_api_error(snapshot.error)
+    prompt = snapshot.template.format(
         current=_dump(payload.current),
         candidates=_dump(payload.candidates),
         missing_fields=", ".join(payload.missing_fields),
     )
-    outcome = await _run_json_task(
-        db,
+    del payload, db, current_user
+    outcome = await _run_provider_json_task(
         task_type="recommend_book_content",
-        model=model,
-        input_data=input_data,
         prompt=prompt,
         response_model=RecommendBookContentResponse,
-        runtime=runtime,
-        created_by=current_user.id,
+        snapshot=snapshot,
     )
     if isinstance(outcome, _SafeApiFailure):
-        del payload, db, current_user, runtime, template, model, input_data, prompt
+        del snapshot, prompt
         _raise_api_error(outcome.error)
     return outcome
 
@@ -707,33 +817,32 @@ async def summarize_book(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> SummarizeBookResponse:
-    runtime, template = await run_in_threadpool(
-        _prepare_runtime_and_template,
+    snapshot = await _load_business_task_snapshot(
         db,
         current_user,
+        "summarize_book",
         "summarize_book.txt",
+        payload.model,
     )
-    model = _model_name(payload.model, runtime.default_model)
-    input_data = payload.model_dump(mode="json")
-    prompt = template.format(
+    if isinstance(snapshot, _SafeApiFailure):
+        del payload, db, current_user
+        _raise_api_error(snapshot.error)
+    prompt = snapshot.template.format(
         title=payload.title,
         author=_clean_text(payload.author),
         publisher=_clean_text(payload.publisher),
         raw_summary=_clean_text(payload.raw_summary),
         raw_author_intro=_clean_text(payload.raw_author_intro),
     )
-    outcome = await _run_json_task(
-        db,
+    del payload, db, current_user
+    outcome = await _run_provider_json_task(
         task_type="summarize_book",
-        model=model,
-        input_data=input_data,
         prompt=prompt,
         response_model=SummarizeBookResponse,
-        runtime=runtime,
-        created_by=current_user.id,
+        snapshot=snapshot,
     )
     if isinstance(outcome, _SafeApiFailure):
-        del payload, db, current_user, runtime, template, model, input_data, prompt
+        del snapshot, prompt
         _raise_api_error(outcome.error)
     return outcome
 
@@ -744,30 +853,29 @@ async def detect_duplicate(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> DetectDuplicateResponse:
-    runtime, template = await run_in_threadpool(
-        _prepare_runtime_and_template,
+    snapshot = await _load_business_task_snapshot(
         db,
         current_user,
+        "detect_duplicate",
         "detect_duplicate.txt",
+        payload.model,
     )
-    model = _model_name(payload.model, runtime.default_model)
-    input_data = payload.model_dump(mode="json")
-    prompt = template.format(
+    if isinstance(snapshot, _SafeApiFailure):
+        del payload, db, current_user
+        _raise_api_error(snapshot.error)
+    prompt = snapshot.template.format(
         first=_dump(payload.first),
         second=_dump(payload.second),
     )
-    outcome = await _run_json_task(
-        db,
+    del payload, db, current_user
+    outcome = await _run_provider_json_task(
         task_type="detect_duplicate",
-        model=model,
-        input_data=input_data,
         prompt=prompt,
         response_model=DetectDuplicateResponse,
-        runtime=runtime,
-        created_by=current_user.id,
+        snapshot=snapshot,
     )
     if isinstance(outcome, _SafeApiFailure):
-        del payload, db, current_user, runtime, template, model, input_data, prompt
+        del snapshot, prompt
         _raise_api_error(outcome.error)
     return outcome
 
@@ -778,26 +886,25 @@ async def natural_search(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> NaturalSearchResponse:
-    runtime, template = await run_in_threadpool(
-        _prepare_runtime_and_template,
+    snapshot = await _load_business_task_snapshot(
         db,
         current_user,
+        "natural_search",
         "natural_search.txt",
+        payload.model,
     )
-    model = _model_name(payload.model, runtime.default_model)
-    input_data = payload.model_dump(mode="json")
-    prompt = template.format(query=payload.query)
-    outcome = await _run_json_task(
-        db,
+    if isinstance(snapshot, _SafeApiFailure):
+        del payload, db, current_user
+        _raise_api_error(snapshot.error)
+    prompt = snapshot.template.format(query=payload.query)
+    del payload, db, current_user
+    outcome = await _run_provider_json_task(
         task_type="natural_search",
-        model=model,
-        input_data=input_data,
         prompt=prompt,
         response_model=NaturalSearchResponse,
-        runtime=runtime,
-        created_by=current_user.id,
+        snapshot=snapshot,
     )
     if isinstance(outcome, _SafeApiFailure):
-        del payload, db, current_user, runtime, template, model, input_data, prompt
+        del snapshot, prompt
         _raise_api_error(outcome.error)
     return outcome
