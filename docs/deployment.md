@@ -62,6 +62,7 @@ DATABASE_URL=sqlite:////data/home_library.sqlite3
 | `CORS_ORIGINS` | `http://localhost` | 允许访问的前端地址 |
 | `INITIAL_ADMIN_USERNAME` | `admin` | 首次初始化管理员 |
 | `INITIAL_ADMIN_PASSWORD` | `change-me` | 首次初始化管理员密码 |
+| `UPGRADE_PASSWORD` | 随机长字符串 | 管理员保存或恢复服务器 AI 配置及执行受控升级时使用的服务器二次认证口令；生产 Compose 会传入后端 |
 | `OLLAMA_ENABLED` | `false` | AI 总开关，关闭时不发出 Ollama 请求 |
 | `OLLAMA_BASE_URL` | `https://openclaw.lsgood.cn` | 后端直接运行时的本地或远程地址 |
 | `OLLAMA_TRUSTED_BASE_URL` | `https://openclaw.lsgood.cn` | 后端与 smoke 允许携带 Access 凭据的独立 HTTPS 信任 Origin |
