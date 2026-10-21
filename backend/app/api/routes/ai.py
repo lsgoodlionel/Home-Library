@@ -41,6 +41,7 @@ from app.services.ai_setting_service import (
     OllamaRuntimeConfig,
     get_effective_ai_settings,
     get_ollama_runtime_config,
+    get_server_ollama_runtime_config,
     normalize_access_origin,
     update_user_ai_settings,
 )
@@ -194,8 +195,14 @@ def _safe_runtime_status(runtime: OllamaRuntimeConfig) -> OllamaRuntimeStatus:
 def _load_health_context(
     db: Session,
     user: User,
+    *,
+    server_only: bool = False,
 ) -> tuple[OllamaRuntimeConfig, OllamaRuntimeStatus]:
-    runtime = get_ollama_runtime_config(db, user)
+    runtime = (
+        get_server_ollama_runtime_config(db)
+        if server_only
+        else get_ollama_runtime_config(db, user)
+    )
     return runtime, _safe_runtime_status(runtime)
 
 
@@ -258,8 +265,14 @@ async def _check_ollama(
     user: User,
     *,
     generate: bool,
+    server_only: bool = False,
 ) -> AIHealthResponse:
-    outcome = await _check_ollama_outcome(db, user, generate=generate)
+    outcome = await _check_ollama_outcome(
+        db,
+        user,
+        generate=generate,
+        server_only=server_only,
+    )
     del db, user
     if outcome is _HEALTH_CANCELLED:
         # The original cancellation never crosses this safe value boundary.
@@ -274,9 +287,15 @@ async def _check_ollama_outcome(
     user: User,
     *,
     generate: bool,
+    server_only: bool = False,
 ) -> AIHealthResponse | _SafeApiFailure | _SafeHealthCancellation:
     try:
-        return await _probe_ollama_health(db, user, generate=generate)
+        return await _probe_ollama_health(
+            db,
+            user,
+            generate=generate,
+            server_only=server_only,
+        )
     except asyncio.CancelledError as exc:
         exc.__traceback__ = None
         exc.__cause__ = None
@@ -307,8 +326,17 @@ async def _probe_ollama_health(
     user: User,
     *,
     generate: bool,
+    server_only: bool = False,
 ) -> AIHealthResponse | _SafeApiFailure:
-    runtime, safe_runtime = await run_in_threadpool(_load_health_context, db, user)
+    if server_only:
+        runtime, safe_runtime = await run_in_threadpool(
+            _load_health_context,
+            db,
+            user,
+            server_only=True,
+        )
+    else:
+        runtime, safe_runtime = await run_in_threadpool(_load_health_context, db, user)
     fingerprint = _runtime_fingerprint(runtime)
     disabled_error = _disabled_api_error(runtime)
     if disabled_error is not None:
@@ -500,6 +528,16 @@ async def list_models(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> OllamaModelsResponse:
     runtime = await run_in_threadpool(get_ollama_runtime_config, db, current_user)
+    operation = _list_models_for_runtime(db, current_user, runtime)
+    del runtime, db, current_user
+    return await operation
+
+
+async def _list_models_for_runtime(
+    db: Session,
+    current_user: User,
+    runtime: OllamaRuntimeConfig,
+) -> OllamaModelsResponse:
     input_data = {"hostname": _safe_hostname(runtime.base_url)}
     disabled_error = _disabled_api_error(runtime)
     if disabled_error is not None:

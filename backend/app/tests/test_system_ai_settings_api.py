@@ -121,9 +121,10 @@ def test_server_ai_config_requires_admin_for_every_endpoint(
             },
         ),
         client.post("/api/system/ai-config/test", headers=member_headers),
+        client.get("/api/system/ai-config/models", headers=member_headers),
     )
 
-    assert [response.status_code for response in responses] == [403, 403, 403, 403]
+    assert [response.status_code for response in responses] == [403, 403, 403, 403, 403]
     assert db.query(SystemAISetting).count() == 0
     assert db.query(SystemConfigAudit).count() == 0
 
@@ -511,11 +512,17 @@ def test_test_endpoint_rejects_ad_hoc_config_and_uses_non_generating_probe(
     from app.schemas.ai import AIHealthResponse
 
     headers, admin_id = _auth_headers(db)
-    probe_calls: list[tuple[int, bool]] = []
+    probe_calls: list[tuple[int, bool, bool]] = []
 
-    async def fake_probe(session: Session, user, *, generate: bool) -> AIHealthResponse:
+    async def fake_probe(
+        session: Session,
+        user,
+        *,
+        generate: bool,
+        server_only: bool = False,
+    ) -> AIHealthResponse:
         assert session is db
-        probe_calls.append((user.id, generate))
+        probe_calls.append((user.id, generate, server_only))
         return AIHealthResponse(status="healthy", message="AI 服务连接正常")
 
     monkeypatch.setattr(system_ai_settings, "_check_ollama", fake_probe)
@@ -533,7 +540,49 @@ def test_test_endpoint_rejects_ad_hoc_config_and_uses_non_generating_probe(
     assert rejected.status_code == 422
     assert tested.status_code == 200
     assert tested.json()["status"] == "healthy"
-    assert probe_calls == [(admin_id, False)]
+    assert probe_calls == [(admin_id, False, True)]
+
+
+def test_server_model_endpoint_uses_server_runtime(
+    client: TestClient,
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.routes import system_ai_settings
+    from app.schemas.ai import OllamaModel, OllamaModelsResponse
+    from app.services.ai_setting_service import OllamaRuntimeConfig
+
+    headers, _ = _auth_headers(db)
+    expected_runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url="https://server-only.example.test",
+        trusted_base_url="https://server-only.example.test",
+        default_model="server-model",
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_client_id="server-client",
+        access_client_secret="server-secret",
+    )
+    observed: list[OllamaRuntimeConfig] = []
+
+    async def fake_list_models(session: Session, user, runtime: OllamaRuntimeConfig):
+        assert session is db
+        observed.append(runtime)
+        return OllamaModelsResponse(models=[OllamaModel(name="server-model")])
+
+    monkeypatch.setattr(
+        system_ai_settings,
+        "get_server_ollama_runtime_config",
+        lambda session: expected_runtime,
+    )
+    monkeypatch.setattr(system_ai_settings, "_list_models_for_runtime", fake_list_models)
+
+    response = client.get("/api/system/ai-config/models", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["models"][0]["name"] == "server-model"
+    assert observed == [expected_runtime]
 
 
 def test_auth_and_transport_failures_do_not_call_mutation_service(

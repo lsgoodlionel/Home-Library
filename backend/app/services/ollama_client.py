@@ -98,7 +98,7 @@ class OllamaClient:
             write=runtime.read_timeout_seconds,
             pool=runtime.connect_timeout_seconds,
         )
-        self._headers: dict[str, str] = {}
+        self._headers: dict[str, str] = {"Accept-Encoding": "identity"}
         credentials_complete = bool(runtime.access_client_id and runtime.access_client_secret)
         if (
             credentials_complete
@@ -106,10 +106,10 @@ class OllamaClient:
             and normalize_access_origin(runtime.base_url)
             == normalize_access_origin(runtime.trusted_base_url)
         ):
-            self._headers = {
+            self._headers.update({
                 "CF-Access-Client-Id": runtime.access_client_id,
                 "CF-Access-Client-Secret": runtime.access_client_secret,
-            }
+            })
 
     async def version(self) -> OllamaVersionResponse:
         outcome = await _request_and_validate(self, "GET", "/api/version", OllamaVersionResponse)
@@ -183,7 +183,11 @@ class OllamaClient:
         if isinstance(base_urls, _SafeFailure):
             return base_urls
         for base_url_index, base_url in enumerate(base_urls):
-            headers = self._headers if base_url_index == 0 else {}
+            headers = (
+                self._headers
+                if base_url_index == 0
+                else {"Accept-Encoding": "identity"}
+            )
             client = _build_async_client(
                 base_url=base_url,
                 headers=headers,

@@ -221,6 +221,22 @@ def get_ollama_runtime_config(db: Session, user: User | None) -> OllamaRuntimeCo
     )
 
 
+def get_server_ollama_runtime_config(db: Session) -> OllamaRuntimeConfig:
+    server_state = _get_effective_server_ai_state(db)
+    server = server_state.config
+    return OllamaRuntimeConfig(
+        enabled=server.enabled,
+        base_url=server.default_base_url,
+        trusted_base_url=server.trusted_base_url,
+        default_model=server.default_model,
+        connect_timeout_seconds=server.connect_timeout_seconds,
+        read_timeout_seconds=server.read_timeout_seconds,
+        verify_tls=server.verify_tls,
+        access_client_id=server_state.client_id,
+        access_client_secret=server_state.client_secret,
+    )
+
+
 def normalize_ollama_origin(url: str) -> tuple[str, str, int | None] | None:
     try:
         parsed = httpx.URL(normalize_ollama_base_url(url))

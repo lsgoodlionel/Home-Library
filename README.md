@@ -232,11 +232,13 @@ ollama pull qwen3.5:4b
 
 然后在 `.env` 设置 `OLLAMA_ENABLED=true` 和 `OLLAMA_BASE_URL=http://127.0.0.1:11434`。Docker 访问宿主机或 Compose profile 时改用 `DOCKER_OLLAMA_BASE_URL`。
 
-远程模式当前默认地址为 `https://openclaw.lsgood.cn`。Cloudflare Access 的 Client ID/Secret 可由服务器环境引导，或由管理员在“设置 > 服务器 AI 配置”通过双重认证后成对保存到后端加密存储；禁止放入 `VITE_*`、浏览器持久存储或仓库；`OLLAMA_TRUSTED_BASE_URL` 独立限定可携带凭据的 HTTPS Origin，HTTP、本地名称和 IP 地址始终不携带凭据。`ollama.lsgood.cn` 当前不可作为默认地址。管理员可在“设置 > 服务器 AI 配置”保存全局开关、地址、模型、TLS、超时和 Access 凭据，并执行只读连接测试；“当前账号 AI 偏好”对所有登录用户开放。生成测试需要再次确认。
+远程模式当前默认地址为 `https://openclaw.lsgood.cn`。这里必须填写 Ollama 服务根地址，不能填写 `/api/version`、`/api/tags`、`/api/ps`、`/api/generate` 或 `/api/chat` 等具体接口路径。Cloudflare Access 的 Client ID/Secret 可由服务器环境引导，或由管理员在“设置 > 服务器 AI 配置”通过双重认证后成对保存到后端加密存储；禁止放入 `VITE_*`、浏览器持久存储或仓库；`OLLAMA_TRUSTED_BASE_URL` 独立限定可携带凭据的 HTTPS Origin，HTTP、本地名称和 IP 地址始终不携带凭据。`ollama.lsgood.cn` 当前不可作为默认地址。
+
+管理员保存有效凭据后可点击“刷新服务器模型”，由后端携带 Access 凭据读取 `/api/tags`，再从下拉列表选择服务器默认模型。当前默认模型不在远程列表时页面会明确提示，仍保留手工输入兼容模型名称的能力。服务器测试和模型列表始终使用服务器配置本身，不受当前账号 URL/模型覆盖；“当前账号 AI 偏好”对所有登录用户开放。生成测试需要再次确认。
 
 服务器配置按 **数据库覆盖 > 环境变量 > 程序默认值** 生效，保存后无需重启。账号偏好仅覆盖请求地址和模型，不能修改服务器安全边界。Access 留空表示保留，勾选清除才删除凭据；“恢复环境变量配置”删除全局数据库覆盖并保留账号偏好。保存成功与连接成功分别显示，上游拒绝或超时不会撤销已保存配置。
 
-连接测试会显示脱敏后的具体故障类别：Access 拒绝、Tunnel/Origin 不可用、连接或读取超时、未收到 HTTP 响应的连接失败、传输失败，或上游 HTTP 状态码。诊断可以包含目标 hostname，但不会显示 Access 凭据、请求头、完整 URL、Prompt 或上游响应正文。
+连接测试会显示脱敏后的具体故障类别：Access 拒绝、Tunnel/Origin 不可用、连接或读取超时、未收到 HTTP 响应的连接失败、传输失败，或上游 HTTP 状态码。诊断可以包含目标 hostname，但不会显示 Access 凭据、请求头、完整 URL、Prompt 或上游响应正文。后端对 Ollama 请求使用 `Accept-Encoding: identity`，避免 Cloudflare 错误压缩元数据导致模型列表解码失败。
 
 修改全局配置需要管理员当前密码、服务器 `UPGRADE_PASSWORD`，以及 HTTPS 或受控本机请求。Docker 代理还需精确配置 `SERVER_CONFIG_TRUSTED_PROXY_IPS`。`APP_SECRET_KEY` 必须稳定且足够强；更换或丢失密钥后旧凭据无法解密，需要重新录入。部署与恢复步骤见 [部署文档](docs/deployment.md#服务器-ai-配置的引导与恢复)。
 

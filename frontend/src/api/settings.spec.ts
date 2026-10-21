@@ -4,6 +4,7 @@ import { fetchAIHealth, testAIConnection } from './ai';
 import { API_TIMEOUTS, apiClient } from './client';
 import {
   fetchAIModelSettings,
+  fetchSystemAIModels,
   fetchSystemAIConfig,
   resetSystemAIConfig,
   saveSystemAIConfig,
@@ -28,6 +29,23 @@ afterEach(() => {
 });
 
 describe('AI settings API normalization', () => {
+  it('loads server models from the server-only endpoint', async () => {
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue({
+      data: { models: [{ name: 'qwen3.5:4b', size: '3.2 GB', modified_at: '2026-10-21T00:00:00Z' }] },
+    });
+
+    const models = await fetchSystemAIModels();
+
+    expect(get).toHaveBeenCalledWith('/system/ai-config/models', {
+      timeout: API_TIMEOUTS.aiHealth,
+    });
+    expect(models).toEqual([{
+      name: 'qwen3.5:4b',
+      size: '3.2 GB',
+      modifiedAt: '2026-10-21T00:00:00Z',
+    }]);
+  });
+
   it('normalizes sanitized runtime status without credential fields', async () => {
     vi.spyOn(apiClient, 'get').mockResolvedValue({
       data: {

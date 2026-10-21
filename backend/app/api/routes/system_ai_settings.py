@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy.orm import Session
 
-from app.api.routes.ai import _check_ollama
+from app.api.routes.ai import _check_ollama, _list_models_for_runtime
 from app.core.errors import ApiError
 from app.core.security import (
     require_admin,
@@ -14,7 +14,7 @@ from app.core.security import (
 )
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.ai import AIHealthResponse
+from app.schemas.ai import AIHealthResponse, OllamaModelsResponse
 from app.schemas.system_ai_setting import (
     SystemAIConfigResetRequest,
     SystemAIConfigResponse,
@@ -23,6 +23,7 @@ from app.schemas.system_ai_setting import (
 )
 from app.services.credential_crypto import CredentialCryptoError
 from app.services.ai_health_status_cache import ai_health_status_cache
+from app.services.ai_setting_service import get_server_ollama_runtime_config
 from app.services.system_ai_setting_service import (
     ServerAIConfigConflictError,
     ServerAIConfigWriteError,
@@ -126,4 +127,15 @@ async def test_system_ai_config(
     _payload: Annotated[SystemAIConfigTestRequest | None, Body()] = None,
 ) -> AIHealthResponse:
     get_effective_server_ai_config(db)
-    return await _check_ollama(db, admin, generate=False)
+    return await _check_ollama(db, admin, generate=False, server_only=True)
+
+
+@router.get("/models", response_model=OllamaModelsResponse)
+async def list_system_ai_models(
+    db: Annotated[Session, Depends(get_db)],
+    admin: Annotated[User, Depends(require_admin)],
+) -> OllamaModelsResponse:
+    runtime = get_server_ollama_runtime_config(db)
+    operation = _list_models_for_runtime(db, admin, runtime)
+    del runtime, db, admin
+    return await operation

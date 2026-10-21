@@ -94,6 +94,19 @@ export async function fetchAvailableModels(): Promise<AIModel[]> {
   return getAIModels();
 }
 
+export async function fetchSystemAIModels(): Promise<AIModel[]> {
+  const { data } = await apiClient.get<{
+    models: Array<{ name: string; size?: string; modified_at?: string }>;
+  }>('/system/ai-config/models', {
+    timeout: API_TIMEOUTS.aiHealth,
+  });
+  return data.models.map((model) => ({
+    name: model.name,
+    size: model.size,
+    modifiedAt: model.modified_at,
+  }));
+}
+
 interface ApiAIProviderConfig {
   provider: AIProviderKey;
   enabled: boolean;

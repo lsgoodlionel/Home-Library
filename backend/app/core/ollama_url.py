@@ -9,6 +9,17 @@ class InvalidOllamaBaseURL(ValueError):
     pass
 
 
+_OLLAMA_API_ENDPOINT_SUFFIXES = frozenset(
+    {
+        "/api/version",
+        "/api/tags",
+        "/api/ps",
+        "/api/generate",
+        "/api/chat",
+    }
+)
+
+
 def normalize_ollama_base_url(value: str) -> str:
     if not isinstance(value, str) or not value:
         raise InvalidOllamaBaseURL("Ollama base URL is invalid")
@@ -42,6 +53,9 @@ def normalize_ollama_base_url(value: str) -> str:
 
     if not valid or parsed is None:
         raise InvalidOllamaBaseURL("Ollama base URL is invalid")
+    path = structural.path.rstrip("/")
+    if any(path.endswith(suffix) for suffix in _OLLAMA_API_ENDPOINT_SUFFIXES):
+        raise InvalidOllamaBaseURL("Ollama base URL must be a service root")
     return normalized
 
 

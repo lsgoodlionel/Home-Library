@@ -7,6 +7,7 @@ import ServerAISettingsPanel from './ServerAISettingsPanel.vue';
 
 const mocks = vi.hoisted(() => ({
   fetchSystemAIConfig: vi.fn(),
+  fetchSystemAIModels: vi.fn(),
   saveSystemAIConfig: vi.fn(),
   resetSystemAIConfig: vi.fn(),
   testSystemAIConfig: vi.fn(),
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/api/settings', () => ({
   fetchSystemAIConfig: mocks.fetchSystemAIConfig,
+  fetchSystemAIModels: mocks.fetchSystemAIModels,
   saveSystemAIConfig: mocks.saveSystemAIConfig,
   resetSystemAIConfig: mocks.resetSystemAIConfig,
   testSystemAIConfig: mocks.testSystemAIConfig,
@@ -83,7 +85,7 @@ function nonSensitiveFormState(wrapper: VueWrapper) {
     verifyTls: wrapper.get('[data-testid="verify-tls"] input').attributes('aria-checked'),
     defaultBaseUrl: (urls[0].element as HTMLInputElement).value,
     trustedBaseUrl: (urls[1].element as HTMLInputElement).value,
-    defaultModel: (wrapper.get('input[placeholder="qwen3.5:4b"]').element as HTMLInputElement).value,
+    defaultModel: (wrapper.get('[data-testid="server-default-model"] input').element as HTMLInputElement).value,
     connectTimeout: (timeouts[0].element as HTMLInputElement).value,
     readTimeout: (timeouts[1].element as HTMLInputElement).value,
   };
@@ -104,6 +106,9 @@ async function closeAuthThroughDialog(wrapper: VueWrapper) {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.fetchSystemAIConfig.mockResolvedValue(config);
+  mocks.fetchSystemAIModels.mockResolvedValue([
+    { name: 'qwen3.5:4b', size: '3.2 GB', modifiedAt: '2026-10-21T00:00:00Z' },
+  ]);
   mocks.saveSystemAIConfig.mockResolvedValue({ ...config, configurationSource: 'database', configVersion: 8 });
   mocks.resetSystemAIConfig.mockResolvedValue(config);
   mocks.testSystemAIConfig.mockResolvedValue(healthy);
@@ -114,6 +119,36 @@ afterEach(() => {
 });
 
 describe('ServerAISettingsPanel', () => {
+  it('rejects an Ollama API endpoint where a service root is required', async () => {
+    const warning = vi.spyOn(ElMessage, 'warning');
+    const wrapper = await mountPanel();
+    const urls = wrapper.findAll('input[placeholder="https://ollama.example.com"]');
+    await urls[0].setValue('https://openclaw.lsgood.cn/api/version');
+
+    await button(wrapper, '保存服务器配置').trigger('click');
+    await flushPromises();
+
+    expect(warning).toHaveBeenCalledWith('Ollama 地址请填写服务根地址，不要包含 /api/version 等接口路径');
+    expect(wrapper.find('.el-dialog').exists()).toBe(false);
+  });
+
+  it('loads server models and warns when the configured default is unavailable', async () => {
+    const warning = vi.spyOn(ElMessage, 'warning');
+    mocks.fetchSystemAIConfig.mockResolvedValueOnce({ ...config, defaultModel: 'missing-model' });
+    mocks.fetchSystemAIModels.mockResolvedValueOnce([
+      { name: 'remote-model', size: '2.1 GB', modifiedAt: '2026-10-21T00:00:00Z' },
+    ]);
+    const wrapper = await mountPanel();
+
+    await button(wrapper, '刷新服务器模型').trigger('click');
+    await flushPromises();
+
+    expect(mocks.fetchSystemAIModels).toHaveBeenCalledTimes(1);
+    expect(wrapper.findAllComponents({ name: 'ElOption' }).map((option) => option.props('label')))
+      .toContain('remote-model');
+    expect(warning).toHaveBeenCalledWith('当前默认模型不在服务器模型列表中，请重新选择');
+  });
+
   it('renders source status and never renders saved credential values', async () => {
     const withUnexpectedSecrets = {
       ...config,

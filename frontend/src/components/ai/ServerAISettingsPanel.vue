@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
-import { Check, Connection, RefreshLeft } from '@element-plus/icons-vue';
+import { Check, Connection, Refresh, RefreshLeft } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 
 import {
   fetchSystemAIConfig,
+  fetchSystemAIModels,
   resetSystemAIConfig,
   saveSystemAIConfig,
   testSystemAIConfig,
 } from '@/api/settings';
+import type { AIModel } from '@/types/ai';
 import type { SystemAIConfig, SystemAIConfigUpdate } from '@/types/settings';
 import { getAIErrorMessage } from '@/utils/aiErrors';
 
@@ -22,6 +24,8 @@ const config = ref<SystemAIConfig | null>(null);
 const loading = ref(false);
 const submitting = ref(false);
 const testing = ref(false);
+const modelsLoading = ref(false);
+const serverModels = ref<AIModel[]>([]);
 const authDialogVisible = ref(false);
 const pendingAction = ref<AuthAction>('save');
 const confirmInsecureTls = ref(false);
@@ -55,9 +59,15 @@ const credentialLabel = computed(() => {
   const state = config.value?.credentialState;
   if (!state?.accessClientIdConfigured && !state?.accessClientSecretConfigured) return '未配置';
   if (state.credentialsUsable) return '凭据完整且可用';
-  if (state.accessClientIdConfigured && state.accessClientSecretConfigured) return '已配置但不可用';
+  if (state.accessClientIdConfigured && state.accessClientSecretConfigured) return '已配置但无法解密，请重新录入';
   return '凭据不完整';
 });
+
+const defaultModelUnavailable = computed(() => (
+  serverModels.value.length > 0
+  && Boolean(form.defaultModel.trim())
+  && !serverModels.value.some((model) => model.name === form.defaultModel.trim())
+));
 
 const authTitle = computed(() => pendingAction.value === 'save' ? '保存服务器配置认证' : '恢复环境变量配置认证');
 const authConfirmLabel = computed(() => pendingAction.value === 'save' ? '确认保存' : '确认恢复');
@@ -114,6 +124,10 @@ function validateForm(): boolean {
     ElMessage.warning('连接超时必须小于读取超时');
     return false;
   }
+  if (hasOllamaApiEndpointPath(form.defaultBaseUrl) || hasOllamaApiEndpointPath(form.trustedBaseUrl)) {
+    ElMessage.warning('Ollama 地址请填写服务根地址，不要包含 /api/version 等接口路径');
+    return false;
+  }
   const hasClientId = Boolean(accessClientId.value.trim());
   const hasClientSecret = Boolean(accessClientSecret.value.trim());
   if (!clearAccessCredentials.value && hasClientId !== hasClientSecret) {
@@ -121,6 +135,32 @@ function validateForm(): boolean {
     return false;
   }
   return true;
+}
+
+function hasOllamaApiEndpointPath(value: string): boolean {
+  try {
+    const path = new URL(value.trim()).pathname.replace(/\/$/, '');
+    return ['/api/version', '/api/tags', '/api/ps', '/api/generate', '/api/chat']
+      .some((suffix) => path.endsWith(suffix));
+  } catch {
+    return false;
+  }
+}
+
+async function refreshServerModels(showSuccess = true) {
+  modelsLoading.value = true;
+  try {
+    serverModels.value = await fetchSystemAIModels();
+    if (defaultModelUnavailable.value) {
+      ElMessage.warning('当前默认模型不在服务器模型列表中，请重新选择');
+    } else if (showSuccess) {
+      ElMessage.success(`已读取 ${serverModels.value.length} 个服务器模型`);
+    }
+  } catch (error) {
+    ElMessage.error(getAIErrorMessage(error));
+  } finally {
+    modelsLoading.value = false;
+  }
 }
 
 async function openSaveDialog() {
@@ -191,6 +231,7 @@ async function runFollowUpTest(operation: '保存' | '恢复') {
   try {
     const health = await testSystemAIConfig();
     testStatus.value = health.message;
+    await refreshServerModels(false);
   } catch (error) {
     const message = getAIErrorMessage(error);
     testStatus.value = message;
@@ -251,6 +292,7 @@ async function runConnectionTest() {
     const health = await testSystemAIConfig();
     testStatus.value = health.message;
     ElMessage.success(health.message);
+    await refreshServerModels(false);
   } catch (error) {
     const message = getAIErrorMessage(error);
     testStatus.value = message;
@@ -304,6 +346,15 @@ onMounted(loadConfig);
       title="TLS 证书验证已关闭，仅适用于受控环境"
     />
 
+    <el-alert
+      v-if="config && config.credentialState.accessClientIdConfigured && config.credentialState.accessClientSecretConfigured && !config.credentialState.credentialsUsable"
+      class="credential-alert"
+      type="error"
+      :closable="false"
+      show-icon
+      title="已保存的 Access 凭据无法解密，请重新填写完整凭据并保存"
+    />
+
     <el-form label-position="top" class="settings-form">
       <div class="settings-grid">
         <el-form-item label="服务器 AI">
@@ -319,7 +370,30 @@ onMounted(loadConfig);
           <el-input v-model="form.trustedBaseUrl" placeholder="https://ollama.example.com" />
         </el-form-item>
         <el-form-item label="默认模型">
-          <el-input v-model="form.defaultModel" placeholder="qwen3.5:4b" />
+          <div class="model-field">
+            <el-select
+              v-model="form.defaultModel"
+              data-testid="server-default-model"
+              filterable
+              allow-create
+              default-first-option
+              placeholder="请选择或输入模型名称"
+              :loading="modelsLoading"
+            >
+              <el-option
+                v-for="model in serverModels"
+                :key="model.name"
+                :label="model.name"
+                :value="model.name"
+              />
+            </el-select>
+            <el-button :icon="Refresh" :loading="modelsLoading" @click="refreshServerModels()">
+              刷新服务器模型
+            </el-button>
+          </div>
+          <p v-if="defaultModelUnavailable" class="field-warning">
+            当前默认模型不在服务器模型列表中，请重新选择。
+          </p>
         </el-form-item>
         <el-form-item label="连接超时（秒）">
           <el-input-number
@@ -461,8 +535,23 @@ onMounted(loadConfig);
   word-break: break-word;
 }
 
-.tls-alert {
+.tls-alert,
+.credential-alert {
   margin-top: 12px;
+}
+
+.model-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  width: 100%;
+}
+
+.field-warning {
+  margin: 6px 0 0;
+  color: var(--el-color-warning);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .settings-form {
@@ -511,6 +600,10 @@ onMounted(loadConfig);
 
   .wide-field {
     grid-column: auto;
+  }
+
+  .model-field {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .runtime-summary :deep(.el-descriptions__table),

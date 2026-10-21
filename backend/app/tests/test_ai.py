@@ -95,6 +95,29 @@ def _mock_async_ollama(
     )
 
 
+def test_ollama_client_requests_identity_encoding_for_cloudflare_responses() -> None:
+    runtime = OllamaRuntimeConfig(
+        enabled=True,
+        base_url="https://ollama.example.test",
+        trusted_base_url="https://ollama.example.test",
+        default_model="qwen3:8b",
+        connect_timeout_seconds=20,
+        read_timeout_seconds=180,
+        verify_tls=True,
+        access_client_id="client-id",
+        access_client_secret="client-secret",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(200, json={"models": []})
+
+    client = OllamaClient(runtime, transport=httpx.MockTransport(handler))
+    response = asyncio.run(client.list_models())
+
+    assert response.models == []
+
+
 @pytest.fixture
 def enabled_ollama_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_ollama_environment(monkeypatch)
