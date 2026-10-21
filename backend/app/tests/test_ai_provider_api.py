@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
+import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -13,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
 from app.models import AITask
-from app.services.ai_health_status_cache import provider_model_cache
+from app.services.ai_health_status_cache import provider_health_cache, provider_model_cache
 from app.services.ai_provider_runtime import provider_runtime_fingerprint
 from app.services.ai_providers.base import (
     AIProviderAuthenticationError,
@@ -100,6 +101,7 @@ class _Client:
 
 @pytest.fixture(autouse=True)
 def _reset_provider_model_cache() -> None:
+    provider_health_cache.invalidate_all()
     provider_model_cache.invalidate_all()
 
 
@@ -309,6 +311,95 @@ def test_provider_models_uses_runtime_scoped_cache(
         "openai",
         provider_runtime_fingerprint(runtime),
     ) is not None
+
+
+def test_draft_replacement_key_models_do_not_populate_saved_cache(
+    client: TestClient,
+    member_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved = _runtime()
+    created: list[AIProviderRuntime] = []
+
+    class CredentialAwareClient(_Client):
+        async def list_models(self) -> AIProviderModelList:
+            self.model_calls += 1
+            credential = self.runtime.get_credential_value()
+            label = "Draft" if credential == "draft-key-sensitive-marker" else "Saved"
+            return AIProviderModelList(
+                capability="supported",
+                models=(
+                    AIProviderModel(
+                        provider=self.runtime.provider,
+                        id=f"{label.lower()}-model",
+                        name=f"{label} Model",
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
+        lambda db, user: saved,
+    )
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.create_ai_provider_client",
+        lambda runtime: (created.append(runtime), CredentialAwareClient(runtime))[1],
+    )
+
+    draft = client.post(
+        "/api/ai/providers/openai/models",
+        headers=member_headers,
+        json={"api_key": "draft-key-sensitive-marker"},
+    )
+    persisted = client.get("/api/ai/models", headers=member_headers)
+
+    assert draft.status_code == persisted.status_code == 200
+    assert draft.json()["models"][0]["id"] == "draft-model"
+    assert persisted.json()["models"][0]["model"] == "saved-model"
+    assert len(created) == 2
+
+
+def test_draft_replacement_key_test_does_not_overwrite_saved_health(
+    client: TestClient,
+    member_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_runtime(monkeypatch, _runtime())
+
+    draft = client.post(
+        "/api/ai/providers/openai/test",
+        headers=member_headers,
+        json={"api_key": "draft-key-sensitive-marker"},
+    )
+    persisted = client.get("/api/ai/health", headers=member_headers)
+
+    assert draft.status_code == persisted.status_code == 200
+    assert draft.json()["status"] == "available"
+    assert persisted.json()["status"] == "unchecked"
+    assert persisted.json()["checked_at"] is None
+
+
+def test_empty_key_without_other_override_uses_saved_model_cache(
+    client: TestClient,
+    member_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, clients = _install_runtime(monkeypatch, _runtime())
+
+    first = client.post(
+        "/api/ai/providers/openai/models",
+        headers=member_headers,
+        json={"provider": "openai", "api_key": ""},
+    )
+    second = client.post(
+        "/api/ai/providers/openai/models",
+        headers=member_headers,
+        json={"provider": "openai", "api_key": ""},
+    )
+
+    assert first.status_code == second.status_code == 200
+    assert len(clients) == 1
+    assert clients[0].model_calls == 1
 
 
 def test_connection_generate_test_returns_confirmation_without_generated_text(
@@ -572,3 +663,77 @@ def test_compatibility_health_and_models_use_active_provider(
     assert models.json()["models"] == [
         {"name": "Model A", "model": "model-a", "modified_at": None, "size": None, "digest": None, "details": None}
     ]
+
+
+def test_provider_routes_run_resolver_and_failure_audit_outside_event_loop(
+    client: TestClient,
+    member_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.routes import ai_providers as provider_routes
+
+    runtime = _runtime()
+    resolver_threads: list[int] = []
+    audit_threads: list[int] = []
+    event_loop_threads: list[int] = []
+    fail_models = False
+    original_create_task = provider_routes.create_ai_task
+
+    def resolve(db: Session, user: object) -> AIProviderRuntime:
+        del db, user
+        resolver_threads.append(threading.get_ident())
+        return runtime
+
+    def audit(*args: object, **kwargs: object) -> AITask:
+        audit_threads.append(threading.get_ident())
+        return original_create_task(*args, **kwargs)
+
+    class ThreadTrackingClient(_Client):
+        async def test_connection(self) -> AIProviderHealth:
+            event_loop_threads.append(threading.get_ident())
+            return await super().test_connection()
+
+        async def list_models(self) -> AIProviderModelList:
+            event_loop_threads.append(threading.get_ident())
+            if fail_models:
+                raise AIProviderInvalidConfigurationError()
+            return await super().list_models()
+
+        async def generate_text(self, prompt: str, model: str | None = None) -> str:
+            event_loop_threads.append(threading.get_ident())
+            return await super().generate_text(prompt, model)
+
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
+        resolve,
+    )
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.create_ai_provider_client",
+        ThreadTrackingClient,
+    )
+    monkeypatch.setattr(provider_routes, "create_ai_task", audit)
+
+    responses = [
+        client.get("/api/ai/health?refresh=true", headers=member_headers),
+        client.post("/api/ai/providers/openai/test", headers=member_headers, json={}),
+        client.post("/api/ai/providers/openai/models", headers=member_headers, json={}),
+        client.post(
+            "/api/ai/providers/openai/generate-test",
+            headers=member_headers,
+            json={},
+        ),
+    ]
+    assert all(response.status_code == 200 for response in responses)
+
+    provider_model_cache.invalidate_all()
+    fail_models = True
+    failed = client.get("/api/ai/models", headers=member_headers)
+
+    assert failed.status_code == 422
+    assert len(resolver_threads) == 5
+    assert event_loop_threads
+    assert len(audit_threads) == 1
+    event_loop_thread = event_loop_threads[0]
+    assert all(thread_id == event_loop_thread for thread_id in event_loop_threads)
+    assert all(thread_id != event_loop_thread for thread_id in resolver_threads)
+    assert audit_threads[0] != event_loop_thread

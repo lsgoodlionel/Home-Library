@@ -7,6 +7,7 @@ from typing import Annotated, Awaitable, Callable, TypeVar
 from fastapi import APIRouter, Depends
 from pydantic import SecretStr
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.core.errors import ApiError
 from app.core.security import get_current_user
@@ -66,6 +67,13 @@ _ERROR_MAPPING: tuple[tuple[type[AIProviderError], str, str, int], ...] = (
 @dataclass(frozen=True, slots=True)
 class _RouteFailure:
     error: ApiError
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeSnapshot:
+    runtime: AIProviderRuntime
+    user_id: int
+    use_shared_cache: bool = True
 
 
 def _provider_api_error(exc: Exception, runtime: AIProviderRuntime | None = None) -> ApiError:
@@ -130,12 +138,38 @@ def _runtime_for_request(
     user: User,
     path_provider: str,
     draft: AIProviderOperationRequest,
-) -> AIProviderRuntime:
+) -> _RuntimeSnapshot:
     saved = _resolve_saved_runtime(db, user)
     try:
-        return _draft_runtime(saved, path_provider, draft)
+        replacement = draft.api_key.get_secret_value() if draft.api_key is not None else None
+        use_shared_cache = not replacement and draft.base_url is None and draft.model is None
+        replacement = ""
+        return _RuntimeSnapshot(
+            runtime=_draft_runtime(saved, path_provider, draft),
+            user_id=user.id,
+            use_shared_cache=use_shared_cache,
+        )
     finally:
         draft.api_key = None
+
+
+def _saved_runtime_snapshot(db: Session, user: User) -> _RuntimeSnapshot:
+    return _RuntimeSnapshot(
+        runtime=_resolve_saved_runtime(db, user),
+        user_id=user.id,
+    )
+
+
+def _record_models_failure(db: Session, user_id: int, category: str) -> None:
+    create_ai_task(
+        db,
+        task_type="models",
+        model=None,
+        input_data={},
+        status="failed",
+        error_message=category,
+        created_by=user_id,
+    )
 
 
 def _client(runtime: AIProviderRuntime) -> AIProviderClient:
@@ -220,26 +254,36 @@ def _runtime_status(
 async def test_active_provider(
     runtime: AIProviderRuntime,
     user_id: int,
+    *,
+    use_shared_cache: bool = True,
 ) -> AIProviderStatusResponse:
     health = await _call(_client(runtime).test_connection, runtime)
     response = _status_response(health)
-    provider_health_cache.put(
-        user_id,
-        runtime_service.provider_runtime_fingerprint(runtime),
-        response,
-    )
+    if use_shared_cache:
+        provider_health_cache.put(
+            user_id,
+            runtime_service.provider_runtime_fingerprint(runtime),
+            response,
+        )
     return response
 
 
 async def list_active_provider_models(
     runtime: AIProviderRuntime,
     user_id: int,
+    *,
+    use_shared_cache: bool = True,
 ) -> AIProviderStatusResponse:
     fingerprint = runtime_service.provider_runtime_fingerprint(runtime)
-    models = provider_model_cache.get(user_id, runtime.provider, fingerprint)
+    models = (
+        provider_model_cache.get(user_id, runtime.provider, fingerprint)
+        if use_shared_cache
+        else None
+    )
     if models is None:
         models = await _call(_client(runtime).list_models, runtime)
-        provider_model_cache.put(user_id, runtime.provider, fingerprint, models)
+        if use_shared_cache:
+            provider_model_cache.put(user_id, runtime.provider, fingerprint, models)
     status = "available" if models.capability == "supported" else "unchecked"
     message = "模型列表获取成功" if models.capability == "supported" else "供应商不支持模型列表"
     return _runtime_status(
@@ -257,25 +301,27 @@ async def get_active_provider_health(
     *,
     refresh: bool,
 ) -> AIProviderStatusResponse:
-    runtime = _resolve_saved_runtime(db, user)
+    snapshot = await run_in_threadpool(_saved_runtime_snapshot, db, user)
+    del db, user
+    runtime = snapshot.runtime
     fingerprint = runtime_service.provider_runtime_fingerprint(runtime)
     if refresh:
         failure: ApiError | None = None
         response: AIProviderStatusResponse | None = None
         try:
-            response = await test_active_provider(runtime, user.id)
+            response = await test_active_provider(runtime, snapshot.user_id)
         except ApiError as exc:
             failure = ApiError(exc.code, exc.message, exc.status_code, dict(exc.details))
             exc.__traceback__ = None
             exc.__cause__ = None
             exc.__context__ = None
-        del runtime, db, user
+        del runtime, snapshot
         if failure is not None:
             raise failure from None
         if response is None:
             raise ApiError("AI_UPSTREAM_ERROR", "上游 AI 服务异常", 502) from None
         return response
-    cached = provider_health_cache.get(user.id, fingerprint)
+    cached = provider_health_cache.get(snapshot.user_id, fingerprint)
     if cached is not None:
         return cached
     return _runtime_status(runtime, status="unchecked", message="尚未检查").model_copy(
@@ -288,11 +334,15 @@ async def list_active_provider_models_compatibility(
     user: User,
 ) -> OllamaModelsResponse:
     runtime: AIProviderRuntime | None = None
+    user_id: int | None = None
     failure: ApiError | None = None
     response: AIProviderStatusResponse | None = None
     try:
-        runtime = _resolve_saved_runtime(db, user)
-        response = await list_active_provider_models(runtime, user.id)
+        snapshot = await run_in_threadpool(_saved_runtime_snapshot, db, user)
+        runtime = snapshot.runtime
+        user_id = snapshot.user_id
+        del snapshot
+        response = await list_active_provider_models(runtime, user_id)
     except ApiError as exc:
         failure = ApiError(exc.code, exc.message, exc.status_code, dict(exc.details))
         exc.__traceback__ = None
@@ -300,16 +350,14 @@ async def list_active_provider_models_compatibility(
         exc.__context__ = None
     if failure is not None:
         category = str(failure.details.get("category") or "provider_error")
-        create_ai_task(
+        audit_user_id = user_id if user_id is not None else user.id
+        await run_in_threadpool(
+            _record_models_failure,
             db,
-            task_type="models",
-            model=None,
-            input_data={},
-            status="failed",
-            error_message=category,
-            created_by=user.id,
+            audit_user_id,
+            category,
         )
-        del runtime, response, db, user
+        del runtime, response, db, user, user_id, audit_user_id, category
         raise failure from None
     if response is None:
         raise ApiError("AI_UPSTREAM_ERROR", "上游 AI 服务异常", 502) from None
@@ -332,11 +380,29 @@ async def _provider_route_outcome(
     response: AIProviderStatusResponse | None = None
     failure: ApiError | None = None
     try:
-        runtime = _runtime_for_request(db, user, provider, payload)
+        snapshot = await run_in_threadpool(
+            _runtime_for_request,
+            db,
+            user,
+            provider,
+            payload,
+        )
+        runtime = snapshot.runtime
+        user_id = snapshot.user_id
+        use_shared_cache = snapshot.use_shared_cache
+        del snapshot, db, user
         if operation == "test":
-            response = await test_active_provider(runtime, user.id)
+            response = await test_active_provider(
+                runtime,
+                user_id,
+                use_shared_cache=use_shared_cache,
+            )
         elif operation == "models":
-            response = await list_active_provider_models(runtime, user.id)
+            response = await list_active_provider_models(
+                runtime,
+                user_id,
+                use_shared_cache=use_shared_cache,
+            )
         elif operation == "generate":
             client = _client(runtime)
             generated = await _call(
@@ -363,7 +429,7 @@ async def _provider_route_outcome(
         exc.__cause__ = None
         exc.__context__ = None
     payload.api_key = None
-    del runtime, client, payload, db, user
+    del runtime, client, payload
     if failure is not None:
         return _RouteFailure(failure)
     if response is None:
