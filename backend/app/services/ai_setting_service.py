@@ -259,68 +259,86 @@ def update_user_ai_settings(db: Session, user: User, payload: AISettingsUpdate) 
             created_at=_now(),
             updated_at=_now(),
         )
-        db.add(setting)
     configs = _decode_configs(setting.provider_configs)
 
     for incoming in payload.providers:
         current = deepcopy(configs[incoming.provider])
-        current["enabled"] = incoming.enabled
-        current["base_url"] = incoming.base_url
-        current["default_model"] = incoming.default_model
-        current["note"] = incoming.note
+        for field in ("enabled", "base_url", "default_model", "note"):
+            if field in incoming.model_fields_set:
+                current[field] = getattr(incoming, field)
         configs[incoming.provider] = current
 
+    ai_enabled = (
+        payload.ai_enabled
+        if "ai_enabled" in payload.model_fields_set
+        else setting.ai_enabled
+    )
     credential_states = _credential_states(db, user.id, configs)
     for incoming in payload.providers:
-        if incoming.clear_api_key:
+        if "clear_api_key" in incoming.model_fields_set and incoming.clear_api_key:
             credential_states[incoming.provider] = "missing"
-        elif incoming.api_key not in (None, ""):
+        elif (
+            "api_key" in incoming.model_fields_set
+            and incoming.api_key not in (None, "")
+        ):
             credential_states[incoming.provider] = "configured"
 
     validate_account_ai_selection(
-        payload.ai_enabled,
+        ai_enabled,
         payload.active_provider,
         configs,
         credential_states,
     )
     active_model = str(configs[payload.active_provider].get("default_model") or "").strip()
-    if payload.ai_enabled and payload.default_model != active_model:
+    if ai_enabled and payload.default_model != active_model:
         raise ApiError(
             "AI_CONFIG_INVALID",
             "账号默认模型必须与当前 AI 服务商默认模型一致",
             422,
         )
 
-    for incoming in payload.providers:
-        _stage_provider_api_key(
-            db,
-            user.id,
-            incoming.provider,
-            incoming.api_key,
-            incoming.clear_api_key,
+    phase = "prepare"
+    try:
+        for incoming in payload.providers:
+            _stage_provider_api_key(
+                db,
+                user.id,
+                incoming.provider,
+                incoming.api_key if "api_key" in incoming.model_fields_set else None,
+                (
+                    incoming.clear_api_key
+                    if "clear_api_key" in incoming.model_fields_set
+                    else False
+                ),
+            )
+
+        setting.ai_enabled = ai_enabled
+        setting.active_provider = payload.active_provider
+        setting.default_model = payload.default_model
+        setting.provider_configs = _encode_configs(configs)
+        setting.updated_at = _now()
+        db.add(setting)
+        db.flush()
+
+        credential_states = _credential_states(db, user.id, configs)
+        runtime = get_ollama_runtime_config(db, user)
+        response = _to_response(
+            setting.ai_enabled,
+            setting.active_provider,
+            setting.default_model,
+            configs,
+            credential_states,
+            runtime,
         )
 
-    setting.ai_enabled = payload.ai_enabled
-    setting.active_provider = payload.active_provider
-    setting.default_model = payload.default_model
-    setting.provider_configs = _encode_configs(configs)
-    setting.updated_at = _now()
-    db.add(setting)
-    try:
+        phase = "commit"
         db.commit()
     except Exception:
         db.rollback()
-        raise ApiError("AI_CONFIG_SAVE_FAILED", "AI 配置保存失败", 500) from None
-    db.refresh(setting)
-    credential_states = _credential_states(db, user.id, configs)
-    return _to_response(
-        setting.ai_enabled,
-        setting.active_provider,
-        setting.default_model,
-        configs,
-        credential_states,
-        get_ollama_runtime_config(db, user),
-    )
+        if phase == "commit":
+            raise ApiError("AI_CONFIG_SAVE_FAILED", "AI 配置保存失败", 500) from None
+        raise
+    return response
 
 
 def get_ollama_runtime_config(db: Session, user: User | None) -> OllamaRuntimeConfig:
