@@ -144,7 +144,7 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_DEFAULT_MODEL=qwen3.5:4b
 ```
 
-远程模式当前使用 `https://openclaw.lsgood.cn`，`ollama.lsgood.cn` 不是当前默认地址。Access Client ID/Secret 只能通过后端环境注入，前端不能读取。运行只读 smoke 前还需设置 `OLLAMA_TRUSTED_BASE_URL`；脚本仅在其规范化 Origin 与 `OLLAMA_BASE_URL` 完全一致时携带凭据。可用 `bash scripts/tests/test-ollama-cloudflare-smoke-test.sh` 运行第三方地址、端口、协议、默认端口、IPv6、用户信息和控制字符安全矩阵。
+远程模式当前使用 `https://openclaw.lsgood.cn`，`ollama.lsgood.cn` 不是当前默认地址。Access Client ID/Secret 可通过后端环境引导，或由管理员在安全传输下经双重认证成对写入后端加密存储；前端不能读取保存值，也不得持久化输入。运行只读 smoke 前还需设置 `OLLAMA_TRUSTED_BASE_URL`；脚本仅在其规范化 Origin 与 `OLLAMA_BASE_URL` 完全一致时携带凭据。可用 `bash scripts/tests/test-ollama-cloudflare-smoke-test.sh` 运行第三方地址、端口、协议、默认端口、IPv6、用户信息和控制字符安全矩阵。
 
 ## 同时运行前后端
 
@@ -191,3 +191,14 @@ A: 连接失败调整 `OLLAMA_CONNECT_TIMEOUT_SECONDS`，模型生成慢调整 `
 
 **Q: SQLite 数据库路径错误**
 A: `DATABASE_URL` 的相对路径相对于后端工作目录（`backend/`），建议使用绝对路径或在 `backend/` 目录下启动服务。
+
+
+### 管理员 AI 配置开发验证
+
+全局配置、当前运行状态、当前账号偏好分别验证。无数据库记录时保持环境行为；迁移 `0002` 不应自动插入覆盖。保存、刷新、模型列表、保存成功但健康失败、保留/替换/清除凭据、恢复环境、账号偏好保留及禁用 AI 后非 AI 导航均属于验收范围。
+
+本机直连后端的写操作需要回环 peer 加回环浏览器 Origin/Referer；Docker Nginx 不是回环 peer，应使用 HTTPS 和精确可信代理，见部署文档。测试只用运行时生成的合成凭据；禁止在命令参数、日志、截图、trace、video、错误 DOM 快照或 Git 中记录秘密。截图前实测密码输入为空，并扫描 API、审计、数据库、日志和 browser storage；输出仅布尔、计数和稳定错误码。
+
+受控 HTTPS 上游应在每个 worker 内执行 TLS 握手并设置握手/请求超时；不可把同步 HTTPServer 的 listening socket 直接包成 TLS，否则一个停滞握手即可阻塞全部探针。用停滞客户端与正常并发请求验证夹具本身，避免将夹具超时误诊为业务分类错误。
+
+本轮 Docker 后端验收使用缓存基础镜像加当前源码构建并验证迁移；这不等同于从零完成生产 Dockerfile 的系统包/工具链引导。任何新下载前必须在实际执行环境有界测量官方及候选源，选择可用最快源并保留官方回退，不把区域镜像固化为生产默认。

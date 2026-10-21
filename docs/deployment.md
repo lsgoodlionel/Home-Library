@@ -70,8 +70,8 @@ DATABASE_URL=sqlite:////data/home_library.sqlite3
 | `OLLAMA_CONNECT_TIMEOUT_SECONDS` | `20` | 建立连接超时秒数 |
 | `OLLAMA_READ_TIMEOUT_SECONDS` | `180` | 模型读取/生成超时秒数 |
 | `OLLAMA_VERIFY_TLS` | `true` | 验证 HTTPS 证书 |
-| `OLLAMA_CF_ACCESS_CLIENT_ID` | 空 | Access 服务令牌 ID，仅服务器环境 |
-| `OLLAMA_CF_ACCESS_CLIENT_SECRET` | 空 | Access 服务令牌 Secret，仅服务器环境 |
+| `OLLAMA_CF_ACCESS_CLIENT_ID` | 空 | Access 服务令牌 ID，环境引导 |
+| `OLLAMA_CF_ACCESS_CLIENT_SECRET` | 空 | Access 服务令牌 Secret，环境引导 |
 | `OLLAMA_OPTIONAL` | `true` | Ollama 不可用时是否降级 |
 | `POSTGRES_DB` | `home_library` | PostgreSQL 可选 profile 数据库名 |
 | `POSTGRES_USER` | `home_library` | PostgreSQL 用户 |
@@ -156,7 +156,7 @@ OLLAMA_CF_ACCESS_CLIENT_ID=
 OLLAMA_CF_ACCESS_CLIENT_SECRET=
 ```
 
-两项 Access 凭据必须同时由服务器秘密管理填入，不得写入仓库、前端 `VITE_*`、镜像 build args 或运维日志。后端只在请求 HTTPS origin 与独立的 `OLLAMA_TRUSTED_BASE_URL` 完全一致时附加 Access headers；HTTP、本地名称和 IP 地址始终不携带凭据。smoke 脚本独立比较 `OLLAMA_BASE_URL` 与 `OLLAMA_TRUSTED_BASE_URL`：协议、主机和有效端口必须一致，HTTP 80/HTTPS 443 的显式端口与默认端口等价，路径可不同；用户信息、控制字符、非 HTTP(S) 或第三方 Origin 会在调用 curl 前被拒绝。
+两项 Access 凭据可同时由服务器秘密管理填入，或由管理员在 HTTPS 设置页经双重认证后成对写入后端加密存储，不得写入仓库、前端 `VITE_*`、镜像 build args 或运维日志。后端只在请求 HTTPS origin 与独立的 `OLLAMA_TRUSTED_BASE_URL` 完全一致时附加 Access headers；HTTP、本地名称和 IP 地址始终不携带凭据。smoke 脚本独立比较 `OLLAMA_BASE_URL` 与 `OLLAMA_TRUSTED_BASE_URL`：协议、主机和有效端口必须一致，HTTP 80/HTTPS 443 的显式端口与默认端口等价，路径可不同；用户信息、控制字符、非 HTTP(S) 或第三方 Origin 会在调用 curl 前被拒绝。
 
 确认环境中已经安全注入两项凭据后，可执行只读 smoke；脚本不会调用生成接口，也不会打印凭据或响应正文：
 
@@ -293,3 +293,16 @@ docker compose exec ollama ollama list
 ### 首次构建较慢
 
 当前前端没有提交 `package-lock.json`，Dockerfile 使用 `npm install`。首次构建会下载依赖，后续会利用 Docker 缓存。
+
+
+### 服务器 AI 配置的引导与恢复
+
+1. 首次部署先配置稳定 `APP_SECRET_KEY`、初始管理员和 `UPGRADE_PASSWORD`。应用密钥至少 32 个 UTF-8 字节，并排除已知开发默认值及其前后空白变体；使用秘密管理生成的随机值，禁止复制文档占位符。此密钥同时涉及登录签名和 Access 加密，备份时与数据库分别安全保存。
+2. 启用 HTTPS 后登录“设置 > 服务器 AI 配置”。保存/恢复需要当前管理员密码与服务器升级专用密码。`UPGRADE_PASSWORD` 未配置时，先通过受保护的服务器配置完成引导；它不是数据库可覆盖的项目。
+3. 数据库覆盖优先于 `OLLAMA_*` 环境变量及程序默认值。保存后立即生效，无需重启；之后修改环境变量不会替代已保存覆盖。Access 两项留空会保留，显式勾选清除才删除。保存成功后连接测试失败仍表示配置已保存，可修正网络/令牌后重试测试。
+4. “恢复环境变量配置”删除全局覆盖，保留所有账号偏好。环境内仍有凭据时，恢复后将重新使用它们。恢复前确认环境设置，避免把“恢复”误认为关闭 AI 或清除环境凭据。
+5. 更换 `APP_SECRET_KEY`、密文损坏或仅恢复数据库而未恢复匹配密钥，会使旧 Access 凭据不可用。没有明文导出或自动换钥迁移；先恢复匹配密钥，或重新录入完整凭据对。弱密钥下允许读取非敏感状态，拒绝保存新凭据；AI 失败不阻断登录、图书、借阅等模块。
+
+**Docker HTTPS 代理接入：** 默认 Compose 发布 HTTP 80，不能直接满足远程敏感配置写入要求。部署时让 HTTPS 终止代理向后端传递准确的 `X-Forwarded-Proto: https`，在后端环境 `SERVER_CONFIG_TRUSTED_PROXY_IPS` 中仅登记后端实际看到的代理地址。为该代理分配经网络清单确认不冲突的固定地址，并在 Compose 的用户自定义 network/IPAM 配置中保持一致；不要把整个私有网段或任意客户端加入信任。该环境变量通过现有 `env_file` 传入，生产/测试使用各自地址。若有多级代理，应逐跳核对实际 backend peer 和覆盖头行为；浏览器地址是 `localhost` 不代表 Docker 内请求来源是回环。
+
+生产保持 `verify_tls=true`。受控自签名验收环境可在明确风险确认后临时关闭；本次隔离验收使用回环 HTTPS 端口、独立网络和数据库，不是生产部署模板。只读远程 smoke 读取环境引导参数，不能证明数据库覆盖已正确应用；数据库配置应通过登录后的只读测试/API 验证。没有授权的真实 Cloudflare Service Token 时，报告外部验证未执行。

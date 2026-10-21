@@ -64,8 +64,8 @@ cp ../.env.example ../.env
 | `OLLAMA_CONNECT_TIMEOUT_SECONDS` | `20` | 建立连接超时（秒） |
 | `OLLAMA_READ_TIMEOUT_SECONDS` | `180` | 模型读取/生成超时（秒） |
 | `OLLAMA_VERIFY_TLS` | `true` | 是否验证 HTTPS 证书 |
-| `OLLAMA_CF_ACCESS_CLIENT_ID` | 空 | Cloudflare Access Client ID，仅服务器环境 |
-| `OLLAMA_CF_ACCESS_CLIENT_SECRET` | 空 | Cloudflare Access Secret，仅服务器环境 |
+| `OLLAMA_CF_ACCESS_CLIENT_ID` | 空 | Cloudflare Access Client ID，环境引导 |
+| `OLLAMA_CF_ACCESS_CLIENT_SECRET` | 空 | Cloudflare Access Secret，环境引导 |
 | `OLLAMA_OPTIONAL` | `true` | Ollama 不可用时系统仍可启动，AI 接口返回清晰错误 |
 
 Access 凭据只有在账号有效 Ollama URL 与服务器受信任 URL 的 origin 完全一致时才会发送，不会通过 API、日志或审计记录返回。AI 请求失败不会影响 `/api/health` 或非 AI 图书功能。
@@ -128,6 +128,14 @@ pytest app/tests/test_users.py   # 仅用户管理测试
 |---|---|---|---|
 | GET | `/api/health` | 公开 | 健康检查 |
 | GET | `/api/version` | 公开 | 版本信息 |
+
+### 全局 AI 配置与账号偏好
+
+`GET/PUT/DELETE /api/system/ai-config` 仅管理员可用，`POST /api/system/ai-config/test` 执行已保存配置的只读测试。PUT/DELETE 同时校验当前管理员密码、环境 `UPGRADE_PASSWORD` 和安全传输。账号 `/api/ai/config` 保留地址/模型偏好；不接收全局开关、可信地址、TLS、超时或 Access 凭据。
+
+迁移 `0002_system_ai_settings` 增加单例全局覆盖与追加审计；无记录时继续使用环境配置，不自动生成覆盖。数据库优先于环境和程序默认值，保存/恢复立即失效健康缓存。审计只记录操作者、动作、版本和字段名，不记录字段值。
+
+Access 使用 AES-GCM + HKDF 从稳定 `APP_SECRET_KEY` 派生密钥后加密。弱密钥不能保存新凭据；密文损坏或密钥不匹配时不发送 Access，非敏感配置和非 AI 模块继续可用。API 只返回配置状态布尔值，不返回明文、密文或长度。密钥要求、备份恢复及可信代理配置见 `docs/deployment.md`。
 
 ### AI 运维
 

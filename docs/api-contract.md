@@ -500,6 +500,18 @@ import
 HTTP 401。AI 任务审计按当前账号记录，成功输出使用严格标准 JSON，并限制为
 UTF-8 编码最大 64 KiB。
 
+### 服务器全局配置 `/api/system/ai-config`
+
+所有操作要求管理员。`GET` 返回 `enabled`、`default_base_url`、`trusted_base_url`、`default_model`、`connect_timeout_seconds`、`read_timeout_seconds`、`verify_tls`、`configuration_source`、`config_version` 和 `credential_state`。来源为 `database` / `environment` / `default`；凭据状态仅含 `access_client_id_configured`、`access_client_secret_configured`、`credentials_usable` 和 `source`，不含任何凭据值或密文。
+
+`PUT` 提交全部运行参数以及 `admin_password`、`upgrade_password`。密码只用于本次验证。`access_client_id` 与 `access_client_secret` 必须成对提交；均省略或为空表示保留现有凭据。`clear_access_credentials=true` 显式清除，不能同时提供新凭据。`verify_tls=false` 必须另传 `confirm_insecure_tls=true`。连接超时须大于 0、不超过 60 且小于读取超时；读取超时必须小于 300 秒。可信地址须为公开域名 HTTPS URL。未知字段被拒绝。
+
+`DELETE` 请求体为 `admin_password`、`upgrade_password`、`confirm_reset: true`，删除全局覆盖，返回环境或默认配置，不删除账号偏好。PUT/DELETE 要求 HTTPS，或来自精确可信代理且 `X-Forwarded-Proto: https`，或直连回环且浏览器 Origin/Referer 也为回环；普通 Docker HTTP 代理不满足此条件。
+
+`POST /api/system/ai-config/test` 不接受待保存配置或凭据，只对当前生效配置及当前账号目标执行只读 version/tags/ps 检查。保存与健康检测是独立操作：保存 HTTP 200 后，测试可能返回 HTTP 502 / `AI_ACCESS_DENIED` / `access_denied`（上游 401/403），或连接/读取超时等既有稳定分类。测试失败不回滚保存。
+
+全局保存或恢复会失效全部健康缓存。`GET/PUT /api/ai/config` 仍管理登录账号偏好，不能改变服务器凭据和安全参数。
+
 ### GET /api/ai/models
 
 返回 Ollama 可用模型列表。
@@ -507,7 +519,7 @@ UTF-8 编码最大 64 KiB。
 ### GET /api/ai/health
 
 权限：登录用户。默认 `refresh=false` 只读取当前账号且 runtime fingerprint
-一致的进程内脱敏状态；没有匹配缓存时返回“尚未检查”。`refresh=true` 会依次检查
+一致的进程内脱敏状态；没有匹配缓存时返回“尚未检查”。`refresh=true` 会并发检查
 Ollama `version`、已安装模型和运行中模型。保存该账号的 AI 设置会立即失效其健康
 缓存。响应只包含状态、中文消息、检查时间、版本、模型数量和脱敏 runtime，不包含
 Access 凭据。带 path 的 Ollama Base URL 会原样参与请求与缓存匹配；Base URL 不接受

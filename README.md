@@ -232,7 +232,11 @@ ollama pull qwen3.5:4b
 
 然后在 `.env` 设置 `OLLAMA_ENABLED=true` 和 `OLLAMA_BASE_URL=http://127.0.0.1:11434`。Docker 访问宿主机或 Compose profile 时改用 `DOCKER_OLLAMA_BASE_URL`。
 
-远程模式当前默认地址为 `https://openclaw.lsgood.cn`。Cloudflare Access 的 Client ID/Secret 只允许写入服务器环境变量，禁止放入 `VITE_*`、前端设置或仓库；`OLLAMA_TRUSTED_BASE_URL` 独立限定可携带凭据的 HTTPS Origin，HTTP、本地名称和 IP 地址始终不携带凭据。`ollama.lsgood.cn` 当前不可作为默认地址。管理员可在“设置 > AI 模型配置”检查连接，生成测试需要再次确认。
+远程模式当前默认地址为 `https://openclaw.lsgood.cn`。Cloudflare Access 的 Client ID/Secret 可由服务器环境引导，或由管理员在“设置 > 服务器 AI 配置”通过双重认证后成对保存到后端加密存储；禁止放入 `VITE_*`、浏览器持久存储或仓库；`OLLAMA_TRUSTED_BASE_URL` 独立限定可携带凭据的 HTTPS Origin，HTTP、本地名称和 IP 地址始终不携带凭据。`ollama.lsgood.cn` 当前不可作为默认地址。管理员可在“设置 > 服务器 AI 配置”保存全局开关、地址、模型、TLS、超时和 Access 凭据，并执行只读连接测试；“当前账号 AI 偏好”对所有登录用户开放。生成测试需要再次确认。
+
+服务器配置按 **数据库覆盖 > 环境变量 > 程序默认值** 生效，保存后无需重启。账号偏好仅覆盖请求地址和模型，不能修改服务器安全边界。Access 留空表示保留，勾选清除才删除凭据；“恢复环境变量配置”删除全局数据库覆盖并保留账号偏好。保存成功与连接成功分别显示，上游拒绝或超时不会撤销已保存配置。
+
+修改全局配置需要管理员当前密码、服务器 `UPGRADE_PASSWORD`，以及 HTTPS 或受控本机请求。Docker 代理还需精确配置 `SERVER_CONFIG_TRUSTED_PROXY_IPS`。`APP_SECRET_KEY` 必须稳定且足够强；更换或丢失密钥后旧凭据无法解密，需要重新录入。部署与恢复步骤见 [部署文档](docs/deployment.md#服务器-ai-配置的引导与恢复)。
 
 只读远程连通性验证（仅访问 version/tags/ps，不触发生成）。脚本只在
 `OLLAMA_BASE_URL` 与 `OLLAMA_TRUSTED_BASE_URL` 的规范化 Origin 完全一致时发送

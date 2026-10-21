@@ -36,3 +36,8 @@ e2e/playwright-report
 logs
 uploads
 backups
+
+# Local tooling and acceptance artifacts are not application build inputs.
+.venv
+.superpowers
+.worktrees
