@@ -242,6 +242,14 @@ ollama pull qwen3.5:4b
 
 修改全局配置需要管理员当前密码、服务器 `UPGRADE_PASSWORD`，以及 HTTPS 或受控本机请求。Docker 代理还需精确配置 `SERVER_CONFIG_TRUSTED_PROXY_IPS`。`APP_SECRET_KEY` 必须稳定且足够强；更换或丢失密钥后旧凭据无法解密，需要重新录入。部署与恢复步骤见 [部署文档](docs/deployment.md#服务器-ai-配置的引导与恢复)。
 
+### 5. 配置账号多服务商 AI（可选）
+
+每个账号可以独立启停 AI，并在 Ollama、OpenAI、Gemini、DeepSeek、Moonshot/Kimi、Qwen 和自定义 OpenAI-compatible 服务之间切换。配置层级为：**服务器 Ollama 安全边界与默认值 > 账号 provider 配置 > 单次诊断草稿**；账号设置不能覆盖服务器 TLS、超时、Cloudflare Access 或可信 Origin 边界，单次诊断草稿不会保存。
+
+在“设置 > 当前账号 AI 配置”中启用 provider，填写 Base URL、默认模型及云服务商 API Key 后，可依次执行“测试连接”“刷新模型”“生成测试”。生成测试会产生最小真实生成调用，必须二次确认，可能消耗额度；不支持模型枚举的 provider 会明确返回“供应商不支持模型列表”，不代表连接失败。API Key 只在后端加密保存，读取响应、浏览器存储和日志均不返回明文。
+
+升级已有数据库前备份数据库和 `.env`，然后执行 `cd backend && .venv/bin/alembic upgrade head`。`0002 -> 0003` 会把旧 `provider_configs` 中的云 Key 加密迁移到独立凭据表并删除明文字段。`APP_SECRET_KEY` 必须在安装、升级、重启和恢复后保持一致，否则旧凭据无法解密且现有登录令牌失效。完整安装、回滚和 allowlist 说明见 [部署文档](docs/deployment.md)。
+
 只读远程连通性验证（仅访问 version/tags/ps，不触发生成）。脚本只在
 `OLLAMA_BASE_URL` 与 `OLLAMA_TRUSTED_BASE_URL` 的规范化 Origin 完全一致时发送
 Access headers：

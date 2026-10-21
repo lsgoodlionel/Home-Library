@@ -1037,3 +1037,5 @@ Task 7 采用独立 Docker 数据库和回环 HTTPS 进行迁移、受控 Access
 已知限制 M1 暂缓：一次保存/恢复可能由面板与页面分别启动只读健康检查，产生重复 version/tags/ps 流量，并可能在瞬时故障时呈现不同摘要。本轮未修改前端编排，不宣称此项已解决。
 
 2026-10-21 补充 AI 故障诊断：连接测试不再把所有非 HTTP 故障压缩成“上游 AI 服务异常”。后端只公开白名单中的 `connection_failed`、`request_failed`、规范化 hostname 和数字 HTTP 状态；设置页保存后自动测试、手动测试及通用 AI 错误提示据此显示具体中文原因，仍拒绝透传原始异常、响应正文和凭据。
+
+2026-10-21 多服务商 AI Tasks 1–10 已实现账号级 Ollama、OpenAI、Gemini、DeepSeek、Moonshot/Kimi、Qwen 与自定义 OpenAI-compatible 配置、加密凭据、provider-aware runtime/API 和设置页。Task 11 已补 `0002 -> 0003` 加密迁移/重载/切换/AI off-on/非 AI route 集成覆盖，并把 `AI_PROVIDER_ALLOWED_PRIVATE_ORIGINS` 以 default-empty 显式传入开发和生产 Compose。浏览器 workflow spec 已建立 deterministic mock；当前本机 Chrome 运行中 provider panel 空载问题在两次同类修复后仍复现，按协作约定停止第三轮，保留给控制器的新任务诊断。Docker build/up、隔离 browser acceptance 和真实 provider smoke 仍由交付控制器执行。

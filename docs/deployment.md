@@ -216,6 +216,18 @@ deploy:
 
 ## PostgreSQL 可选配置
 
+## 多服务商 AI 升级、迁移与回滚
+
+支持的账号 provider 为 Ollama、OpenAI、Gemini、DeepSeek、Moonshot/Kimi、Qwen 和自定义 OpenAI-compatible。服务器 Ollama 配置仍由管理员管理；账号配置决定当前 provider、模型和账号级启停状态。诊断接口 `test`、`models`、`generate-test` 分别用于连接、模型枚举和需确认的最小生成，最后一项可能产生费用。AI 关闭或 provider 不可用时，登录、藏书、检索、借阅、阅读、统计、备份等非 AI route 必须继续工作。
+
+生产安装或升级时先备份数据库、uploads 和 `.env`，保持 `APP_SECRET_KEY` 不变，再执行 `docker compose -f docker-compose.prod.yml pull`、`docker compose -f docker-compose.prod.yml up -d` 和 `docker compose -f docker-compose.prod.yml exec backend alembic upgrade head`。源码部署使用对应的 build/up 命令。revision `0003` 会将 `0002` 账号配置中的云 API Key 加密迁移到 `user_ai_provider_credentials`，并从 provider JSON 删除明文。密钥丢失没有明文恢复路径，只能恢复匹配密钥或逐账号重新录入凭据。
+
+`AI_PROVIDER_ALLOWED_PRIVATE_ORIGINS` 由开发和生产 Compose 显式传入，默认严格为空。仅当受控私网 gateway/mock 确有需要时，填写逗号分隔的完整 Origin（`scheme://host[:port]`）；匹配是 exact-Origin，不支持路径、通配符、CIDR 或仅 hostname。该变量属于服务器安全边界，不能由账号或浏览器修改。
+
+provider 错误中，disabled 表示账号 AI/provider 停用，invalid configuration 表示 URL、模型或凭据状态无效，auth 表示上游拒绝凭据，rate limit/quota 表示限流或额度不足，timeout 表示连接/读取超时，model 表示模型错误，invalid response 表示响应无法安全解析，upstream 表示其他脱敏上游故障。错误不会包含 Key、请求头、Prompt 或响应正文。
+
+回滚应用前先确认目标版本支持当前 schema。`0003 -> 0002` 在存在加密凭据时会拒绝降级，避免把 Key 恢复成明文；优先保留数据库并回到兼容应用版本。若必须回滚，恢复升级前数据库备份与同一份 `.env`，再启动旧版本。禁止手工把密文或解密后的 Key 写回 `provider_configs`。
+
 启动 PostgreSQL profile：
 
 ```bash

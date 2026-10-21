@@ -7,16 +7,25 @@ import math
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
 from types import CoroutineType, FrameType, FunctionType, ModuleType, SimpleNamespace, TracebackType
 from typing import Any
 
 import httpx
 import pytest
+import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
+from app.api.deps import auth_required
 from app.core.errors import ApiError
 from app.core.config import Settings, get_settings
+from app.core.security import create_access_token
+from app.db.session import get_db
+from app.main import app as fastapi_app
 from app.models import AITask, Book, UserAISetting
 from app.models.user import User
 from app.schemas.ai import (
@@ -46,6 +55,7 @@ from app.services.ai_providers.base import (
     OllamaProviderRuntimeOptions,
 )
 from app.services.ai_task_service import create_ai_task, sanitize_ai_task_input
+from app.services.credential_crypto import CredentialCipher
 from app.services.ollama_client import (
     OllamaAccessDeniedError,
     OllamaClient,
@@ -2772,3 +2782,173 @@ def test_natural_search_records_failure_on_schema_error(
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "AI_RESPONSE_INVALID"
     assert db.query(AITask).one().status == "failed"
+
+
+def test_revision_0002_upgrade_reloads_encrypted_provider_switch_and_ai_toggle_workflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch plaintext migration, stale reloads, broken switching, and AI coupling."""
+    database_url = f"sqlite:///{tmp_path / 'ai-workflow.sqlite3'}"
+    secret_key = "integration-workflow-stable-secret-key-0001"
+    legacy_key = "synthetic-cloud-key-never-log"
+    backend_dir = Path(__file__).resolve().parents[2]
+    alembic_config = Config(str(backend_dir / "alembic" / "alembic.ini"))
+    alembic_config.set_main_option("script_location", str(backend_dir / "alembic"))
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    monkeypatch.setenv("APP_SECRET_KEY", secret_key)
+    monkeypatch.setenv("HOME_LIBRARY_SECRET_KEY", secret_key)
+    monkeypatch.setenv("OLLAMA_ENABLED", "true")
+    get_settings.cache_clear()
+
+    command.upgrade(alembic_config, "0002")
+    engine = sa.create_engine(database_url, connect_args={"check_same_thread": False})
+    now = datetime.now(timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO users (
+                    id, username, password_hash, display_name, role, status,
+                    created_at, updated_at
+                ) VALUES (
+                    1, 'workflow-user', 'unused', 'Workflow User', 'member',
+                    'active', :now, :now
+                )
+                """
+            ),
+            {"now": now},
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO user_ai_settings (
+                    id, user_id, active_provider, default_model,
+                    provider_configs, created_at, updated_at
+                ) VALUES (
+                    1, 1, 'ollama', 'qwen-test', :configs, :now, :now
+                )
+                """
+            ),
+            {
+                "configs": json.dumps(
+                    {
+                        "ollama": {
+                            "enabled": True,
+                            "base_url": "http://localhost:11434",
+                            "api_key": "",
+                            "default_model": "qwen-test",
+                            "note": "migration ollama",
+                        },
+                        "openai": {
+                            "enabled": True,
+                            "base_url": "https://api.openai.com/v1",
+                            "api_key": legacy_key,
+                            "default_model": "gpt-test",
+                            "note": "migration cloud",
+                        },
+                    }
+                ),
+                "now": now,
+            },
+        )
+
+    command.upgrade(alembic_config, "head")
+    with engine.connect() as connection:
+        stored_configs = connection.scalar(
+            sa.text("SELECT provider_configs FROM user_ai_settings WHERE user_id = 1")
+        )
+        ciphertext = connection.scalar(
+            sa.text(
+                """
+                SELECT api_key_ciphertext FROM user_ai_provider_credentials
+                WHERE user_id = 1 AND provider = 'openai'
+                """
+            )
+        )
+    assert legacy_key not in stored_configs
+    assert legacy_key not in ciphertext
+    assert CredentialCipher.from_secret_key(
+        secret_key,
+        purpose=b"home-library:user-ai-provider-key:v1",
+    ).decrypt(ciphertext) == legacy_key
+
+    session_factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+    def override_get_db():
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    async def override_auth_required() -> None:
+        return None
+
+    fastapi_app.dependency_overrides[get_db] = override_get_db
+    fastapi_app.dependency_overrides[auth_required] = override_auth_required
+    headers = {"Authorization": f"Bearer {create_access_token(1)}"}
+    try:
+        with TestClient(fastapi_app, raise_server_exceptions=False) as workflow_client:
+            migrated = workflow_client.get("/api/ai/config", headers=headers)
+            assert migrated.status_code == 200
+            migrated_body = migrated.json()
+            assert migrated_body["active_provider"] == "ollama"
+            openai = next(item for item in migrated_body["providers"] if item["provider"] == "openai")
+            assert openai["credential_state"] == "configured"
+            assert legacy_key not in migrated.text
+
+            provider_payloads = [
+                {
+                    "provider": item["provider"],
+                    "enabled": item["enabled"],
+                    "base_url": item["base_url"],
+                    "default_model": item["default_model"],
+                    "note": item["note"],
+                }
+                for item in migrated_body["providers"]
+            ]
+            switched = workflow_client.put(
+                "/api/ai/config",
+                headers=headers,
+                json={
+                    "ai_enabled": True,
+                    "active_provider": "openai",
+                    "default_model": "gpt-test",
+                    "providers": provider_payloads,
+                },
+            )
+            assert switched.status_code == 200
+            reloaded = workflow_client.get("/api/ai/config", headers=headers).json()
+            assert reloaded["active_provider"] == "openai"
+
+            disabled = workflow_client.put(
+                "/api/ai/config",
+                headers=headers,
+                json={
+                    "ai_enabled": False,
+                    "active_provider": "openai",
+                    "default_model": "gpt-test",
+                    "providers": provider_payloads,
+                },
+            )
+            assert disabled.status_code == 200
+            assert workflow_client.get("/api/ai/health", headers=headers).status_code == 503
+            assert workflow_client.get("/api/books", headers=headers).status_code == 200
+
+            enabled = workflow_client.put(
+                "/api/ai/config",
+                headers=headers,
+                json={
+                    "ai_enabled": True,
+                    "active_provider": "openai",
+                    "default_model": "gpt-test",
+                    "providers": provider_payloads,
+                },
+            )
+            assert enabled.status_code == 200
+            assert enabled.json()["active_provider"] == "openai"
+    finally:
+        fastapi_app.dependency_overrides.clear()
+        engine.dispose()
+        get_settings.cache_clear()

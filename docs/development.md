@@ -148,6 +148,21 @@ OLLAMA_DEFAULT_MODEL=qwen3.5:4b
 
 ## 同时运行前后端
 
+## 多服务商 AI 开发验证
+
+账号 provider 支持 `ollama`、`openai`、`gemini`、`deepseek`、`moonshot`（界面显示 Kimi）、`qwen` 和 `custom`。`GET/PUT /api/ai/config` 管理持久配置；`POST /api/ai/providers/{provider}/test`、`models`、`generate-test` 分别验证连接、模型列表和最小生成。诊断可携带未保存草稿，但不得把草稿 Key 写入数据库、缓存、fixture 输出或日志。
+
+本地和 CI 浏览器测试使用 API mock，不连接真实 provider：
+
+```bash
+cd frontend
+npm run test:e2e -- frontend/e2e/settings-ai-providers.spec.ts
+```
+
+若机器只安装系统 Chrome，可设置 `E2E_BROWSER_CHANNEL=chrome`。完整本地门禁为后端 `.venv/bin/pytest`，前端 `npm test && npm run typecheck && npm run build`，`bash scripts/tests/test-prod-compose-security-env.sh`，以及开发/生产两份 `docker compose ... config --quiet`。
+
+私网 mock 只有在明确需要时才设置 `AI_PROVIDER_ALLOWED_PRIVATE_ORIGINS`。值为逗号分隔的精确 Origin，例如 `http://127.0.0.1:9080`；默认空，不接受路径、通配符、CIDR 或仅 hostname。生产默认必须继续为空。
+
 推荐打开两个终端窗口分别运行后端和前端，或使用以下一行命令（需要 `npm-run-all` 或 `concurrently`）：
 
 ```bash

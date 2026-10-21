@@ -512,7 +512,11 @@ UTF-8 编码最大 64 KiB。
 
 PUT/DELETE 成功后才失效全部健康缓存。并发版本冲突（包含首次创建竞争）返回 HTTP 409 / `AI_SERVER_CONFIG_CONFLICT`，提示“服务器 AI 配置已被其他请求修改，请刷新后重试”；失败方不修改配置、凭据或审计。数据库写入故障返回 HTTP 500 / `AI_SERVER_CONFIG_WRITE_FAILED` 与稳定中文提示，不包含 SQL、参数、明文或密文。升级密码按 UTF-8 bytes 恒定时间比较，支持 Unicode；错误或无法编码的输入稳定返回 403。
 
-`GET/PUT /api/ai/config` 仍管理登录账号偏好，不能改变服务器凭据和安全参数。
+`GET/PUT /api/ai/config` 管理登录账号的 `ai_enabled`、`active_provider`、默认模型和 provider 列表，不能改变服务器凭据和安全参数。provider 标识为 `ollama`、`openai`、`gemini`、`deepseek`、`moonshot`、`qwen`、`custom`。读取只返回 `has_api_key` 与 `credential_state=missing|configured|unusable`；Key 留空表示保留，`clear_api_key=true` 表示清除。AI 开启时 active provider 必须已启用且配置有效；关闭后保留选择，重新开启继续使用。保存会失效账号 provider health/model cache，使下一请求从数据库重载。
+
+配置层级为服务器 Ollama 安全边界与默认值、账号 provider 持久配置、单次诊断草稿。账号/草稿不能修改 TLS、超时、Cloudflare Access、可信 Origin 或 `AI_PROVIDER_ALLOWED_PRIVATE_ORIGINS`。
+
+Provider 诊断接口为 `POST /api/ai/providers/{provider}/test`、`POST /api/ai/providers/{provider}/models` 和 `POST /api/ai/providers/{provider}/generate-test`。三者均要求登录，可使用保存配置或临时 `base_url`、`model`、`api_key` 草稿；草稿不持久化。`test` 只验证连接，`models` 返回模型及 capability，不支持枚举时返回稳定 unsupported 说明，`generate-test` 执行最小生成且前端必须二次确认。响应只包含安全 Base URL、有效模型、凭据状态和脱敏错误。
 
 ### GET /api/ai/models
 
