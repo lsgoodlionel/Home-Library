@@ -516,6 +516,231 @@ def test_business_route_audit_failure_drops_sensitive_locals(
     )
 
 
+@pytest.mark.parametrize("provider", ["openai", "ollama"])
+def test_business_route_cancellation_detaches_sensitive_exception_graph(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    cloud_secret = "cloud-credential-sensitive-marker"
+    access_id = "ollama-access-id-sensitive-marker"
+    access_secret = "ollama-access-secret-sensitive-marker"
+    if provider == "openai":
+        runtime = AIProviderRuntime(
+            provider="openai",
+            enabled=True,
+            base_url="https://openai.example.test/v1",
+            default_model="provider-model",
+            credential_state="configured",
+            credential=cloud_secret,
+        )
+    else:
+        runtime = AIProviderRuntime(
+            provider="ollama",
+            enabled=True,
+            base_url="https://ollama.example.test",
+            default_model="provider-model",
+            credential_state="configured",
+            ollama=OllamaProviderRuntimeOptions(
+                trusted_base_url="https://ollama.example.test",
+                access_client_id=access_id,
+                access_client_secret=access_secret,
+                uses_access=True,
+            ),
+        )
+
+    class CancellingClient:
+        def __init__(self, configured_runtime: AIProviderRuntime) -> None:
+            self.runtime = configured_runtime
+            self.raw_response = "raw-result-sensitive-marker"
+
+        async def generate_json(self, **kwargs: Any) -> None:
+            raise asyncio.CancelledError("provider-cancel-sensitive-marker")
+
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
+        lambda db, user: runtime,
+    )
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.create_ai_provider_client",
+        CancellingClient,
+    )
+    monkeypatch.setattr(
+        ai_routes,
+        "load_prompt_template",
+        lambda name: "full-prompt-sensitive-marker {query}",
+    )
+    monkeypatch.setattr(
+        ai_routes,
+        "_record_provider_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("cancelled operation must not be audited as completed")
+        ),
+    )
+
+    class FakeDB:
+        def get_bind(self) -> None:
+            return None
+
+    async def observe_cancellation() -> BaseException:
+        try:
+            await ai_routes.natural_search(
+                NaturalSearchRequest(query="payload-sensitive-marker"),
+                FakeDB(),
+                SimpleNamespace(id=7),
+            )
+        except asyncio.CancelledError as error:
+            return error
+        raise AssertionError("provider cancellation was not preserved")
+
+    error = asyncio.run(observe_cancellation())
+
+    _assert_route_exception_graph_excludes(
+        error,
+        cloud_secret,
+        access_id,
+        access_secret,
+        "full-prompt-sensitive-marker",
+        "payload-sensitive-marker",
+        "raw-result-sensitive-marker",
+        "provider-cancel-sensitive-marker",
+        forbidden_types=(AIProviderRuntime, CancellingClient),
+    )
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_code", "expected_category"),
+    [
+        ("template", "AI_RESPONSE_INVALID", "invalid_response"),
+        ("categories", "AI_UPSTREAM_ERROR", "upstream"),
+    ],
+)
+def test_snapshot_stage_failure_is_safely_audited(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    expected_code: str,
+    expected_category: str,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    runtime = AIProviderRuntime(
+        provider="openai",
+        enabled=True,
+        base_url="https://openai.example.test/v1",
+        default_model="provider-model",
+        credential_state="configured",
+        credential="snapshot-credential-sensitive-marker",
+    )
+    audit_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
+        lambda db, user: runtime,
+    )
+    monkeypatch.setattr(
+        ai_routes,
+        "create_ai_task",
+        lambda db, **kwargs: audit_calls.append(kwargs),
+    )
+
+    if stage == "template":
+        monkeypatch.setattr(
+            ai_routes,
+            "load_prompt_template",
+            lambda name: (_ for _ in ()).throw(ValueError("template-sensitive-marker")),
+        )
+        route = ai_routes.natural_search
+        payload = NaturalSearchRequest(query="payload-sensitive-marker")
+        task_type = "natural_search"
+    else:
+        monkeypatch.setattr(
+            ai_routes,
+            "load_prompt_template",
+            lambda name: "{title} {author} {publisher} {summary} {categories}",
+        )
+        monkeypatch.setattr(
+            ai_routes,
+            "_format_categories_for_prompt",
+            lambda db: (_ for _ in ()).throw(RuntimeError("categories-sensitive-marker")),
+        )
+        route = ai_routes.classify_book
+        payload = ClassifyBookRequest(title="payload-sensitive-marker")
+        task_type = "classify_book"
+
+    class FakeDB:
+        def get_bind(self) -> None:
+            return None
+
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(route(payload, FakeDB(), SimpleNamespace(id=7)))
+
+    assert caught.value.code == expected_code
+    assert audit_calls == [
+        {
+            "task_type": task_type,
+            "model": "provider-model",
+            "input_data": {"provider": "openai"},
+            "status": "failed",
+            "error_message": expected_category,
+            "created_by": 7,
+        }
+    ]
+
+
+def test_snapshot_audit_failure_preserves_original_safe_error_and_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.routes import ai as ai_routes
+
+    runtime = AIProviderRuntime(
+        provider="openai",
+        enabled=True,
+        base_url="https://openai.example.test/v1",
+        default_model="provider-model",
+        credential_state="configured",
+        credential="snapshot-credential-sensitive-marker",
+    )
+    audit_attempts: list[str] = []
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
+        lambda db, user: runtime,
+    )
+    monkeypatch.setattr(
+        ai_routes,
+        "load_prompt_template",
+        lambda name: (_ for _ in ()).throw(ValueError("template-sensitive-marker")),
+    )
+
+    def fail_audit(db: object, **kwargs: Any) -> None:
+        audit_attempts.append(kwargs["task_type"])
+        raise RuntimeError("audit-sensitive-marker")
+
+    monkeypatch.setattr(ai_routes, "create_ai_task", fail_audit)
+
+    class FakeDB:
+        def get_bind(self) -> None:
+            return None
+
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(
+            ai_routes.natural_search(
+                NaturalSearchRequest(query="payload-sensitive-marker"),
+                FakeDB(),
+                SimpleNamespace(id=7),
+            )
+        )
+
+    assert audit_attempts == ["natural_search"]
+    assert caught.value.code == "AI_RESPONSE_INVALID"
+    _assert_route_exception_graph_excludes(
+        caught.value,
+        "snapshot-credential-sensitive-marker",
+        "template-sensitive-marker",
+        "payload-sensitive-marker",
+        "audit-sensitive-marker",
+    )
+
+
 @pytest.mark.parametrize(("generate", "probe_count"), [(False, 3), (True, 4)])
 def test_health_probes_run_concurrently_within_one_backend_timeout(
     monkeypatch: pytest.MonkeyPatch,
@@ -2115,13 +2340,26 @@ def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
     client: TestClient,
     member_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
+    enabled_ollama_runtime: None,
 ) -> None:
     from app.api.routes import ai as ai_routes
+
+    del enabled_ollama_runtime
 
     sync_threads: list[int] = []
     event_loop_threads: list[int] = []
     original_prepare = ai_routes._prepare_business_task_snapshot
     original_record = ai_routes._record_provider_task
+    runtime = AIProviderRuntime(
+        provider="ollama",
+        enabled=True,
+        base_url="https://ollama.example.test",
+        default_model="qwen3:8b",
+        credential_state="missing",
+        ollama=OllamaProviderRuntimeOptions(
+            trusted_base_url="https://ollama.example.test",
+        ),
+    )
 
     def track_sync(callable_):
         def wrapper(*args, **kwargs):
@@ -2153,6 +2391,10 @@ def test_ai_route_runs_sync_db_and_file_work_outside_event_loop(
         track_sync(original_prepare),
     )
     monkeypatch.setattr(ai_routes, "_record_provider_task", track_sync(original_record))
+    monkeypatch.setattr(
+        "app.services.ai_provider_runtime.resolve_ai_provider_runtime",
+        lambda db, user: runtime,
+    )
     monkeypatch.setattr(
         "app.services.ai_provider_runtime.create_ai_provider_client",
         ThreadTrackingClient,
@@ -2240,7 +2482,7 @@ def test_classify_book_accepts_valid_model_json(
     assert task.task_type == "classify_book"
     assert task.status == "success"
     assert json.loads(task.input_data) == {"provider": "ollama"}
-    assert task.output_data is None
+    assert json.loads(task.output_data) == data
 
 
 def test_classify_book_rejects_invalid_model_json(

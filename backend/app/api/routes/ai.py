@@ -88,6 +88,14 @@ _HEALTH_CANCELLED = _SafeHealthCancellation()
 
 
 @dataclass(frozen=True, slots=True)
+class _SafeProviderCancellation:
+    pass
+
+
+_PROVIDER_CANCELLED = _SafeProviderCancellation()
+
+
+@dataclass(frozen=True, slots=True)
 class _BusinessTaskSnapshot:
     runtime: AIProviderRuntime
     user_id: int
@@ -269,43 +277,72 @@ def _prepare_business_task_snapshot(
     *,
     include_categories: bool = False,
 ) -> _BusinessTaskSnapshot | _BusinessSnapshotFailure:
+    runtime: AIProviderRuntime | None = None
+    audit_sessions: sessionmaker[Session] | None = None
+    provider = "ollama"
+    model = requested_model or ""
     try:
         runtime = runtime_service.resolve_ai_provider_runtime(db, user)
+        provider = runtime.provider
+        model = runtime.default_model
         if requested_model is not None and requested_model != runtime.default_model:
             raise AIProviderInvalidConfigurationError() from None
-    except Exception as exc:
-        safe_error = map_provider_exception(exc)
-        setting = db.query(UserAISetting).filter_by(user_id=user.id).first()
-        if setting is None:
-            provider = "ollama"
-            model = get_server_ollama_runtime_config(db).default_model
-        else:
-            provider = setting.active_provider
-            model = setting.default_model
-        create_ai_task(
-            db,
-            task_type=task_type,
-            model=model,
-            input_data={"provider": provider},
-            status="failed",
-            error_message=safe_error.category,
-            created_by=user.id,
-        )
-        exc.__traceback__ = None
-        exc.__cause__ = None
-        exc.__context__ = None
-        return _BusinessSnapshotFailure(safe_error)
-    return _BusinessTaskSnapshot(
-        runtime=runtime,
-        user_id=user.id,
-        audit_sessions=sessionmaker(
+        audit_sessions = sessionmaker(
             bind=db.get_bind(),
             autocommit=False,
             autoflush=False,
             expire_on_commit=False,
-        ),
-        template=load_prompt_template(template_name),
-        categories=_format_categories_for_prompt(db) if include_categories else "",
+        )
+        template = load_prompt_template(template_name)
+        categories = _format_categories_for_prompt(db) if include_categories else ""
+    except Exception as exc:
+        safe_error = map_provider_exception(exc)
+        if runtime is None:
+            try:
+                setting = db.query(UserAISetting).filter_by(user_id=user.id).first()
+                if setting is None:
+                    model = get_server_ollama_runtime_config(db).default_model
+                else:
+                    provider = setting.active_provider
+                    model = setting.default_model
+            except Exception as identity_exc:
+                identity_exc.__traceback__ = None
+                identity_exc.__cause__ = None
+                identity_exc.__context__ = None
+        audit_db = audit_sessions() if audit_sessions is not None else db
+        try:
+            create_ai_task(
+                audit_db,
+                task_type=task_type,
+                model=model,
+                input_data={"provider": provider},
+                status="failed",
+                error_message=safe_error.category,
+                created_by=user.id,
+            )
+        except Exception as audit_exc:
+            audit_exc.__traceback__ = None
+            audit_exc.__cause__ = None
+            audit_exc.__context__ = None
+        finally:
+            if audit_db is not db:
+                try:
+                    audit_db.close()
+                except Exception as close_exc:
+                    close_exc.__traceback__ = None
+                    close_exc.__cause__ = None
+                    close_exc.__context__ = None
+        exc.__traceback__ = None
+        exc.__cause__ = None
+        exc.__context__ = None
+        del runtime
+        return _BusinessSnapshotFailure(safe_error)
+    return _BusinessTaskSnapshot(
+        runtime=runtime,
+        user_id=user.id,
+        audit_sessions=audit_sessions,
+        template=template,
+        categories=categories,
     )
 
 
@@ -513,6 +550,7 @@ def _record_provider_task(
     provider: str,
     model: str,
     status: str,
+    output_data: dict[str, Any] | None,
     error_message: str | None,
     created_by: int,
 ) -> None:
@@ -524,6 +562,7 @@ def _record_provider_task(
             model=model,
             input_data={"provider": provider},
             status=status,
+            output_data=output_data,
             error_message=error_message,
             created_by=created_by,
         )
@@ -537,7 +576,7 @@ async def _run_provider_json_task(
     prompt: str,
     response_model: type[BaseModel],
     snapshot: _BusinessTaskSnapshot,
-) -> BaseModel | _SafeApiFailure:
+) -> BaseModel | _SafeApiFailure | _SafeProviderCancellation:
     runtime = snapshot.runtime
     model = runtime.default_model
     provider = runtime.provider
@@ -547,6 +586,8 @@ async def _run_provider_json_task(
     api_error: ApiError | None = None
     error_category: str | None = None
     result: BaseModel | None = None
+    output_data: dict[str, Any] | None = None
+    cancelled = False
     try:
         client = runtime_service.create_ai_provider_client(runtime)
         result = await run_provider_operation(
@@ -556,6 +597,12 @@ async def _run_provider_json_task(
                 model=model,
             )
         )
+        output_data = result.model_dump(mode="json")
+    except asyncio.CancelledError as exc:
+        exc.__traceback__ = None
+        exc.__cause__ = None
+        exc.__context__ = None
+        cancelled = True
     except Exception as exc:
         from app.api.routes.ai_providers import _provider_api_error
 
@@ -566,6 +613,10 @@ async def _run_provider_json_task(
         exc.__cause__ = None
         exc.__context__ = None
 
+    if cancelled:
+        del client, prompt, response_model, runtime, snapshot, audit_sessions, result, output_data
+        return _PROVIDER_CANCELLED
+
     try:
         await run_in_threadpool(
             _record_provider_task,
@@ -574,6 +625,7 @@ async def _run_provider_json_task(
             provider=provider,
             model=model,
             status="failed" if api_error is not None else "success",
+            output_data=output_data,
             error_message=error_category,
             created_by=user_id,
         )
@@ -587,11 +639,15 @@ async def _run_provider_json_task(
         exc.__context__ = None
 
     if api_error is not None:
-        del client, prompt, response_model, runtime, snapshot, audit_sessions, result
+        del client, prompt, response_model, runtime, snapshot, audit_sessions, result, output_data
         return _SafeApiFailure(api_error)
     if result is None:
         return _SafeApiFailure(ApiError("AI_UPSTREAM_ERROR", "上游 AI 服务异常", 502))
     return result
+
+
+def _raise_provider_task_cancelled() -> None:
+    raise asyncio.CancelledError() from None
 
 
 @router.get("/health", response_model=AIProviderStatusResponse)
@@ -734,6 +790,9 @@ async def classify_book(
         response_model=ClassifyBookResponse,
         snapshot=snapshot,
     )
+    if outcome is _PROVIDER_CANCELLED:
+        del snapshot, prompt
+        _raise_provider_task_cancelled()
     if isinstance(outcome, _SafeApiFailure):
         del snapshot, prompt
         _raise_api_error(outcome.error)
@@ -771,6 +830,9 @@ async def generate_tags(
         response_model=GenerateTagsResponse,
         snapshot=snapshot,
     )
+    if outcome is _PROVIDER_CANCELLED:
+        del snapshot, prompt
+        _raise_provider_task_cancelled()
     if isinstance(outcome, _SafeApiFailure):
         del snapshot, prompt
         _raise_api_error(outcome.error)
@@ -805,6 +867,9 @@ async def recommend_book_content(
         response_model=RecommendBookContentResponse,
         snapshot=snapshot,
     )
+    if outcome is _PROVIDER_CANCELLED:
+        del snapshot, prompt
+        _raise_provider_task_cancelled()
     if isinstance(outcome, _SafeApiFailure):
         del snapshot, prompt
         _raise_api_error(outcome.error)
@@ -841,6 +906,9 @@ async def summarize_book(
         response_model=SummarizeBookResponse,
         snapshot=snapshot,
     )
+    if outcome is _PROVIDER_CANCELLED:
+        del snapshot, prompt
+        _raise_provider_task_cancelled()
     if isinstance(outcome, _SafeApiFailure):
         del snapshot, prompt
         _raise_api_error(outcome.error)
@@ -874,6 +942,9 @@ async def detect_duplicate(
         response_model=DetectDuplicateResponse,
         snapshot=snapshot,
     )
+    if outcome is _PROVIDER_CANCELLED:
+        del snapshot, prompt
+        _raise_provider_task_cancelled()
     if isinstance(outcome, _SafeApiFailure):
         del snapshot, prompt
         _raise_api_error(outcome.error)
@@ -904,6 +975,9 @@ async def natural_search(
         response_model=NaturalSearchResponse,
         snapshot=snapshot,
     )
+    if outcome is _PROVIDER_CANCELLED:
+        del snapshot, prompt
+        _raise_provider_task_cancelled()
     if isinstance(outcome, _SafeApiFailure):
         del snapshot, prompt
         _raise_api_error(outcome.error)

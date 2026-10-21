@@ -261,9 +261,43 @@ def test_business_routes_use_active_provider_model_prompt_and_safe_audit(
     assert task is not None
     assert task.model == "provider-model"
     assert json.loads(task.input_data) == {"provider": provider}
-    assert task.output_data is None
+    assert json.loads(task.output_data) == case.response
     assert "test-only-key" not in repr(task.__dict__)
     assert prompt not in repr(task.__dict__)
+
+
+def test_business_route_persists_only_bounded_validated_output(
+    client: TestClient,
+    member_headers: dict[str, str],
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validated_summary = "中" * 100_000
+    _install_provider(
+        monkeypatch,
+        "openai",
+        {
+            "summary": validated_summary,
+            "author_intro": "",
+            "model": "provider-model",
+        },
+    )
+
+    response = client.post(
+        "/api/ai/summarize-book",
+        headers=member_headers,
+        json={"title": "乡土中国"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["summary"] == validated_summary
+    task = db.query(AITask).order_by(AITask.id.desc()).first()
+    assert task is not None
+    assert task.output_data is not None
+    assert len(task.output_data.encode("utf-8")) <= 65_536
+    decoded = json.loads(task.output_data)
+    assert decoded["model"] == "provider-model"
+    assert set(decoded) <= {"summary", "author_intro", "model"}
 
 
 def test_disabled_active_provider_fails_before_client_creation(
