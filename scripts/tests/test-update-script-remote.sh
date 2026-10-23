@@ -17,6 +17,9 @@ cat > "$tmp_dir/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$DOCKER_LOG"
+case "$*" in
+  *"ps backend"*) printf 'backend running healthy\n' ;;
+esac
 exit 0
 SH
 chmod +x "$tmp_dir/bin/docker"
@@ -44,6 +47,10 @@ grep -Fqx \
 
 if run_remote_update --install-dir >/dev/null 2>&1; then
   fail "missing --install-dir value must be rejected"
+fi
+
+if run_remote_update --install-dir "$tmp_dir/custom-install" --source >/dev/null 2>&1; then
+  fail "source updates must reject an installation without Git metadata"
 fi
 
 echo "remote update command tests passed"
