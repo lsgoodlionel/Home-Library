@@ -6,6 +6,7 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
 cp "$repo_root/docker-compose.prod.yml" "$tmp_dir/docker-compose.prod.yml"
+cp "$repo_root/docker-compose.local.yml" "$tmp_dir/docker-compose.local.yml"
 : > "$tmp_dir/.env"
 
 rendered="$tmp_dir/rendered.yml"
@@ -28,6 +29,26 @@ assert backend["environment"]["SERVER_CONFIG_TRUSTED_PROXY_IPS"] == "172.30.81.3
 assert frontend["environment"]["TRUSTED_HTTPS_PROXY_IP"] == "192.0.2.19"
 assert frontend["networks"]["default"]["ipv4_address"] == "172.30.81.3"
 assert config["networks"]["default"]["ipam"]["config"][0]["subnet"] == "172.30.81.0/24"
+assert backend["environment"].get("SERVER_CONFIG_ALLOW_LOOPBACK_PROXY") is None
+PY
+
+LOCAL_HTTP_PORT=18080 docker compose \
+  -f "$tmp_dir/docker-compose.prod.yml" \
+  -f "$tmp_dir/docker-compose.local.yml" \
+  config --format json > "$rendered"
+python3 - "$rendered" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text())
+backend = config["services"]["backend"]["environment"]
+frontend = config["services"]["frontend"]["ports"]
+assert backend["APP_ENV"] == "development"
+assert backend["SERVER_CONFIG_ALLOW_LOOPBACK_PROXY"] == "true"
+assert len(frontend) == 1
+assert frontend[0]["host_ip"] == "127.0.0.1"
+assert frontend[0]["published"] == "18080"
 PY
 
 nginx_config="$repo_root/docker/nginx.conf"

@@ -141,8 +141,17 @@ def require_secure_server_config_transport(request: Request) -> None:
 
     direct_address = _direct_client_address(request)
     if direct_address is not None and _is_configured_trusted_proxy(direct_address):
+        settings = get_settings()
         forwarded_proto = request.headers.get("x-forwarded-proto", "")
         if forwarded_proto.strip().lower() == "https":
+            return
+        if (
+            settings.server_config_allow_loopback_proxy
+            and settings.environment.lower() in {"development", "test"}
+            and forwarded_proto.strip().lower() == "http"
+            and _is_loopback_request_host(request.headers.get("host", ""))
+            and _is_loopback_browser_source(request.headers.get("origin") or request.headers.get("referer"))
+        ):
             return
 
     if direct_address is not None and direct_address.is_loopback:
@@ -169,6 +178,19 @@ def _is_configured_trusted_proxy(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> bool:
     return str(address) in get_settings().server_config_trusted_proxy_ips
+
+
+def _is_loopback_request_host(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        parsed = urlsplit(f"//{value}")
+        if parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment:
+            return False
+        parsed.port
+    except ValueError:
+        return False
+    return _is_loopback_browser_source(f"http://{value}")
 
 
 def _is_loopback_browser_source(value: str | None) -> bool:

@@ -314,4 +314,6 @@ Lucky 等外部 HTTPS 终止代理须覆盖传入的 `X-Forwarded-Proto` 为真�
 
 部署后分别确认：公网 HTTPS 登录后可双重认证保存；经同一入口的明文 HTTP 即使携带 `X-Forwarded-Proto: https` 也被拒绝；前端日志中的直接来源 IP 与 `TRUSTED_HTTPS_PROXY_IP` 一致。浏览器地址是 `localhost` 不代表 Docker 内请求来源是回环。
 
+**本机 Docker 测试：** 本机浏览器直接访问生产 Compose 的 HTTP 端口时，Docker/Nginx 会把请求转成容器间通信，后端不再看到回环客户端，因此敏感配置写入会被拒绝。仅在个人机器上叠加 `docker-compose.local.yml`：它强制把前端端口发布到 `127.0.0.1`、将后端标记为 `development`、显式启用可信前端容器的回环请求规则，并挂载当前后端源码。运行时使用相同的 Compose 项目名以复用已有数据卷，例如 `docker compose -p home-library -f docker-compose.prod.yml -f docker-compose.local.yml up -d backend frontend`。不要在服务器或局域网共享入口使用此覆盖文件；生产模式即使误设本地开关也拒绝该 HTTP 例外。
+
 生产保持 `verify_tls=true`。受控自签名验收环境可在明确风险确认后临时关闭；本次隔离验收使用回环 HTTPS 端口、独立网络和数据库，不是生产部署模板。只读远程 smoke 读取环境引导参数，不能证明数据库覆盖已正确应用；数据库配置应通过登录后的只读测试/API 验证。没有授权的真实 Cloudflare Service Token 时，报告外部验证未执行。
