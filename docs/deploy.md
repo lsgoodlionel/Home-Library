@@ -227,19 +227,29 @@ A：在应用前部署反向代理，推荐 [Nginx Proxy Manager](https://nginxp
 
 **Linux / macOS / 群晖：**
 ```bash
-git -C "$HOME/home-library" pull --ff-only origin main && \
-  bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh) \
   --install-dir "$HOME/home-library" --version latest
 ```
 
-当前仓库尚无正式 Release/tag；GitHub `main` 验证成功后发布 `latest` 镜像，上述命令会先更新部署配置，再备份数据库、拉取最新镜像并重启。直接通过 `curl` 执行升级脚本时默认安装目录为 `~/home-library`，也可以显式指定：
+GitHub `main` 验证成功后发布 `latest` 镜像。上述命令会先备份数据库，再由更新脚本同步部署配置、拉取最新镜像并重启。直接通过 `curl` 执行升级脚本时默认安装目录为 `~/home-library`，也可以显式指定：
 
 ```bash
 INSTALL_DIR=/opt/home-library
-git -C "$INSTALL_DIR" pull --ff-only origin main && \
-  bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh) \
   --install-dir "$INSTALL_DIR" --version latest
 ```
+
+如果 GitHub `main` 执行过正式历史回退，服务器本地提交可能与新的远端历史分叉。更新脚本会先把原提交保存到 `backup/home-library-update/*` 本地分支，再将部署文件同步到 `origin/main`；未提交的 tracked 修改不会被覆盖，脚本会停止并提示人工处理。
+
+已经部署较新版本、需要精确回退到 `82652b7` 和对应 `0.1.0` 镜像时执行：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh) \
+  --install-dir "$HOME/home-library" \
+  --version 0.1.0
+```
+
+该命令会先备份数据库，把服务器回退前的提交保存在本地备份分支，再同步包含安全回退更新器的 `main` 部署文件，并运行由 `82652b7` 构建的 `0.1.0` 镜像。这样应用代码完成回退，同时磁盘上的更新脚本不会退回旧实现。
 
 **Windows（PowerShell）：**
 ```powershell
@@ -248,8 +258,8 @@ cd $env:USERPROFILE\home-library
 ```
 
 更新流程：
-1. 以 fast-forward 方式拉取最新部署配置
-2. 自动备份数据库（保留最近 7 天）
+1. 自动备份数据库（保留最近 7 天）
+2. 同步最新部署配置；远端历史回退时先保存原提交分支
 3. 拉取指定版本或 `latest` 预构建镜像
 4. 重启服务并等待后端健康检查
 

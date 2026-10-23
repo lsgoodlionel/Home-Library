@@ -135,16 +135,25 @@ irm https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/dep
 ### 手动一键更新
 
 ```bash
-# Linux / macOS / 群晖：更新部署配置并拉取 GitHub main 最新镜像
-git -C "$HOME/home-library" pull --ff-only origin main && \
-  bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh) \
+# Linux / macOS / 群晖：同步部署配置并拉取 GitHub main 最新镜像
+bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh) \
   --install-dir "$HOME/home-library" --version latest
 
 # Windows
 .\scripts\update.ps1
 ```
 
-当前仓库尚无正式 Release/tag；GitHub `main` 验证成功后发布 `latest` 前后端镜像，因此一键安装和上述升级命令默认使用 `latest`。自定义安装目录时，将两处 `$HOME/home-library` 替换为实际路径。升级流程为：拉取最新部署配置 → 备份数据库 → 拉取镜像 → 重启 → 健康检查。
+GitHub `main` 验证成功后发布 `latest` 前后端镜像，因此一键安装和上述升级命令默认使用 `latest`。自定义安装目录时修改 `--install-dir`。升级流程为：备份数据库 → 同步最新部署配置 → 拉取镜像 → 重启 → 健康检查。若 GitHub `main` 因正式回退而发生历史重写，脚本会先把服务器原提交保存到 `backup/home-library-update/*` 本地分支，再同步到新的 `origin/main`；检测到未提交的 tracked 修改时会停止，避免静默覆盖服务器定制。
+
+已升级到较新提交的服务器需要回退到 `82652b7` 对应应用代码时，使用固定镜像版本的一键命令：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh) \
+  --install-dir "$HOME/home-library" \
+  --version 0.1.0
+```
+
+该命令先备份数据库和服务器原 Git 提交，再同步包含安全回退更新器的 `main` 部署文件，最后部署由 `82652b7` 构建的 `0.1.0` 前后端镜像。服务器安装目录保留新版更新脚本，应用运行代码回退到 `82652b7`。
 
 ### 配置自动更新（定时）
 

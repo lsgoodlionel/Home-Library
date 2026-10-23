@@ -128,10 +128,11 @@ fi
 
 # ---------- 拉取 / 更新代码 ----------
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-  info "更新代码..."
-  cd "$INSTALL_DIR"
-  git pull origin main
-  success "代码已更新"
+  info "检测到已有安装，先备份数据库，再由最新更新器同步代码和镜像..."
+  exec bash <(curl -fsSL \
+    "https://raw.githubusercontent.com/lsgoodlionel/Home-Library/main/scripts/update.sh") \
+    --install-dir "$INSTALL_DIR" \
+    --version latest
 else
   info "克隆仓库到 $INSTALL_DIR ..."
   git clone "$REPO_URL" "$INSTALL_DIR"
