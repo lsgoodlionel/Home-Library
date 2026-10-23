@@ -40,6 +40,7 @@ services:
       OLLAMA_CF_ACCESS_CLIENT_ID: ${OLLAMA_CF_ACCESS_CLIENT_ID:-}
       OLLAMA_CF_ACCESS_CLIENT_SECRET: ${OLLAMA_CF_ACCESS_CLIENT_SECRET:-}
       UPGRADE_PASSWORD: ${UPGRADE_PASSWORD:-}
+      SERVER_CONFIG_TRUSTED_PROXY_IPS: ${HOME_LIBRARY_FRONTEND_IP:-172.30.80.3}
     volumes:
       - db_data:/data
       - uploads:/uploads
@@ -59,6 +60,11 @@ services:
         condition: service_healthy
     ports:
       - "${HTTP_PORT:-80}:80"
+    environment:
+      TRUSTED_HTTPS_PROXY_IP: ${TRUSTED_HTTPS_PROXY_IP:-0.0.0.0}
+    networks:
+      default:
+        ipv4_address: ${HOME_LIBRARY_FRONTEND_IP:-172.30.80.3}
     volumes:
       - uploads:/uploads:ro
     restart: unless-stopped
@@ -96,3 +102,9 @@ volumes:
   backups:
   ollama_data:
   postgres_data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${HOME_LIBRARY_DOCKER_SUBNET:-172.30.80.0/24}

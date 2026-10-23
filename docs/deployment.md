@@ -308,6 +308,10 @@ docker compose exec ollama ollama list
 
 并发保存或恢复遇到 HTTP 409 时，先重新读取服务器配置，再确认本次完整变更；不要自动重发旧配置。数据库故障返回脱敏 500 并尝试回滚，回滚自身失败时使 Session 失效；若底层数据库连接同时无法回滚/失效，需要运维确认事务结果后再重试，不能把失败响应当作已保存。
 
-**Docker HTTPS 代理接入：** 默认 Compose 发布 HTTP 80，不能直接满足远程敏感配置写入要求。部署时让 HTTPS 终止代理向后端传递准确的 `X-Forwarded-Proto: https`，在后端环境 `SERVER_CONFIG_TRUSTED_PROXY_IPS` 中仅登记后端实际看到的代理地址。为该代理分配经网络清单确认不冲突的固定地址，并在 Compose 的用户自定义 network/IPAM 配置中保持一致；不要把整个私有网段或任意客户端加入信任。该环境变量通过现有 `env_file` 传入，生产/测试使用各自地址。若有多级代理，应逐跳核对实际 backend peer 和覆盖头行为；浏览器地址是 `localhost` 不代表 Docker 内请求来源是回环。
+**Docker HTTPS 代理接入：** 默认 Compose 发布 HTTP 80，不能直接满足远程敏感配置写入要求。生产 Compose 使用 `HOME_LIBRARY_DOCKER_SUBNET`（默认 `172.30.80.0/24`）和 `HOME_LIBRARY_FRONTEND_IP`（默认 `172.30.80.3`）固定前端容器地址；部署前检查宿主机路由与现有 Docker 网络，冲突时同时改动这两项，且前端 IP 必须属于指定网段。后端 `SERVER_CONFIG_TRUSTED_PROXY_IPS` 自动设为该精确前端 IP，不能信任整个网段。
+
+Lucky 等外部 HTTPS 终止代理须覆盖传入的 `X-Forwarded-Proto` 为真实浏览器协议；在 `.env` 设置 `TRUSTED_HTTPS_PROXY_IP` 为前端 Nginx 实际看到的代理直接来源 IP。Nginx 仅在来源 IP 精确匹配且转发协议恰为 `https` 时把 HTTPS 标记传给后端，其余请求一律使用本跳实际协议。不要填写浏览器 IP、Docker 网关或任意客户端地址；未设置该值时默认不信任外部代理。若 Lucky 也提供明文入口，必须确保它不会把客户端自带的伪造转发头传给 Nginx。改动 Compose 网络会重建容器网络，部署前先备份数据库并安排短暂维护窗口；保持当前 `HTTP_PORT` 可从 Lucky 到达的绑定地址。
+
+部署后分别确认：公网 HTTPS 登录后可双重认证保存；经同一入口的明文 HTTP 即使携带 `X-Forwarded-Proto: https` 也被拒绝；前端日志中的直接来源 IP 与 `TRUSTED_HTTPS_PROXY_IP` 一致。浏览器地址是 `localhost` 不代表 Docker 内请求来源是回环。
 
 生产保持 `verify_tls=true`。受控自签名验收环境可在明确风险确认后临时关闭；本次隔离验收使用回环 HTTPS 端口、独立网络和数据库，不是生产部署模板。只读远程 smoke 读取环境引导参数，不能证明数据库覆盖已正确应用；数据库配置应通过登录后的只读测试/API 验证。没有授权的真实 Cloudflare Service Token 时，报告外部验证未执行。
