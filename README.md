@@ -249,7 +249,7 @@ ollama pull qwen3.5:4b
 
 连接测试会显示脱敏后的具体故障类别：Access 拒绝、Tunnel/Origin 不可用、连接或读取超时、未收到 HTTP 响应的连接失败、传输失败，或上游 HTTP 状态码。诊断可以包含目标 hostname，但不会显示 Access 凭据、请求头、完整 URL、Prompt 或上游响应正文。后端对 Ollama 请求使用 `Accept-Encoding: identity`，避免 Cloudflare 错误压缩元数据导致模型列表解码失败。
 
-修改全局配置需要管理员当前密码、服务器 `UPGRADE_PASSWORD`，以及 HTTPS 或受控本机请求。生产 Compose 会固定前端容器地址，并让后端仅信任该地址；通过 Lucky 等 HTTPS 代理访问时，还须在 `.env` 设置 `TRUSTED_HTTPS_PROXY_IP` 为 Nginx 看到的代理直接来源 IP，代理必须覆盖真实 `X-Forwarded-Proto`。未配置时明文入口不能保存敏感配置。`APP_SECRET_KEY` 必须稳定且足够强；更换或丢失密钥后旧凭据无法解密，需要重新录入。部署与恢复步骤见 [部署文档](docs/deployment.md#服务器-ai-配置的引导与恢复)。
+修改全局配置需要管理员当前密码、服务器 `UPGRADE_PASSWORD`，以及 HTTPS 或受控本机请求。生产 Compose 会固定前端容器地址，并让后端仅信任该地址；通过 Lucky 等 HTTPS 代理访问时，还须在 `.env` 设置 `TRUSTED_HTTPS_PROXY_IP` 为 Nginx 看到的代理直接来源 IP，代理必须覆盖真实 `X-Forwarded-Proto`。本机 Docker 测试可叠加 `docker-compose.local.yml`，仅在回环端口和 `development` 环境启用可信前端的 HTTP 写入；默认生产配置仍拒绝明文写入。`APP_SECRET_KEY` 必须稳定且足够强；更换或丢失密钥后旧凭据无法解密，需要重新录入。部署与恢复步骤见 [部署文档](docs/deployment.md#服务器-ai-配置的引导与恢复)。
 
 只读远程连通性验证（仅访问 version/tags/ps，不触发生成）。脚本只在
 `OLLAMA_BASE_URL` 与 `OLLAMA_TRUSTED_BASE_URL` 的规范化 Origin 完全一致时发送

@@ -32,6 +32,8 @@ _SECRET_MARKERS = (
 def configured_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     monkeypatch.delenv("HOME_LIBRARY_SERVER_CONFIG_TRUSTED_PROXY_IPS", raising=False)
     monkeypatch.delenv("SERVER_CONFIG_TRUSTED_PROXY_IPS", raising=False)
+    monkeypatch.delenv("HOME_LIBRARY_SERVER_CONFIG_ALLOW_LOOPBACK_PROXY", raising=False)
+    monkeypatch.delenv("SERVER_CONFIG_ALLOW_LOOPBACK_PROXY", raising=False)
     monkeypatch.setenv("APP_SECRET_KEY", _STRONG_APP_KEY)
     monkeypatch.setenv("UPGRADE_PASSWORD", _UPGRADE_PASSWORD)
     monkeypatch.setenv("OLLAMA_ENABLED", "true")
@@ -391,6 +393,95 @@ def test_configured_exact_trusted_proxy_can_assert_forwarded_https(
 
     assert response.status_code == 200
     assert response.json()["default_model"] == "configured-proxy-model"
+
+
+def test_local_loopback_proxy_requires_explicit_opt_in(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME_LIBRARY_SERVER_CONFIG_TRUSTED_PROXY_IPS", "10.0.0.8")
+    get_settings.cache_clear()
+    headers, _ = _auth_headers(db)
+    local_headers = {**headers, "X-Forwarded-Proto": "http"}
+
+    with _transport_client(db, direct_host="10.0.0.8", base_url="http://127.0.0.1") as proxy:
+        response = proxy.put(
+            "/api/system/ai-config",
+            headers={**local_headers, "Origin": "http://127.0.0.1"},
+            json=_valid_update(),
+        )
+
+    assert response.status_code == 400
+    assert db.query(SystemAISetting).count() == 0
+
+
+def test_opted_in_local_loopback_proxy_accepts_only_loopback_browser(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME_LIBRARY_SERVER_CONFIG_TRUSTED_PROXY_IPS", "10.0.0.8")
+    monkeypatch.setenv("HOME_LIBRARY_SERVER_CONFIG_ALLOW_LOOPBACK_PROXY", "true")
+    monkeypatch.setenv("APP_ENV", "development")
+    get_settings.cache_clear()
+    headers, _ = _auth_headers(db)
+    local_headers = {**headers, "X-Forwarded-Proto": "http"}
+
+    with _transport_client(db, direct_host="10.0.0.8", base_url="http://127.0.0.1") as proxy:
+        accepted = proxy.put(
+            "/api/system/ai-config",
+            headers={**local_headers, "Origin": "http://127.0.0.1"},
+            json=_valid_update(default_model="local-model"),
+        )
+        public_origin = proxy.put(
+            "/api/system/ai-config",
+            headers={**local_headers, "Origin": "http://library.test"},
+            json=_valid_update(),
+        )
+        missing_origin = proxy.put(
+            "/api/system/ai-config", headers=local_headers, json=_valid_update()
+        )
+
+    with _transport_client(db, direct_host="10.0.0.9", base_url="http://127.0.0.1") as other_peer:
+        untrusted_peer = other_peer.put(
+            "/api/system/ai-config",
+            headers={**local_headers, "Origin": "http://127.0.0.1"},
+            json=_valid_update(),
+        )
+
+    with _transport_client(db, direct_host="10.0.0.8") as proxy:
+        public_host = proxy.put(
+            "/api/system/ai-config",
+            headers={**local_headers, "Origin": "http://127.0.0.1"},
+            json=_valid_update(),
+        )
+
+    assert accepted.status_code == 200
+    assert accepted.json()["default_model"] == "local-model"
+    assert all(response.status_code == 400 for response in (
+        public_origin, missing_origin, untrusted_peer, public_host,
+    ))
+    assert db.query(SystemConfigAudit).count() == 1
+
+
+def test_production_rejects_local_loopback_proxy_even_if_opted_in(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME_LIBRARY_SERVER_CONFIG_TRUSTED_PROXY_IPS", "10.0.0.8")
+    monkeypatch.setenv("HOME_LIBRARY_SERVER_CONFIG_ALLOW_LOOPBACK_PROXY", "true")
+    monkeypatch.setenv("APP_ENV", "production")
+    get_settings.cache_clear()
+    headers, _ = _auth_headers(db)
+
+    with _transport_client(db, direct_host="10.0.0.8", base_url="http://127.0.0.1") as proxy:
+        response = proxy.put(
+            "/api/system/ai-config",
+            headers={**headers, "X-Forwarded-Proto": "http", "Origin": "http://127.0.0.1"},
+            json=_valid_update(),
+        )
+
+    assert response.status_code == 400
+    assert db.query(SystemAISetting).count() == 0
 
 
 def test_malformed_or_overbroad_trusted_proxy_config_fails_safely(

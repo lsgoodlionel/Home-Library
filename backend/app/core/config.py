@@ -68,6 +68,13 @@ class Settings(BaseSettings):
             "SERVER_CONFIG_TRUSTED_PROXY_IPS",
         ),
     )
+    server_config_allow_loopback_proxy: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "HOME_LIBRARY_SERVER_CONFIG_ALLOW_LOOPBACK_PROXY",
+            "SERVER_CONFIG_ALLOW_LOOPBACK_PROXY",
+        ),
+    )
     database_url: str = Field(
         default="sqlite:///./home_library.db",
         validation_alias=AliasChoices("HOME_LIBRARY_DATABASE_URL", "DATABASE_URL"),
